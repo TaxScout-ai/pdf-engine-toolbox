@@ -140,6 +140,25 @@ class DeskewRequest(BaseModel):
     pages: list[int] | None = Field(default=None, description="Pages to deskew (all if omitted)")
 
 
+class OrientationRequest(BaseModel):
+    """Request for POST /transform/orientation."""
+
+    source_url: str
+    pages: list[int] | None = Field(
+        default=None, description="0-indexed pages to inspect (all if omitted)"
+    )
+    scanned_only: bool = Field(
+        default=True,
+        description="Skip pages with a usable native text layer",
+    )
+    min_confidence: float = Field(
+        default=0.85,
+        ge=0,
+        le=1,
+        description="Minimum classifier confidence required to return a rotation",
+    )
+
+
 class CompressRequest(BaseModel):
     """Request for POST /transform/compress."""
 

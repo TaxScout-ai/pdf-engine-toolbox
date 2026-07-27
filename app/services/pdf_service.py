@@ -303,6 +303,107 @@ def deskew_pages(pdf_bytes: bytes, pages: list[int] | None = None) -> bytes:
     return doc.tobytes(garbage=4, deflate=True)
 
 
+_doc_orientation_model = None
+
+
+def _get_doc_orientation_model():
+    """Return the cached PaddleX cardinal document-orientation classifier."""
+    global _doc_orientation_model
+    if _doc_orientation_model is None:
+        try:
+            from paddlex import create_model
+        except ImportError as exc:
+            raise PdfCorruptError(
+                "Document orientation detection requires paddlex"
+            ) from exc
+        _doc_orientation_model = create_model(
+            model_name="PP-LCNet_x1_0_doc_ori"
+        )
+    return _doc_orientation_model
+
+
+def detect_page_orientations(
+    pdf_bytes: bytes,
+    pages: list[int] | None = None,
+    *,
+    scanned_only: bool = True,
+    min_confidence: float = 0.85,
+) -> dict:
+    """Detect 90/180/270-degree raster rotation before routing and OCR.
+
+    PDF rotation metadata does not describe scans whose pixels were captured
+    sideways. The lightweight PaddleX classifier reads the rendered page and
+    returns the clockwise correction required to make its text upright.
+    Native-text pages are skipped by default because their orientation is
+    already represented by the PDF content/rotation model.
+    """
+    doc = _open_pdf(pdf_bytes)
+    target_pages = pages if pages is not None else list(range(len(doc)))
+    if pages:
+        _validate_pages(doc, pages)
+
+    candidate_pages: list[int] = []
+    images: list[np.ndarray] = []
+    for page_idx in target_pages:
+        page = doc[page_idx]
+        if scanned_only and len(page.get_text("text").strip()) >= 20:
+            continue
+
+        # 108 DPI is enough for the cardinal classifier and keeps the
+        # pre-router control cheap even for long brokerage statements.
+        pix = page.get_pixmap(matrix=fitz.Matrix(1.5, 1.5), alpha=False)
+        image = np.frombuffer(pix.samples, dtype=np.uint8).reshape(
+            pix.height, pix.width, pix.n
+        )
+        candidate_pages.append(page_idx)
+        images.append(image)
+
+    if not images:
+        return {
+            "pages": [],
+            "checked_page_count": 0,
+            "skipped_page_count": len(target_pages),
+        }
+
+    model = _get_doc_orientation_model()
+    predictions = list(model.predict(images, batch_size=min(8, len(images))))
+    rotations: list[dict] = []
+    for page_idx, prediction in zip(candidate_pages, predictions, strict=True):
+        payload = prediction.json if hasattr(prediction, "json") else prediction
+        if callable(payload):
+            payload = payload()
+        if isinstance(payload, dict):
+            payload = payload.get("res", payload)
+        if not isinstance(payload, dict):
+            continue
+
+        labels = payload.get("label_names") or []
+        scores = payload.get("scores") or []
+        try:
+            rotation = int(labels[0])
+            confidence = float(scores[0])
+        except (IndexError, TypeError, ValueError):
+            continue
+
+        if rotation not in (90, 180, 270) or confidence < min_confidence:
+            continue
+        correction = (360 - rotation) % 360
+        rotations.append(
+            {
+                "page": page_idx,
+                "rotation": correction,
+                "detected_orientation": rotation,
+                "confidence": confidence,
+            }
+        )
+
+    return {
+        "pages": rotations,
+        "checked_page_count": len(candidate_pages),
+        "skipped_page_count": len(target_pages) - len(candidate_pages),
+    }
+
+
 def compress_pdf(
     pdf_bytes: bytes,
     quality: str = "medium",

@@ -1,12 +1,30 @@
-"""Transform operation endpoints: deskew, compress, flatten, watermark."""
+"""Transform operation endpoints: orientation, deskew, compress, flatten, watermark."""
 
 from fastapi import APIRouter, Depends, Response
 
 from app.dependencies import require_auth
-from app.models.requests import DeskewRequest, CompressRequest, FlattenRequest, WatermarkRequest
+from app.models.requests import (
+    CompressRequest,
+    DeskewRequest,
+    FlattenRequest,
+    OrientationRequest,
+    WatermarkRequest,
+)
 from app.services import download_service, pdf_service
 
 router = APIRouter(prefix="/transform")
+
+
+@router.post("/orientation", dependencies=[Depends(require_auth)])
+async def detect_page_orientation(request: OrientationRequest):
+    """Detect cardinal rotation on image-based pages without changing the PDF."""
+    pdf_bytes = await download_service.download_pdf(request.source_url)
+    return pdf_service.detect_page_orientations(
+        pdf_bytes,
+        request.pages,
+        scanned_only=request.scanned_only,
+        min_confidence=request.min_confidence,
+    )
 
 
 @router.post("/deskew", dependencies=[Depends(require_auth)])

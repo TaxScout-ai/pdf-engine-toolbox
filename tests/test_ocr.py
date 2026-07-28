@@ -57,6 +57,17 @@ def _mock_paddle_empty_result():
     return [result_obj]
 
 
+def _completed_task_result(client, auth_headers, accepted: dict) -> dict:
+    """Read the completed background result using the signed task endpoint."""
+    assert accepted["status"] == "pending"
+    path = f"/tasks/{accepted['task_id']}"
+    response = client.get(path, headers=auth_headers("GET", path, ""))
+    assert response.status_code == 200
+    task = response.json()["data"]
+    assert task["status"] == "completed"
+    return task["result"]
+
+
 def test_ocr_returns_rich_json(client, auth_headers):
     """OCR should return JSON with words, bboxes, confidence, and base64 PDF."""
     pdf_bytes = _create_scanned_pdf()
@@ -85,9 +96,7 @@ def test_ocr_returns_rich_json(client, auth_headers):
     assert response.status_code == 200
     data = response.json()
     assert data["success"] is True
-    assert "data" in data
-
-    ocr_data = data["data"]
+    ocr_data = _completed_task_result(client, auth_headers, data)
 
     # Check page results
     assert len(ocr_data["pages"]) == 1
@@ -151,7 +160,7 @@ def test_ocr_skips_pages_with_text(client, auth_headers):
     data = response.json()
     assert data["success"] is True
 
-    page_result = data["data"]["pages"][0]
+    page_result = _completed_task_result(client, auth_headers, data)["pages"][0]
     # Should have no OCR words (page had existing text)
     assert len(page_result["words"]) == 0
     # But full_text should contain the existing text

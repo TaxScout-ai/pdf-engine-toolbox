@@ -1,0 +1,66 @@
+# The text-only build: same service, without the recognition stack.
+#
+# 3.95 GB -> 1.02 GB, a 74% cut. What comes out is the Paddle stack (719 MB on
+# its own, plus scipy, pandas, scikit-learn, modelscope and a second copy of
+# OpenCV that it drags in), the pre-downloaded OCR models, and LibreOffice.
+#
+# WHY THIS IS WORTH HAVING
+#
+# Most documents never need recognition. Across a 582-document corpus, 475
+# (81%) yield usable text through PyMuPDF alone; 82 are scans that genuinely
+# need OCR. This build serves the 81% on a machine that does not have to be
+# large, and the full image handles the rest.
+#
+# WHY IT NEEDS NO CODE CHANGES
+#
+# Every paddle import is lazy, inside the function that needs it
+# (pdf_service.py:314, 1350, 2151). Verified against this build: the service
+# starts, logs one warm-up warning, answers /info and /text/extract normally,
+# and an OCR request fails with "OCR requires paddleocr>=3.0 and
+# paddlepaddle>=3.0 packages" rather than crashing or hanging.
+#
+# WHAT THIS BUILD CANNOT DO — route these to the full image
+#
+#   /text/ocr                          needs Paddle
+#   /text/tables?strategy=ppstructure  needs Paddle  (strategy=pymupdf works)
+#   /transform/deskew                  needs Paddle
+#   /convert/from-office               needs LibreOffice
+#
+# Everything else — /info, /text/extract, /text/search, /pages/*, /build,
+# /metadata, /redact, /classify/simple, /thumbnails, /convert/from-image —
+# runs here.
+
+FROM python:3.12-slim
+
+WORKDIR /app
+
+# No libreoffice and no fonts-liberation: office conversion belongs to the full
+# image. libgomp1 stays because opencv still wants OpenMP.
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        curl \
+        libgomp1 \
+        libheif-dev \
+        libgl1 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements-lite.txt .
+RUN pip install --no-cache-dir setuptools && \
+    pip install --no-cache-dir -r requirements-lite.txt
+
+# No model pre-download step: there is nothing here to run them.
+
+COPY app/ ./app/
+
+RUN useradd -m -r appuser && \
+    mkdir -p /app/cache && \
+    chown -R appuser:appuser /app /home/appuser
+
+USER appuser
+
+EXPOSE 8000
+
+HEALTHCHECK --interval=30s --timeout=10s --retries=3 \
+    CMD curl -f http://localhost:8000/health || exit 1
+
+CMD uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers ${WORKERS:-1}

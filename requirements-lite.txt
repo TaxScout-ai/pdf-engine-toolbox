@@ -1,0 +1,41 @@
+# Dependencies for the text-only build of this service.
+#
+# WHY A SECOND FILE
+#
+# The Paddle stack is 719 MB on its own and drags in scipy, pandas,
+# scikit-learn, modelscope and a second copy of OpenCV — about a gigabyte that
+# PyMuPDF work never touches. Dropping it takes the image from 3.95 GB to
+# 1.02 GB, a 74% cut, which is the difference between needing a big machine and
+# not.
+#
+# It is worth having because most documents never need OCR. Across a
+# 582-document corpus, 475 (81%) yield usable text through PyMuPDF alone; 82
+# are scans that do need recognition. This build serves the 81%.
+#
+# It works with no code changes because every paddle import is lazy, inside the
+# function that needs it (pdf_service.py:314, 1350, 2151). Verified against
+# this build: the service starts, logs one warning at warm-up, answers /info
+# and /text/extract normally, and an OCR request fails with
+# "OCR requires paddleocr>=3.0 and paddlepaddle>=3.0 packages" instead of
+# crashing or hanging.
+#
+# Keep in step with requirements.txt: this file is that one minus the Paddle
+# stack and the test packages.
+
+fastapi==0.129.0
+uvicorn[standard]==0.41.0
+PyMuPDF==1.28.0
+pydantic==2.12.5
+pydantic-settings==2.13.1
+httpx==0.28.1
+httpx[http2]==0.28.1
+python-dotenv==1.2.1
+structlog==25.5.0
+
+# Spreadsheet pre-processing (fit-to-width for Excel→PDF)
+openpyxl==3.1.5
+
+# Image processing
+opencv-python-headless==4.13.0.92
+Pillow==12.1.1
+pillow-heif==1.2.1

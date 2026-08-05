@@ -51,14 +51,26 @@ document id, phone). Model load is another ~30 s on top, once per process.
 > the time. Content explains part of the spread between documents; it does not
 > explain this.
 >
-> **Found it: `OMP_NUM_THREADS`.** The original harness ran the container with
-> `-e OMP_NUM_THREADS=8`. My service container set `WORKERS=1` and never set
-> it, so BLAS ran single-threaded on a 28-core box. 578.9 / 25.1 ≈ 23, which is
-> the right order for losing thread parallelism.
+> **Still unexplained, and `OMP_NUM_THREADS` was not it.** The original harness
+> ran with `-e OMP_NUM_THREADS=8` and my container did not, which looked like
+> the whole answer. Setting it and re-running the same file: **632.0 s**,
+> against 578.9 s without — no faster, identical output (11 blocks, 8,847
+> chars). The variable is still worth setting, but it does not explain this.
 >
-> **This is required configuration, not tuning.** Ship it with the container.
-> Paddle even warns about the value at startup ("OMP_NUM_THREADS set to 8, not
-> 1"), which reads like a caution and is in fact the thing making it usable.
+> Eliminated so far: document complexity (same file, 23x), thread count
+> (measured, no effect).
+>
+> Left, and **do not guess a fifth time** — measure:
+>
+> - **fp32 vs bf16.** CPU decode is memory-bandwidth-bound and fp32 is twice
+>   the bytes, so expect roughly 2x, not 23x. Worth doing for its own sake;
+>   unlikely to be the whole gap.
+> - **What the 25.1 s figure actually timed.** It is recorded in
+>   `memory/reference_paddleocr_vl_local_harness.md`. Before chasing a 23x
+>   speedup, confirm that number was a full-page read of this file and not a
+>   warm cache, a partial pipeline, or a smaller input. Four hypotheses have
+>   now died against it; the cheapest remaining move is to doubt the number
+>   rather than the system.
 >
 > The figure **933 s/doc** is separately **withdrawn** — it timed a crash,
 > because VL was failing at import when it was measured.

@@ -38,7 +38,21 @@ licence case VL returns `3497` where PaddleOCR returns `349` — a dropped digit
 in a street number, and the same class of defect as the misreads that reach
 CPAs as corrections.
 
-Cost: **25.1 s/page** on this CPU.
+Cost: **615 s/page** on this CPU — measured end to end on a real scan
+(Wells Fargo 1099-INT, 31 blocks, all correct: payer block, recipient block,
+document id, phone). Model load is another ~30 s on top, once per process.
+
+> An earlier note says **25.1 s/page**. Treat it as unverified: it predates the
+> first working read, and the first working read is ten minutes. Until someone
+> reproduces 25 s, size everything on **615 s**.
+>
+> The figure **933 s/doc** is separately **withdrawn** — it timed a crash,
+> because VL was failing at import when it was measured.
+
+At ten minutes a page, VL is not a pipeline stage. It is a per-field escalation
+for a value a CPA is about to rely on, or an overnight batch. `MAX_VL_PAGES=8`
+is, at this speed, an eighty-minute request — that cap needs revisiting
+downward, not defending.
 
 > The figure **933 s/doc** appears in older notes. It is **withdrawn**: it was
 > measured while VL was failing at import, so it timed a crash, not a model.

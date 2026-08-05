@@ -67,30 +67,44 @@ which sends you looking for a missing file that is right there. `chmod -R a+rX`
 on the model directory. This bit twice in one day — the same denial also made
 `docker cp`-ed test PDFs look like corrupt PDFs.
 
-## Loading VL takes minutes — do not run it from an attached exec
+## fp32 VL does not fit on a shared box — and fp32 is the wrong target anyway
 
-The first three attempts at a real read all died with
+Three attempts at a real read died with
 
     FatalError: `Termination signal` is detected by the operating system.
     SIGTERM ... from PID 0
 
-mid-tensor-copy, and it is easy to misread. I misread it twice.
+during `UniformKernel<float>` — paddle allocating the model before loading the
+checkpoint. I diagnosed it wrong twice before measuring: it is not the
+healthcheck (reproduced with `--health-start-period=900s --restart=no`, the
+container stayed up and healthy), and it is not the exec session being
+terminated (reproduced with `docker exec -d`).
 
-It is **not** OOM: no container limit, `OOMKilled=false`, 12 GB free.
+Sampling host memory through a load settles it:
 
-It is **not** the healthcheck. That was my second guess, and running VL in its
-own container with `--health-start-period=900s` and `--restart=no` reproduced
-it exactly. The container stayed up and healthy throughout.
+    t=10s  avail 7168 MB
+    t=60s  avail 5204 MB
+    t=70s  avail 4756 MB
+    t=80s  avail 12411 MB   <- the jump is the kill releasing it
 
-It is the **caller** being terminated. A load that takes minutes outlives
-whatever session started it — an attached `docker exec`, a shell wrapper, a
-CI step — and the signal lands on the python process, not the service. Run it
-detached (`docker exec -d`) writing to a file, and poll the file.
+Available memory falls to ~4.7 GB and the kernel takes the loader out. This box
+runs Supabase, Inngest, the dev app and three engine containers, with ~20 GB
+already in shared/tmpfs, against 61 GB total.
 
-The lesson generalises past this repo: a several-minute model load must be
-owned by the service's own startup, never by a request or a session that can
-go away. That is the argument for preloading VL at container start rather than
-lazily on first use — not healthcheck timing, which was a wrong turn.
+**The conclusion that matters is not "get a bigger box".** fp32 was only ever a
+workaround for *this* CPU lacking AVX512-BF16 — see above. The published bf16
+weights are **1.92 GB against 3.83 GB**, half the resident footprint and half
+the load-time allocation, and they run natively on any CPU with AVX512-BF16,
+which most current server instances have.
+
+So:
+
+- **production: bf16 on a CPU with AVX512-BF16.** Half the memory, no
+  conversion step, the shipped artifact.
+- **this dev box: fp32 cannot share it.** Either free ~8 GB before loading, or
+  run VL on its own instance, or accept that VL is not testable here.
+
+Check `lscpu | grep avx512_bf16` before assuming a host needs the conversion.
 
 ## Do not bump paddlepaddle
 

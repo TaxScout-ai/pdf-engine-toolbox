@@ -275,7 +275,48 @@ Consequences, and they are the opposite of what "crops are cheap" suggests:
 At 27 s, roughly 200 escalations a day is about 90 minutes of CPU — affordable
 overnight on hardware we already own, and not affordable inline.
 
-## Is VL worth it? The evidence is now one case each way
+## The hybrid is justified — proven end to end on a real CPA correction
+
+Document `a63ef233` (`taxscout-eval-docs/drivers-license-a63ef233.pdf`), a
+20 KB photocopy of an ID. The CPA had to hand-correct our extraction from
+`349` to `3497`. Run through the current stack:
+
+**PP-OCRv6 fails, and says so.** 3.1 s, mean confidence **0.75** against 0.993
+on a clean scan. The address line is not detected at all; what it does return
+is partly garbage (`*pnes 9/032`).
+
+**VL on crops recovers it exactly.** Page split into a 2x3 grid:
+
+    cell 2 (left-middle)   55.5 s   "3497 STATE ROUTE 52 / PINE BUSH, NY 12566"
+    four empty cells       2.4-3.4 s each
+    first call (warm-up)   19.9 s
+    whole page as a grid   ~88 s     against 615 s in one call
+
+`3497 STATE ROUTE 52 PINE BUSH, NY 12566` is the CPA's corrected value,
+character for character.
+
+### Why this settles the design question
+
+Three things line up that were previously assumed:
+
+1. **The cheap reader degrades visibly on hard input.** 0.993 clean, 0.75 on
+   this. Confidence *is* the escalation trigger — no threshold tuning needed to
+   tell these apart.
+2. **The expensive reader earns its cost exactly there**, and nowhere else. On
+   clean documents it spent 27 s to confirm what OCR already said.
+3. **Empty regions are nearly free** (2.4-3.4 s). VL generates text; where
+   there is none to generate there is nothing to pay for. That is what makes
+   grid-scanning viable rather than wasteful, and it was not obvious in advance.
+
+### What this does not settle
+
+One document. It is the *right* document — a real production misread with CPA
+ground truth — but the 82-scan run still decides how often this pattern holds.
+`taxscout-eval-docs/` holds 26 documents with CPA ground truth, including
+`bank-statement-ced8fdd3.pdf`, the `80,274.85` case. That is real labelled
+data and it should be the benchmark, not the indirect corroboration metric.
+
+## Superseded: the evidence used to look like one case each way
 
 The case **for** VL is a driving licence where it read `3497` and our OCR read
 `349`. That was against **PP-OCRv5**.

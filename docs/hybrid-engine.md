@@ -108,9 +108,18 @@ This retroactively explains every failed diagnosis:
   very likely enough to stay above the 7.3 GB floor on a box this busy. This is
   the same conclusion reached below on CPU grounds, now with a second reason
   and a number attached.
-- If fp32 must run here, either free memory first or exempt the loader —
-  `earlyoom` matches on process name, so `--avoid` needs an entry, or the
-  loader needs a name outside `--prefer`.
+- If fp32 must run here, either free memory first or exempt the loader.
+  `earlyoom` matches on **process name** (`comm`, first 15 chars), so the
+  cheapest exemption needs no root on the host and no earlyoom restart:
+
+      cp "$(command -v python3)" /usr/local/bin/vlloader
+      /usr/local/bin/vlloader -c "...load the model..."
+
+  `vlloader` does not match `^(next-server|node|bun|uv|chrome.*|python|python3.1[0-9])$`,
+  so it drops out of the preferred-victim list. It is still killable at the
+  hard threshold — this buys priority, not immunity, and is a dev-box
+  workaround rather than a production answer. The production answer is bf16 on
+  a host with enough headroom that nothing is near the floor.
 - Any host running VL needs this checked. `earlyoom --prefer python` on a box
   that also runs a 2-4 GB model load is a standing trap, and it fires as a
   polite SIGTERM that looks like an application crash.

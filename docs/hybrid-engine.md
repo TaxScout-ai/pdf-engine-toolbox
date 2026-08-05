@@ -242,6 +242,39 @@ Do not change the pin on the strength of this table: it would trade measured
 speed for unmeasured accuracy, and 24 s/page across 324 documents is two hours
 per corpus run.
 
+## The crop is 23x cheaper than the page — and 27 s is a floor, not a trend
+
+Measured end to end on the Wells Fargo scan, the real flow: PP-OCRv6_medium
+detects and supplies word geometry, VL re-reads that region.
+
+    whole page          615.1 s
+    one word crop        27.0 s      <- 23x
+    OCR read            "MAC N9777-113"
+    VL read             "MAC N9777-113"     (identical)
+
+Both readers agreeing character-for-character is the signal the whole hybrid
+exists to produce. Disagreement is what goes to a human.
+
+**But 27 s is fixed overhead, not content.** The crop holds ~13 characters; the
+driving licence held a few dozen and cost 25 s. Below roughly a line of text
+the cost stops falling — image encoding and the vision tower dominate, and they
+do not care how small the region is.
+
+Consequences, and they are the opposite of what "crops are cheap" suggests:
+
+- **Do not call VL synchronously inside extraction.** 27 s per disputed field
+  blocks a pipeline stage. Queue the escalations.
+- **Batch by document, not by field.** Ten fields on one page cost ten times
+  27 s if sent separately. Whether the pipeline can amortise the vision tower
+  across regions in one call is worth testing and would change the economics
+  again.
+- **This is where a GPU actually helps.** The remaining cost is compute-bound
+  fixed work, which is exactly what a GPU attacks — unlike the token generation
+  we removed by cropping, which we simply stopped paying for.
+
+At 27 s, roughly 200 escalations a day is about 90 minutes of CPU — affordable
+overnight on hardware we already own, and not affordable inline.
+
 ## Routing
 
 - text layer present (81%) → lite, no recognition at all

@@ -67,6 +67,29 @@ which sends you looking for a missing file that is right there. `chmod -R a+rX`
 on the model directory. This bit twice in one day — the same denial also made
 `docker cp`-ed test PDFs look like corrupt PDFs.
 
+## VL must not load inside the request-serving worker
+
+First real read attempt died with SIGTERM mid-tensor-copy, and the container
+came back up. Not OOM (`OOMKilled=false`, no memory limit, 10 GB free) — the
+**healthcheck** killed it.
+
+Loading 3.8 GB of fp32 weights blocks the worker. `HEALTHCHECK --interval=30s
+--timeout=10s --retries=3` then gets no answer for 90 seconds, marks the
+container unhealthy, and the restart takes the model load down with it. The
+service can never finish loading VL, so it can never serve it.
+
+This is a design constraint, not a tuning problem. One of:
+
+- preload at startup, before the healthcheck window opens, and accept a slow
+  boot (the model then sits resident — 3.8 GB per worker, so `WORKERS=1`)
+- run VL as its own container with its own healthcheck and no request traffic
+  competing for the worker
+- keep it lazy but move the load off the serving thread and answer "loading"
+  until it is ready
+
+Whichever is chosen, `WORKERS` above 1 multiplies 3.8 GB of resident weights
+per worker. Size the instance for that, not for the engine's old footprint.
+
 ## Do not bump paddlepaddle
 
 `requirements.txt` pins `paddlepaddle>=3.2.0,<3.3.0` and the comment saying why

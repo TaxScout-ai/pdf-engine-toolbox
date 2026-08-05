@@ -51,26 +51,29 @@ document id, phone). Model load is another ~30 s on top, once per process.
 > the time. Content explains part of the spread between documents; it does not
 > explain this.
 >
-> **Still unexplained, and `OMP_NUM_THREADS` was not it.** The original harness
-> ran with `-e OMP_NUM_THREADS=8` and my container did not, which looked like
-> the whole answer. Setting it and re-running the same file: **632.0 s**,
-> against 578.9 s without — no faster, identical output (11 blocks, 8,847
-> chars). The variable is still worth setting, but it does not explain this.
+> **Resolved, and the first guess was right.** The 25.1 s figure is real and
+> precisely scoped: `memory/reference_paddleocr_vl_local_harness.md` records
+> "Page inference: 25.1 s **for a 1-page licence**" — a driving licence, one
+> address line and a few fields.
 >
-> Eliminated so far: document complexity (same file, 23x), thread count
-> (measured, no effect).
+> It was never measured on `sample.pdf`. I assumed it was, re-ran that file,
+> got 578.9 s, and concluded the number did not reproduce. It reproduces fine;
+> I compared a licence against 8,847 characters of dense text.
 >
-> Left, and **do not guess a fifth time** — measure:
+> Cost tracks **generated characters**, because VL decodes block by block:
 >
-> - **fp32 vs bf16.** CPU decode is memory-bandwidth-bound and fp32 is twice
->   the bytes, so expect roughly 2x, not 23x. Worth doing for its own sake;
->   unlikely to be the whole gap.
-> - **What the 25.1 s figure actually timed.** It is recorded in
->   `memory/reference_paddleocr_vl_local_harness.md`. Before chasing a 23x
->   speedup, confirm that number was a full-page read of this file and not a
->   warm cache, a partial pipeline, or a smaller input. Four hypotheses have
->   now died against it; the cheapest remaining move is to doubt the number
->   rather than the system.
+>     licence, a few dozen chars      25.1 s
+>     sample.pdf, 8,847 chars        578.9 s   (632.0 s with OMP_NUM_THREADS=8)
+>     Wells Fargo 1099-INT, 31 blocks 615.1 s
+>
+> `OMP_NUM_THREADS` makes no measurable difference here (632 vs 579 — noise).
+> Keep it set, but it is not a lever.
+>
+> **Budget VL per character, not per page.** A sparse identity document is
+> seconds; a dense tax form is ten minutes. That is what decides where it can
+> sit in the pipeline, and it means `MAX_VL_PAGES=8` is meaningless as a cost
+> control — the cap that matters is on expected text, or on a per-field crop
+> rather than a whole page.
 >
 > The figure **933 s/doc** is separately **withdrawn** — it timed a crash,
 > because VL was failing at import when it was measured.

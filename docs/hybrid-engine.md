@@ -42,12 +42,26 @@ Cost: **615 s/page** on this CPU — measured end to end on a real scan
 (Wells Fargo 1099-INT, 31 blocks, all correct: payer block, recipient block,
 document id, phone). Model load is another ~30 s on top, once per process.
 
-> An earlier note says **25.1 s/page**. Treat it as unverified: it predates the
-> first working read, and the first working read is ten minutes. Until someone
-> reproduces 25 s, size everything on **615 s**.
+> An earlier note says **25.1 s/page**, and calling it "unverified" was too
+> quick — the probe that produced it passed a file path, so it was a working
+> read. The likelier reading is that **both are right and the unit is wrong**:
+> VL is a VLM that generates text block by block, so cost tracks *how much text
+> is on the page*, not the page count. 615 s was a dense 31-block tax form at
+> 2480x3508; 25 s was a sparser sample. Size on content, not pages.
 >
 > The figure **933 s/doc** is separately **withdrawn** — it timed a crash,
 > because VL was failing at import when it was measured.
+
+**fp32 probably costs about half the speed too.** Autoregressive decode on CPU
+is memory-bandwidth-bound: every generated token re-reads the weights, and
+fp32 is twice the bytes per weight of bf16. So the conversion made to work
+around the missing AVX512-BF16 likely doubles inference time as well as memory.
+That is a third independent argument for bf16, and the only one about
+throughput.
+
+There is no smaller VL to fall back to — PaddleOCR-VL ships one size (0.9B).
+The fast path is already in the stack and it is ordinary PaddleOCR, which is
+also the one with word geometry. That is the hybrid.
 
 At ten minutes a page, VL is not a pipeline stage. It is a per-field escalation
 for a value a CPA is about to rely on, or an overnight batch. `MAX_VL_PAGES=8`

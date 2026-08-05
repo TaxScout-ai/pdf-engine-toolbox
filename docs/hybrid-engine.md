@@ -93,10 +93,22 @@ ruled out is worth more than a fourth theory:
 What is established: the failure is deterministic, always at the same phase,
 and independent of the supervision arrangement.
 
-**Do not spend another session guessing.** Get the signal's real sender —
-`dmesg -T | tail`, `journalctl -k`, or run the load under `strace -f -e trace=none
--e signal=all`. Rule out systemd-oomd explicitly (`journalctl -u systemd-oomd`),
-which sends SIGTERM rather than SIGKILL and would match.
+Also eliminated since:
+
+- **Not systemd-oomd.** `systemctl is-active systemd-oomd` -> `inactive`, and
+  its journal is empty. It was the best remaining memory candidate because it
+  sends SIGTERM rather than SIGKILL.
+- **No kernel OOM kill.** Nothing matching oom/killed-process in `dmesg`, with
+  `MemAvailable` at 13 GB during a failing run.
+
+**Do not spend another session guessing.** Two things not yet tried, in order:
+
+1. Run the load under `strace -f -e trace=none -e signal=all` and read the
+   sender off `SIGTERM {si_pid=...}` directly. This ends the argument.
+2. Check `coolify-sentinel`. It runs on this host, supervises containers, and
+   is the one supervisor in the stack that has not been ruled out — a
+   memory-based reaper there would look exactly like this and would explain why
+   the dedicated container with `--restart=no` made no difference.
 
 ### The likely way past it regardless
 

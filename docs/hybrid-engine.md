@@ -67,44 +67,48 @@ which sends you looking for a missing file that is right there. `chmod -R a+rX`
 on the model directory. This bit twice in one day — the same denial also made
 `docker cp`-ed test PDFs look like corrupt PDFs.
 
-## fp32 VL does not fit on a shared box — and fp32 is the wrong target anyway
+## UNRESOLVED: VL will not finish loading on this box
 
-Three attempts at a real read died with
+Every attempt at a real read dies the same way, always inside
+`UniformKernel<float>` — paddle allocating the model before the checkpoint
+loads:
 
     FatalError: `Termination signal` is detected by the operating system.
     SIGTERM ... from PID 0
 
-during `UniformKernel<float>` — paddle allocating the model before loading the
-checkpoint. I diagnosed it wrong twice before measuring: it is not the
-healthcheck (reproduced with `--health-start-period=900s --restart=no`, the
-container stayed up and healthy), and it is not the exec session being
-terminated (reproduced with `docker exec -d`).
+**I diagnosed this three times and was wrong three times.** Recording what is
+ruled out is worth more than a fourth theory:
 
-Sampling host memory through a load settles it:
+- **Not the healthcheck.** Reproduced in a dedicated container with
+  `--health-start-period=900s --restart=no`. The container stayed up and
+  healthy throughout.
+- **Not the calling session.** Reproduced with `docker exec -d`, fully
+  detached, writing to a file.
+- **Not simply free memory.** One run did show available falling 7168 → 4756 MB
+  then jumping to 12411 MB (a kill releasing it), which looked conclusive. But
+  a later run started with **13 GB available**, barely moved, and died at the
+  same place. Memory pressure may contribute; it is not the whole story.
+- Not a container memory limit: none set, `OOMKilled=false`.
 
-    t=10s  avail 7168 MB
-    t=60s  avail 5204 MB
-    t=70s  avail 4756 MB
-    t=80s  avail 12411 MB   <- the jump is the kill releasing it
+What is established: the failure is deterministic, always at the same phase,
+and independent of the supervision arrangement.
 
-Available memory falls to ~4.7 GB and the kernel takes the loader out. This box
-runs Supabase, Inngest, the dev app and three engine containers, with ~20 GB
-already in shared/tmpfs, against 61 GB total.
+**Do not spend another session guessing.** Get the signal's real sender —
+`dmesg -T | tail`, `journalctl -k`, or run the load under `strace -f -e trace=none
+-e signal=all`. Rule out systemd-oomd explicitly (`journalctl -u systemd-oomd`),
+which sends SIGTERM rather than SIGKILL and would match.
 
-**The conclusion that matters is not "get a bigger box".** fp32 was only ever a
-workaround for *this* CPU lacking AVX512-BF16 — see above. The published bf16
-weights are **1.92 GB against 3.83 GB**, half the resident footprint and half
-the load-time allocation, and they run natively on any CPU with AVX512-BF16,
-which most current server instances have.
+### The likely way past it regardless
 
-So:
+fp32 was only ever a workaround for *this* CPU lacking AVX512-BF16 (confirmed:
+the flag is absent). The published bf16 weights are **1.92 GB against 3.83 GB**
+— half the resident footprint and half the load-time allocation — and run
+natively wherever the flag is present, which most current server instances are.
 
-- **production: bf16 on a CPU with AVX512-BF16.** Half the memory, no
-  conversion step, the shipped artifact.
-- **this dev box: fp32 cannot share it.** Either free ~8 GB before loading, or
-  run VL on its own instance, or accept that VL is not testable here.
-
-Check `lscpu | grep avx512_bf16` before assuming a host needs the conversion.
+Production should target **bf16 on a CPU with AVX512-BF16** and skip the
+conversion entirely. Check with `lscpu | grep avx512_bf16` before assuming a
+host needs it. That likely sidesteps this problem rather than solving it, which
+is fine for shipping and not fine for understanding — so still get the sender.
 
 ## Do not bump paddlepaddle
 

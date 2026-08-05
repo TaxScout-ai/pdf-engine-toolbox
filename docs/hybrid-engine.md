@@ -67,28 +67,30 @@ which sends you looking for a missing file that is right there. `chmod -R a+rX`
 on the model directory. This bit twice in one day — the same denial also made
 `docker cp`-ed test PDFs look like corrupt PDFs.
 
-## VL must not load inside the request-serving worker
+## Loading VL takes minutes — do not run it from an attached exec
 
-First real read attempt died with SIGTERM mid-tensor-copy, and the container
-came back up. Not OOM (`OOMKilled=false`, no memory limit, 10 GB free) — the
-**healthcheck** killed it.
+The first three attempts at a real read all died with
 
-Loading 3.8 GB of fp32 weights blocks the worker. `HEALTHCHECK --interval=30s
---timeout=10s --retries=3` then gets no answer for 90 seconds, marks the
-container unhealthy, and the restart takes the model load down with it. The
-service can never finish loading VL, so it can never serve it.
+    FatalError: `Termination signal` is detected by the operating system.
+    SIGTERM ... from PID 0
 
-This is a design constraint, not a tuning problem. One of:
+mid-tensor-copy, and it is easy to misread. I misread it twice.
 
-- preload at startup, before the healthcheck window opens, and accept a slow
-  boot (the model then sits resident — 3.8 GB per worker, so `WORKERS=1`)
-- run VL as its own container with its own healthcheck and no request traffic
-  competing for the worker
-- keep it lazy but move the load off the serving thread and answer "loading"
-  until it is ready
+It is **not** OOM: no container limit, `OOMKilled=false`, 12 GB free.
 
-Whichever is chosen, `WORKERS` above 1 multiplies 3.8 GB of resident weights
-per worker. Size the instance for that, not for the engine's old footprint.
+It is **not** the healthcheck. That was my second guess, and running VL in its
+own container with `--health-start-period=900s` and `--restart=no` reproduced
+it exactly. The container stayed up and healthy throughout.
+
+It is the **caller** being terminated. A load that takes minutes outlives
+whatever session started it — an attached `docker exec`, a shell wrapper, a
+CI step — and the signal lands on the python process, not the service. Run it
+detached (`docker exec -d`) writing to a file, and poll the file.
+
+The lesson generalises past this repo: a several-minute model load must be
+owned by the service's own startup, never by a request or a session that can
+go away. That is the argument for preloading VL at container start rather than
+lazily on first use — not healthcheck timing, which was a wrong turn.
 
 ## Do not bump paddlepaddle
 

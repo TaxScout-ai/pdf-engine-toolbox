@@ -275,6 +275,48 @@ Consequences, and they are the opposite of what "crops are cheap" suggests:
 At 27 s, roughly 200 escalations a day is about 90 minutes of CPU — affordable
 overnight on hardware we already own, and not affordable inline.
 
+## Is VL worth it? The evidence is now one case each way
+
+The case **for** VL is a driving licence where it read `3497` and our OCR read
+`349`. That was against **PP-OCRv5**.
+
+The case **against** arrived when the same class of document was put in front
+of the upgraded stack. A different licence, its longest digit string — twelve
+digits, exactly where a dropped digit hides:
+
+    PP-OCRv6_medium   8.2 s, whole page, 35 lines, conf 0.935
+                      read "000041792359"
+    VL on the crop    27.3 s, one field
+                      read "000041792359"     identical
+
+**VL added nothing and cost 27.3 s to confirm what OCR already said** — while
+v6 read the entire page in a third of that time.
+
+Neither case proves anything on its own. What changed is that there is no
+longer only evidence in favour. Before spending memory and complexity on VL in
+production, run the 82 scans through both and count how often they actually
+disagree — and of those, how often VL is the one that is right.
+
+Note the confounder: the case for VL was measured against v5. Upgrading the
+cheap reader may have removed the gap the expensive one was meant to fill.
+
+## OpenVINO is not reachable from this image
+
+`openvino` (2026.3.0) installs, but PaddleOCR's high-performance path needs
+`ultra-infer`, which has no distribution for this platform:
+
+    RuntimeError: Engine 'hpi' is unavailable because dependency
+                  'ultra-infer' is not installed
+    ERROR: No matching distribution found for ultra-infer
+
+So the advertised **5.2x speedup for PP-OCRv6 is not available to us** as the
+image stands, and the 2.7x slowdown against v5 is what we actually pay. Treat
+any published v6 speed figure as inapplicable until `ultra-infer` is sourced.
+
+Timing variance is wide, too: the same v6 configuration measured 37.6 s and
+30.8 s on identical input. Do not read a difference under about 25% from a
+single run.
+
 ## Routing
 
 - text layer present (81%) → lite, no recognition at all

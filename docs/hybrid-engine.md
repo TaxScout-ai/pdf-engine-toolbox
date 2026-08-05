@@ -67,60 +67,53 @@ which sends you looking for a missing file that is right there. `chmod -R a+rX`
 on the model directory. This bit twice in one day — the same denial also made
 `docker cp`-ed test PDFs look like corrupt PDFs.
 
-## UNRESOLVED: VL will not finish loading on this box
+## SOLVED: `earlyoom` kills the model load, and it prefers python by name
 
-Every attempt at a real read dies the same way, always inside
-`UniformKernel<float>` — paddle allocating the model before the checkpoint
-loads:
+Every attempt at a real read died inside `UniformKernel<float>` with
 
     FatalError: `Termination signal` is detected by the operating system.
     SIGTERM ... from PID 0
 
-**I diagnosed this three times and was wrong three times.** Recording what is
-ruled out is worth more than a fourth theory:
+I guessed three times and was wrong three times — healthcheck, calling session,
+plain memory. `strace -f -e signal=all` ended it in one run:
 
-- **Not the healthcheck.** Reproduced in a dedicated container with
-  `--health-start-period=900s --restart=no`. The container stayed up and
-  healthy throughout.
-- **Not the calling session.** Reproduced with `docker exec -d`, fully
-  detached, writing to a file.
-- **Not simply free memory.** One run did show available falling 7168 → 4756 MB
-  then jumping to 12411 MB (a kill releasing it), which looked conclusive. But
-  a later run started with **13 GB available**, barely moved, and died at the
-  same place. Memory pressure may contribute; it is not the whole story.
-- Not a container memory limit: none set, `OOMKilled=false`.
+    SIGTERM {si_signo=SIGTERM, si_code=SI_USER, si_pid=0, si_uid=61876}
 
-What is established: the failure is deterministic, always at the same phase,
-and independent of the supervision arrangement.
+`si_code=SI_USER` means a userspace `kill()`, not the kernel OOM killer.
+`si_pid=0` means the sender is outside the container's PID namespace. `si_uid`
+names it:
 
-Also eliminated since:
+    uid 61876 = earlyoom
+    /usr/bin/earlyoom -m 12,8 -s 25,10 -r 3600 -n
+      --avoid ^(qemu-system-x86|systemd|...|dockerd|containerd|init|lxd)$
+      --prefer ^(next-server|node|bun|uv|chrome.*|python|python3.1[0-9])$
 
-- **Not systemd-oomd.** `systemctl is-active systemd-oomd` -> `inactive`, and
-  its journal is empty. It was the best remaining memory candidate because it
-  sends SIGTERM rather than SIGKILL.
-- **No kernel OOM kill.** Nothing matching oom/killed-process in `dmesg`, with
-  `MemAvailable` at 13 GB during a failing run.
+`-m 12,8`: SIGTERM when available memory drops below **12%** of total, SIGKILL
+below 8%. On a 61 GB box that floor is **~7.3 GB**. And `--prefer` lists
+**`python`** — so the VL loader is not an unlucky victim, it is the *chosen*
+one, by process name, by configuration.
 
-**Do not spend another session guessing.** Two things not yet tried, in order:
+This retroactively explains every failed diagnosis:
 
-1. Run the load under `strace -f -e trace=none -e signal=all` and read the
-   sender off `SIGTERM {si_pid=...}` directly. This ends the argument.
-2. Check `coolify-sentinel`. It runs on this host, supervises containers, and
-   is the one supervisor in the stack that has not been ruled out — a
-   memory-based reaper there would look exactly like this and would explain why
-   the dedicated container with `--restart=no` made no difference.
+- nothing in `dmesg` — there was no kernel OOM
+- `systemd-oomd inactive` was true and irrelevant — a different reaper
+- `--restart=no` on a dedicated container changed nothing — the container was
+  never the target, the python process was
+- "13 GB available" was not enough headroom: the threshold is 7.3 GB and the
+  fp32 load transiently pushes available below it
 
-### The likely way past it regardless
+### What to do
 
-fp32 was only ever a workaround for *this* CPU lacking AVX512-BF16 (confirmed:
-the flag is absent). The published bf16 weights are **1.92 GB against 3.83 GB**
-— half the resident footprint and half the load-time allocation — and run
-natively wherever the flag is present, which most current server instances are.
-
-Production should target **bf16 on a CPU with AVX512-BF16** and skip the
-conversion entirely. Check with `lscpu | grep avx512_bf16` before assuming a
-host needs it. That likely sidesteps this problem rather than solving it, which
-is fine for shipping and not fine for understanding — so still get the sender.
+- **bf16 halves the transient allocation** (1.92 GB against 3.83 GB), which is
+  very likely enough to stay above the 7.3 GB floor on a box this busy. This is
+  the same conclusion reached below on CPU grounds, now with a second reason
+  and a number attached.
+- If fp32 must run here, either free memory first or exempt the loader —
+  `earlyoom` matches on process name, so `--avoid` needs an entry, or the
+  loader needs a name outside `--prefer`.
+- Any host running VL needs this checked. `earlyoom --prefer python` on a box
+  that also runs a 2-4 GB model load is a standing trap, and it fires as a
+  polite SIGTERM that looks like an application crash.
 
 ## Do not bump paddlepaddle
 

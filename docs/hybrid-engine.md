@@ -51,6 +51,22 @@ aborts on load. Converting the 620 tensors to fp32 fixes it; the converted
 weights live in `PaddleOCR-VL-1.6-fp32`. This is not a memory problem — the
 machine has 61 GB and that was a wrong diagnosis made once already.
 
+## Mount the weights readable, or you get the wrong error
+
+The fp32 file is 3.83 GB — exactly twice the 1.92 GB bf16 original, which is
+how you check the conversion ran. It lives in the Docker volume
+`paddle-models` at `official_models/PaddleOCR-VL-1.6-fp32`.
+
+Mount that volume and point `VL_MODEL_DIR` at it. Then **make it readable**:
+the converted file lands as `600 root`, and the engine container runs as
+`appuser`. `safetensors` reports the resulting permission denial as
+
+    FileNotFoundError: No such file or directory: .../model.safetensors
+
+which sends you looking for a missing file that is right there. `chmod -R a+rX`
+on the model directory. This bit twice in one day — the same denial also made
+`docker cp`-ed test PDFs look like corrupt PDFs.
+
 ## Do not bump paddlepaddle
 
 `requirements.txt` pins `paddlepaddle>=3.2.0,<3.3.0` and the comment saying why

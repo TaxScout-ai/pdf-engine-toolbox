@@ -115,6 +115,8 @@ def read_pages(pdf_bytes: bytes, pages: list[int]) -> dict[str, Any]:
             f"VL runs ~25 s/page; ask for the pages in doubt, not the document."
         )
 
+    import tempfile
+
     import fitz
 
     pipeline = _load_pipeline()
@@ -132,19 +134,40 @@ def read_pages(pdf_bytes: bytes, pages: list[int]) -> dict[str, Any]:
         # should pay for one page, not for the pipeline walking to it.
         single = fitz.open()
         single.insert_pdf(document, from_page=page_number - 1, to_page=page_number - 1)
-        page_bytes = single.tobytes()
 
+        # `predict` takes a path or a numpy array, never bytes. Handed bytes it
+        # does not raise — it logs "Not supported input data type ... has been
+        # ignored" and yields a result with nothing in it, which is how the
+        # first real run reported success on zero blocks.
         blocks: list[dict[str, Any]] = []
-        for result in pipeline.predict(page_bytes):
-            res = (result.json if hasattr(result, "json") else {}).get("res", {})
-            for block in res.get("parsing_res_list") or []:
-                text = (block.get("block_content") or "").strip()
-                if text:
-                    blocks.append(
-                        {"label": block.get("block_label"), "text": text}
-                    )
-            break
+        with tempfile.NamedTemporaryFile(suffix=".pdf") as page_file:
+            single.save(page_file.name)
+            page_file.flush()
+            for result in pipeline.predict(page_file.name):
+                res = (result.json if hasattr(result, "json") else {}).get("res", {})
+                for block in res.get("parsing_res_list") or []:
+                    text = (block.get("block_content") or "").strip()
+                    if text:
+                        blocks.append(
+                            {"label": block.get("block_label"), "text": text}
+                        )
+                break
 
         out.append({"page": page_number, "blocks": blocks})
+
+    # A read that returns nothing is not a successful read.
+    #
+    # This module's own docstring says an empty result reported as success is
+    # the failure mode to avoid, and the first real run did exactly that:
+    # `{"ok": true, "blocks": 0}` on a page that plainly has text. Guarding
+    # only the *unavailable* case was not enough — the pipeline ran, returned,
+    # and produced nothing, which downstream reads as "the document does not
+    # say that" rather than "the reader is broken".
+    if not any(page["blocks"] for page in out):
+        raise VlUnavailable(
+            f"VL returned no text for page(s) {pages}. Either the pages are "
+            "genuinely blank, or the block payload key changed — check "
+            "`parsing_res_list` block keys against `block_content`."
+        )
 
     return {"pages": out, "model": "PaddleOCR-VL-1.6", "geometry": "block"}

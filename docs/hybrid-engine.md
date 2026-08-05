@@ -195,6 +195,34 @@ real document — 3.2.2 returns 21 words, 3.3.1 returns none and says it worked.
 The unit tests do **not** catch this. There are no PDF fixtures, so all 82 pass
 against a broken engine. This bump was made once and reverted.
 
+## PP-OCRv6 measured against our PP-OCRv5, on one real scan
+
+Shipped with paddleocr 3.7, which is **already installed here** — the pin
+`ocr_version="PP-OCRv5"` in `pdf_service.py:2158` is the only thing keeping us
+on the old models. Pinned explicitly as `PP-OCRv6_medium_det` /
+`PP-OCRv6_medium_rec`, Wells Fargo 1099-INT at 200 dpi:
+
+|                | PP-OCRv5 | PP-OCRv6_medium |
+|----------------|----------|-----------------|
+| model load     | 2.6 s    | 6.1 s           |
+| inference      | **13.8 s** | 37.6 s        |
+| words          | 180      | 179             |
+| characters     | 10,339   | 10,536          |
+| mean confidence| 0.950    | **0.993**       |
+
+**The advertised 5.2x speedup does not apply to us.** It is quoted for Intel
+Xeon *with OpenVINO*; we run plain CPU inference, where v6_medium is **2.7x
+slower**. Check whether OpenVINO is available before assuming the number.
+
+**Confidence is not accuracy.** 0.993 against 0.950 says the model is more
+certain, not more right — a model can be confidently wrong. Both read the
+sampled lines identically. Deciding this needs the 82 scans compared against
+known values, not one page.
+
+Do not change the pin on the strength of this table: it would trade measured
+speed for unmeasured accuracy, and 24 s/page across 324 documents is two hours
+per corpus run.
+
 ## Routing
 
 - text layer present (81%) → lite, no recognition at all

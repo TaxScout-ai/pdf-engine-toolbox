@@ -51,10 +51,14 @@ document id, phone). Model load is another ~30 s on top, once per process.
 > the time. Content explains part of the spread between documents; it does not
 > explain this.
 >
-> Plan on **~600 s/page** on this hardware and configuration until someone
-> reproduces 25 s and says what was different. Candidates worth testing, in
-> order: fp32 versus bf16 (below), and CPU contention — the corpus extraction
-> was running through Inngest on this box during both measurements.
+> **Found it: `OMP_NUM_THREADS`.** The original harness ran the container with
+> `-e OMP_NUM_THREADS=8`. My service container set `WORKERS=1` and never set
+> it, so BLAS ran single-threaded on a 28-core box. 578.9 / 25.1 ≈ 23, which is
+> the right order for losing thread parallelism.
+>
+> **This is required configuration, not tuning.** Ship it with the container.
+> Paddle even warns about the value at startup ("OMP_NUM_THREADS set to 8, not
+> 1"), which reads like a caution and is in fact the thing making it usable.
 >
 > The figure **933 s/doc** is separately **withdrawn** — it timed a crash,
 > because VL was failing at import when it was measured.

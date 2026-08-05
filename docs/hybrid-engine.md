@@ -98,12 +98,31 @@ downward, not defending.
 > measured while VL was failing at import, so it timed a crash, not a model.
 > Do not use it to argue against VL.
 
-## What it took to run VL on this machine
+## The fp32 conversion was never needed — bf16 runs here
 
-The published weights are bfloat16 and this CPU has no AVX512-BF16, so the model
-aborts on load. Converting the 620 tensors to fp32 fixes it; the converted
-weights live in `PaddleOCR-VL-1.6-fp32`. This is not a memory problem — the
-machine has 61 GB and that was a wrong diagnosis made once already.
+Measured, same file, same output (11 blocks, 8,847 chars):
+
+    bf16   650.8 s   1.92 GB
+    fp32   578.9 s   3.83 GB   (632.0 s with OMP_NUM_THREADS=8)
+
+Three claims of mine died in one run:
+
+- **"bf16 aborts on a CPU without AVX512-BF16."** It does not. It loads and
+  runs. I assumed it, converted 620 tensors to fp32 to work around it, and
+  never went back to check.
+- **"fp32 costs ~2x throughput via memory bandwidth."** It does not, here.
+  Without native bf16 the weights are widened in memory anyway, so the saving
+  is on disk and load time, not on decode.
+- Everything downstream of the conversion — the doubled footprint, `earlyoom`
+  killing the load, four wrong diagnoses chasing it — followed from an
+  assumption that was never tested.
+
+**Use the published bf16 weights.** Half the disk, half the load-time
+allocation (which is what `earlyoom` reacts to), no conversion step, and no
+measurable speed cost. The `-fp32` directory can go.
+
+If a host *does* have `avx512_bf16` (`lscpu | grep avx512_bf16`), bf16 should
+additionally be faster there — untested, and not a reason to convert anything.
 
 ## Mount the weights readable, or you get the wrong error
 

@@ -42,12 +42,19 @@ Cost: **615 s/page** on this CPU — measured end to end on a real scan
 (Wells Fargo 1099-INT, 31 blocks, all correct: payer block, recipient block,
 document id, phone). Model load is another ~30 s on top, once per process.
 
-> An earlier note says **25.1 s/page**, and calling it "unverified" was too
-> quick — the probe that produced it passed a file path, so it was a working
-> read. The likelier reading is that **both are right and the unit is wrong**:
-> VL is a VLM that generates text block by block, so cost tracks *how much text
-> is on the page*, not the page count. 615 s was a dense 31-block tax form at
-> 2480x3508; 25 s was a sparser sample. Size on content, not pages.
+> An earlier note says **25.1 s/page**. It does **not reproduce**, and my
+> attempt to reconcile the two was wrong as well.
+>
+> I first guessed the gap was document complexity — 615 s on a dense 31-block
+> form against 25 s on a sparse sample. So I re-ran the *same file the 25 s
+> figure came from*: **578.9 s**, 11 blocks, 8,847 characters. Same file, 23x
+> the time. Content explains part of the spread between documents; it does not
+> explain this.
+>
+> Plan on **~600 s/page** on this hardware and configuration until someone
+> reproduces 25 s and says what was different. Candidates worth testing, in
+> order: fp32 versus bf16 (below), and CPU contention — the corpus extraction
+> was running through Inngest on this box during both measurements.
 >
 > The figure **933 s/doc** is separately **withdrawn** — it timed a crash,
 > because VL was failing at import when it was measured.

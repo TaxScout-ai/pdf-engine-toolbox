@@ -392,3 +392,36 @@ class TaskAcceptedResponse(BaseModel):
     task_id: str
     status: str = "pending"
     message: str = "Processing started. Poll GET /tasks/{task_id} for status."
+
+
+class VlBlock(BaseModel):
+    """One layout block VL read. No word boxes — see VlReadData."""
+
+    label: str | None = None
+    text: str
+
+
+class VlPageRead(BaseModel):
+    page: int
+    blocks: list[VlBlock]
+
+
+class VlReadData(BaseModel):
+    """VL's reading of the requested pages.
+
+    `geometry` is always "block" and is stated in the payload rather than left
+    implicit. VL emits no word-level boxes in any mode, and the viewer
+    highlight, the searchable PDF and evidence anchoring are all built on
+    per-word geometry — so a caller that mistakes this for an OCR response
+    gets nothing to highlight. Naming it here makes that mistake loud.
+    """
+
+    pages: list[VlPageRead]
+    model: str
+    geometry: str
+
+
+class VlReadResponse(BaseModel):
+    success: bool
+    data: VlReadData
+    processing_time_ms: float

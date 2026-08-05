@@ -12,8 +12,11 @@ from app.models.requests import (
     BookmarksRequest,
     ExtractTablesRequest,
     OcrRequest,
+    VlReadRequest,
 )
 from app.models.responses import (
+    VlReadResponse,
+    VlReadData,
     TextExtractResponse,
     TextExtractData,
     PageText,
@@ -248,4 +251,63 @@ async def ocr_pages(request: OcrRequest, background_tasks: BackgroundTasks):
         task_id=task.id,
         status="pending",
         message=f"OCR started for {page_count} pages. Poll GET /tasks/{task.id} for status.",
+    )
+
+
+def _run_vl_read(task_id: str, pdf_bytes: bytes, pages: list[int]) -> None:
+    """Background worker for /text/read."""
+    from app.services import vl_service
+
+    try:
+        data = vl_service.read_pages(pdf_bytes, pages)
+        cache_service.put_cached(
+            cache_service.content_hash(pdf_bytes), "vl_read", data,
+            {"pages": sorted(pages)},
+        )
+        task_service.complete_task(task_id, data)
+    except Exception as e:
+        # Fails the task rather than completing it with nothing. An empty read
+        # reported as success would be indistinguishable from "the document
+        # does not say that" — the exact silence that let the paddlepaddle
+        # 3.3.x OCR regression pass 82 tests.
+        task_service.fail_task(task_id, str(e))
+
+
+@router.post("/read", dependencies=[Depends(require_auth)])
+async def vl_read_pages(request: VlReadRequest, background_tasks: BackgroundTasks):
+    """Read pages with PaddleOCR-VL 1.6 — a second opinion, not an OCR replacement.
+
+    Returns block-level text with **no word geometry**. When you need per-word
+    boxes (viewer highlight, searchable PDF, evidence anchoring), use
+    ``POST /text/ocr``; VL cannot serve those and never will.
+
+    Use this where a read is *doubted*: a field that failed corroboration
+    against the text layer, a confidence below threshold, a validator flag. VL
+    reads ``3497`` where the standard recogniser reads ``349``.
+
+    Always a background task. At ~25 s/page even two pages outrun a typical
+    HTTP client timeout. Poll ``GET /tasks/{task_id}``.
+    """
+    pdf_bytes = await download_service.download_pdf(request.source_url)
+
+    # VL is the most expensive thing this service does; never pay twice.
+    src_hash = cache_service.content_hash(pdf_bytes)
+    cache_params = {"pages": sorted(request.pages)}
+    cached = cache_service.get_cached(src_hash, "vl_read", cache_params)
+    if cached and isinstance(cached, dict):
+        return VlReadResponse(
+            success=True, data=VlReadData(**cached), processing_time_ms=0.0
+        )
+
+    task = task_service.create_task("vl_read")
+    background_tasks.add_task(_run_vl_read, task.id, pdf_bytes, request.pages)
+
+    return TaskAcceptedResponse(
+        success=True,
+        task_id=task.id,
+        status="pending",
+        message=(
+            f"VL read started for {len(request.pages)} page(s) "
+            f"(~25 s/page). Poll GET /tasks/{task.id}."
+        ),
     )

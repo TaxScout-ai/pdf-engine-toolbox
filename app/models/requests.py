@@ -506,3 +506,18 @@ class OcrRequest(BaseModel):
     pages: list[int] | None = Field(default=None, description="Pages to OCR (all if omitted)")
     language: str = Field(default="en", description="PaddleOCR language code (en, fr, de, ch, etc.)")
     dpi: int = Field(default=300, ge=150, le=600, description="Rendering DPI for OCR")
+
+
+class VlReadRequest(BaseModel):
+    """Request for POST /text/read — the VL second opinion.
+
+    `pages` is required and has no "all pages" form on purpose. VL runs at
+    ~25 s/page, so an omitted page list on a 40-page return is seventeen
+    minutes of CPU asked for by accident. Callers are expected to name the
+    pages a read is actually doubted on.
+    """
+
+    source_url: str
+    pages: list[int] = Field(
+        ..., min_length=1, description="1-based pages to read. Required."
+    )

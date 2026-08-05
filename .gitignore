@@ -11,3 +11,4 @@ test_output/
 .mypy_cache/
 .paddlex/
 *.so
+docker-compose.override.yml

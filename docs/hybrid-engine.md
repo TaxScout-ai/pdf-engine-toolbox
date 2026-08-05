@@ -358,6 +358,40 @@ Timing variance is wide, too: the same v6 configuration measured 37.6 s and
 30.8 s on identical input. Do not read a difference under about 25% from a
 single run.
 
+## The text-layer feed does not fix the case it was built for
+
+TAX-3502 exists because bank statement `ced8fdd3` reads `Total Withdrawal
+$80,274.85` and extraction reported `-0.018027485`. Feeding the model the
+document's own text was the fix, and it shipped to production.
+
+Run against CPA ground truth, both arms, same document, 8,826 characters of
+text layer available:
+
+    WITHOUT text layer   withdrawals = 80274.85
+    WITH text layer      withdrawals = 80274.85
+    CPA                              = 80274.85
+    old pipeline                     = -0.018027485
+
+**The case is fixed either way.** Almost certainly by the model: the statement
+service resolves `UNIVERSAL_EXTRACTION_MODEL`, now `gemini-3.6-flash`, and the
+misread was recorded on an earlier one.
+
+Every measurement of the feed now points the same way:
+
+- single-page IRS forms: 6.2% -> 6.0% unsupported numbers — noise
+- bank statements: 38.2% -> 33.3% — weak, and on an indirect metric
+- the motivating case: fixed without it
+
+No accuracy benefit has been demonstrated on any of them. The one steady effect
+is recall — the model fills more fields with the text present (3 -> 7 on a
+1099-INT, 9 -> 11 on a statement) and those extra values are corroborated.
+
+The cost is real and per-extraction: a few thousand tokens on 81% of documents.
+
+**Recommendation: gate it and measure the recall claim, or revert it.** It went
+to production on weak evidence, which was a mistake, and the strongest test
+available says it does not do the thing it was justified by.
+
 ## Routing
 
 - text layer present (81%) → lite, no recognition at all

@@ -116,10 +116,17 @@ This retroactively explains every failed diagnosis:
       /usr/local/bin/vlloader -c "...load the model..."
 
   `vlloader` does not match `^(next-server|node|bun|uv|chrome.*|python|python3.1[0-9])$`,
-  so it drops out of the preferred-victim list. It is still killable at the
-  hard threshold — this buys priority, not immunity, and is a dev-box
-  workaround rather than a production answer. The production answer is bf16 on
-  a host with enough headroom that nothing is near the floor.
+  so it drops off the preferred-victim list.
+
+  **Tested here, and it is not enough.** The load died again under the new
+  name. `--prefer` only orders the candidates; once available memory crosses
+  the floor earlyoom still kills something, and the loader is by then the
+  largest growing process on the box. The rename buys priority, not immunity.
+
+  So on this host there are only two honest options: free real memory before
+  loading, or do not load fp32 here. The production answer is **bf16 on a host
+  with enough headroom that nothing goes near the floor** — which is also why
+  the fp32 conversion should not follow this to production.
 - Any host running VL needs this checked. `earlyoom --prefer python` on a box
   that also runs a 2-4 GB model load is a standing trap, and it fires as a
   polite SIGTERM that looks like an application crash.

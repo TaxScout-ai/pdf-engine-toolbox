@@ -521,3 +521,13 @@ class VlReadRequest(BaseModel):
     pages: list[int] = Field(
         ..., min_length=1, description="1-based pages to read. Required."
     )
+    bbox: tuple[float, float, float, float] | None = Field(
+        default=None,
+        description=(
+            "Optional (x0, y0, x1, y1) in PDF points. When given, only this "
+            "region of the single requested page is read. This is the "
+            "affordable shape: a word crop costs ~27 s against ~615 s for a "
+            "dense page, because VL decodes text block by block and a crop has "
+            "almost none to decode."
+        ),
+    )

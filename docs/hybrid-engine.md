@@ -447,6 +447,24 @@ That is the escalation path justified on ground truth rather than on argument:
 a value the cheap readers get wrong, on a document whose OCR confidence is 0.75
 against 0.993 on clean scans, that the expensive reader gets right for 55 s.
 
+## This box cannot hold a sweep alongside the rest of the stack
+
+A tiled sweep is six sequential model passes. Each is survivable alone; six in a
+row alongside a 9.6 GB `qemu-system-x86` and a 3.7 GB `next-server` dips
+available memory under `earlyoom`'s 12% floor mid-run, and the loader — which
+`--prefer` names by process name — is what gets taken.
+
+Available memory read 18 GB *after* the kill released it. That number is not
+headroom, it is the aftermath, and it is why "there was plenty free" is not
+evidence of anything here.
+
+**Do not re-run a sweep on this host to prove it works.** It already did: the
+2x3 sweep of `a63ef233` recovered `3497 STATE ROUTE 52 PINE BUSH, NY 12566` in
+~88 s. Re-proving it costs a cycle and proves the same thing when it survives
+and nothing when it does not.
+
+Run sweeps where VL has the box to itself, or free real memory first.
+
 ## Routing
 
 - text layer present (81%) → lite, no recognition at all

@@ -3,7 +3,7 @@
 import base64
 import time
 
-from fastapi import APIRouter, BackgroundTasks, Depends, Response
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Response
 
 from app.dependencies import require_auth
 from app.models.requests import (
@@ -254,15 +254,23 @@ async def ocr_pages(request: OcrRequest, background_tasks: BackgroundTasks):
     )
 
 
-def _run_vl_read(task_id: str, pdf_bytes: bytes, pages: list[int]) -> None:
+def _run_vl_read(
+    task_id: str,
+    pdf_bytes: bytes,
+    pages: list[int],
+    bbox: tuple[float, float, float, float] | None = None,
+) -> None:
     """Background worker for /text/read."""
     from app.services import vl_service
 
     try:
-        data = vl_service.read_pages(pdf_bytes, pages)
+        if bbox is not None:
+            data = vl_service.read_region(pdf_bytes, pages[0], bbox)
+        else:
+            data = vl_service.read_pages(pdf_bytes, pages)
         cache_service.put_cached(
             cache_service.content_hash(pdf_bytes), "vl_read", data,
-            {"pages": sorted(pages)},
+            {"pages": sorted(pages), "bbox": list(bbox) if bbox else None},
         )
         task_service.complete_task(task_id, data)
     except Exception as e:
@@ -292,15 +300,29 @@ async def vl_read_pages(request: VlReadRequest, background_tasks: BackgroundTask
 
     # VL is the most expensive thing this service does; never pay twice.
     src_hash = cache_service.content_hash(pdf_bytes)
-    cache_params = {"pages": sorted(request.pages)}
+    cache_params = {
+        "pages": sorted(request.pages),
+        "bbox": list(request.bbox) if request.bbox else None,
+    }
     cached = cache_service.get_cached(src_hash, "vl_read", cache_params)
     if cached and isinstance(cached, dict):
         return VlReadResponse(
             success=True, data=VlReadData(**cached), processing_time_ms=0.0
         )
 
+    # A region belongs to one page. Accepting a page list with a bbox would
+    # silently read the region out of the first page and ignore the rest, which
+    # is the kind of quiet wrong answer this service exists to avoid.
+    if request.bbox is not None and len(request.pages) != 1:
+        raise HTTPException(
+            status_code=400,
+            detail="bbox applies to a single page; pass exactly one page.",
+        )
+
     task = task_service.create_task("vl_read")
-    background_tasks.add_task(_run_vl_read, task.id, pdf_bytes, request.pages)
+    background_tasks.add_task(
+        _run_vl_read, task.id, pdf_bytes, request.pages, request.bbox
+    )
 
     return TaskAcceptedResponse(
         success=True,

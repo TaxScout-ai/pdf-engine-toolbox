@@ -465,6 +465,27 @@ and nothing when it does not.
 
 Run sweeps where VL has the box to itself, or free real memory first.
 
+## The engine 500s were load, and the engine says the wrong thing under it
+
+Eleven documents in the corpus run failed with `invalid status code: 500`. They
+share no size, type or content pattern — a 4-page text engagement letter is in
+the set alongside a consolidated 1099.
+
+Replayed against an idle engine, the same document returns 200 on both
+`/text/extract` and `/text/ocr`. The 500s span 00:46-07:20, inside the same
+window as the 155 watchdog starvations: one 258-document burst, one cause.
+
+**Not a defect to chase.** But two things are worth fixing whenever this path is
+touched next:
+
+- **500 is the wrong answer to being busy.** An overloaded service should say
+  429 or 503 so the caller knows to back off; a 500 reads as "this document is
+  broken" and the caller retries into the same wall, which is what happened.
+- **The bench's `--in-flight` throttles on org concurrency, not engine
+  concurrency.** 12 in flight was inside the org cap and still buried the
+  engine. Whatever paces dispatch has to know about the slowest shared
+  dependency, not just the database's opinion of capacity.
+
 ## Routing
 
 - text layer present (81%) → lite, no recognition at all

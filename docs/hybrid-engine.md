@@ -418,6 +418,35 @@ someone hunting a model problem that does not exist. Recording the reason cost
 one afternoon and turned a false catastrophe into a queueing bug and two real
 defects.
 
+## What the CPA-ground-truth benchmark actually says
+
+Seven cases from `extraction_corrections`, scored against what the CPA settled
+on. Raw score: 2 pass, 5 fail. The raw score overstates the failures.
+
+| case | CPA | pipeline before | today | reading |
+|---|---|---|---|---|
+| `ced8fdd3` withdrawals | 80274.85 | -0.018027485 | **80274.85** | fixed |
+| `d9bcf0f0` box 7 | false | true | **false** | fixed |
+| `a63ef233` address | 3497 STATE ROUTE 52 | 349 … | **3467 …** | **still wrong** |
+| `6320b222` amount | 4687.2 | 46 | (absent) | **actually correct** |
+| `45e158da` account type | Cryptocurrency | Cry | other | soft miss |
+| `ced8fdd3` tax_year | 2025 | Dec 31, 2025 | (absent) | control — schema wording |
+| `6d12a565` line 1z | 137295 | 0.01 | (absent) | unverified |
+
+**The `amount` case is read correctly.** The universal extractor returns
+`total_premiums_paid_chf = 4687.2`, exactly the CPA value. The benchmark expects
+a field called `amount` because the ground truth was mined from the correction
+UI, which names fields differently from the extractor. That is a third naming
+mismatch in this instrument, after key-walking and unrouted form types.
+
+**The address is a real, live misread.** `3467` against `3497` — the digit is
+no longer dropped, it is wrong. And VL on a crop of that same region reads
+`3497 STATE ROUTE 52 PINE BUSH, NY 12566` exactly.
+
+That is the escalation path justified on ground truth rather than on argument:
+a value the cheap readers get wrong, on a document whose OCR confidence is 0.75
+against 0.993 on clean scans, that the expensive reader gets right for 55 s.
+
 ## Routing
 
 - text layer present (81%) → lite, no recognition at all

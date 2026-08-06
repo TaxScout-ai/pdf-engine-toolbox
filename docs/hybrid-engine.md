@@ -486,6 +486,49 @@ touched next:
   engine. Whatever paces dispatch has to know about the slowest shared
   dependency, not just the database's opinion of capacity.
 
+## Unlimited OCR (Baidu, June 2026): tested, not adopted
+
+Ran it end to end on CPU. The weights are deleted; this is what it cost and what
+it showed, so nobody repeats it.
+
+**It works, and it works well on documents.** Five pages of a 76-page Raymond
+James consolidated 1099, one forward pass:
+
+    570.3 s for 5 pages (114.1 s/page), 10,653 characters
+    "RAYMOND JAMES / 2025 COMPOSITE STATEMENT OF 1099 FORMS / Quinton B
+     Hamlett / 1016 Weber Court, Charlotte, NC 28211 ..."
+
+Pages separated by `<PAGE>`, structure intact, one continuous text — no chunk
+seams to reconcile. That is the thing it is actually for.
+
+**It reads nothing on our hard scan.** On `a63ef233`, the ID photocopy, it
+returned `![](images/0.jpg)` — 18 characters, no text, in 136.9 s. It decided
+the page was a picture. That is consistent with its training: PDF documents
+annotated by PaddleOCR, not photocopied identity cards. VL reads the same file
+correctly.
+
+So it is **not** a candidate for escalation, which is exactly where the bad
+scans are.
+
+**What it would cost to adopt**, independent of whether it is good:
+
+- 20 hardcoded `.cuda()` / `autocast("cuda")` calls in `modeling_unlimitedocr.py`.
+  CPU inference needs them patched out — we would carry that fork.
+- Pinned `transformers==4.57.1`. On 5.x the model code dies on
+  `is_torch_fx_available`, removed in the major version.
+- `torchvision` and `matplotlib` are imported but not declared.
+- 6.67 GB of weights, ~3.34B params, bf16.
+
+**Where it might still earn a place:** 11% of our corpus is 21+ pages, 33
+documents are 40+, and the longest is 152. Those are consolidated 1099s that we
+currently slice into 8-page chunks and reconcile — the exact for-loop the paper
+argues against. One-shot parsing removes the seams. At 114 s/page on CPU a
+112-page document is ~3.5 hours; that is a nightly batch, not a pipeline stage,
+and a GPU changes the arithmetic entirely.
+
+Revisit **if** chunk reconciliation is measured to be losing data. Not before —
+the case for it is architectural elegance until that number exists.
+
 ## Routing
 
 - text layer present (81%) → lite, no recognition at all

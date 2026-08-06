@@ -392,6 +392,32 @@ The cost is real and per-extraction: a few thousand tokens on 81% of documents.
 to production on weak evidence, which was a mistake, and the strongest test
 available says it does not do the thing it was justified by.
 
+## A 38% failure rate that was not a failure rate
+
+A 324-document corpus run finished with **123 documents failed**. Read at face
+value that is 38% of extraction broken. The reasons say otherwise:
+
+    starved by the stuck-document watchdog   109
+    engine returned HTTP 500                  11
+    real extraction failure                    2
+    no reason recorded (pre-fix row)           1
+
+**Two.** The rest is queueing. Documents were dispatched faster than the org
+concurrency cap admits them, sat idle past the watchdog's 30-minute threshold,
+and were marked failed by the monitor rather than by extraction.
+
+`scripts/dev-test-bench-run.ts` warns about exactly this in a comment above
+`inFlightCeiling` — "a first full run lost 90 documents that way" — and I
+dispatched 258 at once anyway. Keep the in-flight set near the concurrency cap;
+the throttle is 5 documents/minute **per returnId**, which is why the bench
+spreads a corpus across 24 returns rather than one.
+
+The measurement lesson is the one worth keeping: **without per-document failure
+reasons this reads as "38% of extraction is broken"** and would have sent
+someone hunting a model problem that does not exist. Recording the reason cost
+one afternoon and turned a false catastrophe into a queueing bug and two real
+defects.
+
 ## Routing
 
 - text layer present (81%) → lite, no recognition at all

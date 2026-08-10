@@ -54,6 +54,15 @@ MAX_VL_PAGES = int(os.environ.get("VL_MAX_PAGES", "8"))
 _pipeline = None
 
 
+# Ceiling on the rasterised region handed to VL, in points.
+#
+# Memory for a VLM scales with pixels, and pixels come from the region size —
+# which is caller-controlled. A document whose MediaBox is malformed (the
+# accuracy corpus has pages reporting 3.4e38) renders to an image no machine
+# can hold. Clamping keeps a bad bbox a bad answer instead of a dead service.
+MAX_REGION_POINTS = 2000.0
+
+
 class VlUnavailable(RuntimeError):
     """VL was asked for and cannot be served.
 
@@ -229,6 +238,19 @@ def read_region(
     clip = clip & source.rect
     if clip.is_empty:
         raise ValueError(f"bbox {bbox} falls outside page {page}")
+    if clip.width > MAX_REGION_POINTS or clip.height > MAX_REGION_POINTS:
+        logger.warning(
+            "vl_service: region %.0fx%.0f pt exceeds %.0f, clamping",
+            clip.width,
+            clip.height,
+            MAX_REGION_POINTS,
+        )
+        clip = fitz.Rect(
+            clip.x0,
+            clip.y0,
+            clip.x0 + min(clip.width, MAX_REGION_POINTS),
+            clip.y0 + min(clip.height, MAX_REGION_POINTS),
+        )
 
     # Render the crop rather than carving a one-region PDF: VL takes an image,
     # and rendering is where the resolution decision belongs. 300 dpi because

@@ -33,7 +33,7 @@ from app.models.responses import (
     OcrWord,
     TaskAcceptedResponse,
 )
-from app.services import download_service, pdf_service, task_service, cache_service
+from app.services import download_service, pdf_service, task_service, cache_service, load_gate
 
 router = APIRouter(prefix="/text")
 
@@ -173,6 +173,8 @@ def _run_ocr(task_id: str, pdf_bytes: bytes, pages, language: str, dpi: int):
     ``complete_task()`` from executing.
     """
     task_service.set_processing(task_id)
+    # The slot was taken when the request was accepted; it belongs to this run
+    # and must come back however the run ends, or the gate closes for good.
     try:
         result = pdf_service.ocr_pages(pdf_bytes, pages, language, dpi)
         pdf_b64 = base64.b64encode(result["pdf_bytes"]).decode("ascii")
@@ -197,6 +199,8 @@ def _run_ocr(task_id: str, pdf_bytes: bytes, pages, language: str, dpi: int):
         task_service.complete_task(task_id, ocr_data)
     except Exception as e:
         task_service.fail_task(task_id, str(e))
+    finally:
+        load_gate.release_read_slot()
 
 
 @router.post("/ocr", dependencies=[Depends(require_auth)])
@@ -241,6 +245,11 @@ async def ocr_pages(request: OcrRequest, background_tasks: BackgroundTasks):
     # server_det at 300 DPI can exceed HTTP client timeouts (120s) even for
     # single-page documents on constrained instances (t3a.medium / 2 vCPU).
     # The client polls via GET /tasks/{task_id} with OCR_TIMEOUT_MS.
+    # Refuse now rather than accept and stall. Under a 258-document burst this
+    # path answered 500 for eleven documents that were individually fine, and a
+    # 500 reads as "the document is broken" — so the caller retried into the
+    # same wall. 503 with Retry-After says what is actually true.
+    load_gate.acquire_read_slot("ocr")
     task = task_service.create_task("ocr")
     background_tasks.add_task(
         _run_ocr, task.id, pdf_bytes, request.pages, request.language, request.dpi,
@@ -263,6 +272,7 @@ def _run_vl_read(
     """Background worker for /text/read."""
     from app.services import vl_service
 
+    # The slot was taken at accept time and is released in `finally` below.
     try:
         if bbox is not None:
             data = vl_service.read_region(pdf_bytes, pages[0], bbox)
@@ -279,6 +289,8 @@ def _run_vl_read(
         # does not say that" — the exact silence that let the paddlepaddle
         # 3.3.x OCR regression pass 82 tests.
         task_service.fail_task(task_id, str(e))
+    finally:
+        load_gate.release_read_slot()
 
 
 @router.post("/read", dependencies=[Depends(require_auth)])
@@ -319,6 +331,7 @@ async def vl_read_pages(request: VlReadRequest, background_tasks: BackgroundTask
             detail="bbox applies to a single page; pass exactly one page.",
         )
 
+    load_gate.acquire_read_slot("vl_read")
     task = task_service.create_task("vl_read")
     background_tasks.add_task(
         _run_vl_read, task.id, pdf_bytes, request.pages, request.bbox

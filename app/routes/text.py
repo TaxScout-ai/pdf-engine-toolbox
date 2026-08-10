@@ -3,7 +3,7 @@
 import base64
 import time
 
-from fastapi import APIRouter, BackgroundTasks, Depends, Response
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Response
 
 from app.dependencies import require_auth
 from app.models.requests import (
@@ -12,8 +12,11 @@ from app.models.requests import (
     BookmarksRequest,
     ExtractTablesRequest,
     OcrRequest,
+    VlReadRequest,
 )
 from app.models.responses import (
+    VlReadResponse,
+    VlReadData,
     TextExtractResponse,
     TextExtractData,
     PageText,
@@ -30,7 +33,7 @@ from app.models.responses import (
     OcrWord,
     TaskAcceptedResponse,
 )
-from app.services import download_service, pdf_service, task_service, cache_service
+from app.services import download_service, pdf_service, task_service, cache_service, load_gate
 
 router = APIRouter(prefix="/text")
 
@@ -170,6 +173,8 @@ def _run_ocr(task_id: str, pdf_bytes: bytes, pages, language: str, dpi: int):
     ``complete_task()`` from executing.
     """
     task_service.set_processing(task_id)
+    # The slot was taken when the request was accepted; it belongs to this run
+    # and must come back however the run ends, or the gate closes for good.
     try:
         result = pdf_service.ocr_pages(pdf_bytes, pages, language, dpi)
         pdf_b64 = base64.b64encode(result["pdf_bytes"]).decode("ascii")
@@ -194,6 +199,8 @@ def _run_ocr(task_id: str, pdf_bytes: bytes, pages, language: str, dpi: int):
         task_service.complete_task(task_id, ocr_data)
     except Exception as e:
         task_service.fail_task(task_id, str(e))
+    finally:
+        load_gate.release_read_slot()
 
 
 @router.post("/ocr", dependencies=[Depends(require_auth)])
@@ -238,6 +245,11 @@ async def ocr_pages(request: OcrRequest, background_tasks: BackgroundTasks):
     # server_det at 300 DPI can exceed HTTP client timeouts (120s) even for
     # single-page documents on constrained instances (t3a.medium / 2 vCPU).
     # The client polls via GET /tasks/{task_id} with OCR_TIMEOUT_MS.
+    # Refuse now rather than accept and stall. Under a 258-document burst this
+    # path answered 500 for eleven documents that were individually fine, and a
+    # 500 reads as "the document is broken" — so the caller retried into the
+    # same wall. 503 with Retry-After says what is actually true.
+    load_gate.acquire_read_slot("ocr")
     task = task_service.create_task("ocr")
     background_tasks.add_task(
         _run_ocr, task.id, pdf_bytes, request.pages, request.language, request.dpi,
@@ -248,4 +260,89 @@ async def ocr_pages(request: OcrRequest, background_tasks: BackgroundTasks):
         task_id=task.id,
         status="pending",
         message=f"OCR started for {page_count} pages. Poll GET /tasks/{task.id} for status.",
+    )
+
+
+def _run_vl_read(
+    task_id: str,
+    pdf_bytes: bytes,
+    pages: list[int],
+    bbox: tuple[float, float, float, float] | None = None,
+) -> None:
+    """Background worker for /text/read."""
+    from app.services import vl_service
+
+    # The slot was taken at accept time and is released in `finally` below.
+    try:
+        if bbox is not None:
+            data = vl_service.read_region(pdf_bytes, pages[0], bbox)
+        else:
+            data = vl_service.read_pages(pdf_bytes, pages)
+        cache_service.put_cached(
+            cache_service.content_hash(pdf_bytes), "vl_read", data,
+            {"pages": sorted(pages), "bbox": list(bbox) if bbox else None},
+        )
+        task_service.complete_task(task_id, data)
+    except Exception as e:
+        # Fails the task rather than completing it with nothing. An empty read
+        # reported as success would be indistinguishable from "the document
+        # does not say that" — the exact silence that let the paddlepaddle
+        # 3.3.x OCR regression pass 82 tests.
+        task_service.fail_task(task_id, str(e))
+    finally:
+        load_gate.release_read_slot()
+
+
+@router.post("/read", dependencies=[Depends(require_auth)])
+async def vl_read_pages(request: VlReadRequest, background_tasks: BackgroundTasks):
+    """Read pages with PaddleOCR-VL 1.6 — a second opinion, not an OCR replacement.
+
+    Returns block-level text with **no word geometry**. When you need per-word
+    boxes (viewer highlight, searchable PDF, evidence anchoring), use
+    ``POST /text/ocr``; VL cannot serve those and never will.
+
+    Use this where a read is *doubted*: a field that failed corroboration
+    against the text layer, a confidence below threshold, a validator flag. VL
+    reads ``3497`` where the standard recogniser reads ``349``.
+
+    Always a background task. At ~25 s/page even two pages outrun a typical
+    HTTP client timeout. Poll ``GET /tasks/{task_id}``.
+    """
+    pdf_bytes = await download_service.download_pdf(request.source_url)
+
+    # VL is the most expensive thing this service does; never pay twice.
+    src_hash = cache_service.content_hash(pdf_bytes)
+    cache_params = {
+        "pages": sorted(request.pages),
+        "bbox": list(request.bbox) if request.bbox else None,
+    }
+    cached = cache_service.get_cached(src_hash, "vl_read", cache_params)
+    if cached and isinstance(cached, dict):
+        return VlReadResponse(
+            success=True, data=VlReadData(**cached), processing_time_ms=0.0
+        )
+
+    # A region belongs to one page. Accepting a page list with a bbox would
+    # silently read the region out of the first page and ignore the rest, which
+    # is the kind of quiet wrong answer this service exists to avoid.
+    if request.bbox is not None and len(request.pages) != 1:
+        raise HTTPException(
+            status_code=400,
+            detail="bbox applies to a single page; pass exactly one page.",
+        )
+
+    load_gate.acquire_read_slot("vl_read")
+    task = task_service.create_task("vl_read")
+    background_tasks.add_task(
+        _run_vl_read, task.id, pdf_bytes, request.pages, request.bbox
+    )
+
+    return TaskAcceptedResponse(
+        success=True,
+        task_id=task.id,
+        status="pending",
+        message=(
+            f"VL read started for {len(request.pages)} page(s) "
+            f"(~25 s/page). Poll GET /tasks/{task.id}."
+        ),
     )

@@ -2154,8 +2154,22 @@ def _get_paddle_ocr(lang: str = "en"):
                 "OCR requires paddleocr>=3.0 and paddlepaddle>=3.0 packages. "
                 "pip install paddlepaddle paddleocr"
             )
+        # PP-OCRv6 medium, shipped with paddleocr 3.7. Pinned by model name
+        # rather than `ocr_version` so the tier is explicit: the v6 family
+        # spans 1.5M-34.5M parameters and the default could move.
+        #
+        # Measured against PP-OCRv5 on a Wells Fargo 1099-INT at 200 dpi:
+        # mean recognition confidence 0.993 against 0.950, 10,536 characters
+        # against 10,339, same sampled lines character-for-character.
+        #
+        # It is SLOWER here — 37.6 s against 13.8 s. The advertised 5.2x
+        # speedup is quoted for Intel Xeon with OpenVINO, which this image does
+        # not use. The trade bought is confidence, and confidence is what
+        # decides which fields get escalated for a second opinion; a cleaner
+        # signal there costs less downstream than the seconds cost here.
         _paddle_ocr_instances[lang] = PaddleOCR(
-            ocr_version="PP-OCRv5",
+            text_detection_model_name="PP-OCRv6_medium_det",
+            text_recognition_model_name="PP-OCRv6_medium_rec",
             lang=lang,
             device="cpu",
             use_doc_orientation_classify=False,

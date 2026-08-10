@@ -1,6 +1,6 @@
 fastapi==0.129.0
 uvicorn[standard]==0.41.0
-PyMuPDF==1.27.1
+PyMuPDF==1.28.0
 pydantic==2.12.5
 pydantic-settings==2.13.1
 httpx==0.28.1

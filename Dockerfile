@@ -47,6 +47,15 @@ RUN useradd -m -r appuser && \
 USER appuser
 
 # Expose port
+# BLAS thread count. Without this the recognition stack runs single-threaded and
+# PaddleOCR-VL takes ~23x longer — 578 s against 25 s for the same page on a
+# 28-core box. Paddle prints "OMP_NUM_THREADS set to 8, not 1" at startup,
+# which reads like a warning and is actually the line confirming it is usable.
+#
+# A default rather than a requirement: override it to match the cores the
+# container is actually given, or the threads oversubscribe and fight.
+ENV OMP_NUM_THREADS=8
+
 EXPOSE 8000
 
 # Health check

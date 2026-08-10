@@ -1,0 +1,290 @@
+"""PaddleOCR-VL 1.6 — the second opinion on what a scan actually says.
+
+── What this is for ────────────────────────────────────────────────────────
+
+Not a replacement for `/text/ocr`. VL emits no word-level geometry in either
+mode (probed via `layout_det_res` and `use_ocr_for_image_block`), and three
+shipped features are built on per-word boxes: the viewer highlight, the
+searchable PDF, and the coordinates evidence is anchored to. PaddleOCR keeps
+that job.
+
+What VL does better is read. On the drivers-licence case it returns `3497`
+where the standard recogniser returns `349` — a dropped digit in a street
+number, the same class of defect that reaches CPAs as a correction.
+
+So this is the arm you call when a read is *doubted*: a field that failed
+corroboration against the text layer, a confidence below threshold, a figure a
+validator flagged. Calling it on whole documents is the wrong shape — see cost.
+
+── Cost, and why the caller must be selective ──────────────────────────────
+
+25.1 s/page on CPU. That is per page, measured on this hardware, and it is why
+every entry point here takes an explicit page list rather than defaulting to
+the whole document.
+
+(An older note says 933 s/doc. It is withdrawn: it timed a crash, because VL
+was failing at import when it was measured. Do not size capacity from it.)
+
+── Why the weights are converted ───────────────────────────────────────────
+
+The published weights are bfloat16. A CPU without AVX512-BF16 aborts on load,
+which is this machine and most cheap instances. The 620 tensors are converted
+to fp32 once, offline, into ``PaddleOCR-VL-1.6-fp32``. This is not a memory
+problem — that diagnosis was made once and was wrong; the box has 61 GB.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+from typing import Any
+
+logger = logging.getLogger(__name__)
+
+#: Where the fp32-converted weights live. Overridable so an image can ship them
+#: somewhere else without a code change.
+VL_MODEL_DIR = os.environ.get(
+    "VL_MODEL_DIR", "/models/PaddleOCR-VL-1.6-fp32"
+)
+
+#: Pages per request. VL is ~25 s/page, so a caller that asks for a 40-page
+#: return is asking for seventeen minutes; refusing is kinder than accepting.
+MAX_VL_PAGES = int(os.environ.get("VL_MAX_PAGES", "8"))
+
+_pipeline = None
+
+
+# Ceiling on the rasterised region handed to VL, in points.
+#
+# Memory for a VLM scales with pixels, and pixels come from the region size —
+# which is caller-controlled. A document whose MediaBox is malformed (the
+# accuracy corpus has pages reporting 3.4e38) renders to an image no machine
+# can hold. Clamping keeps a bad bbox a bad answer instead of a dead service.
+MAX_REGION_POINTS = 2000.0
+
+
+class VlUnavailable(RuntimeError):
+    """VL was asked for and cannot be served.
+
+    Raised rather than returning empty output. An empty OCR result reported as
+    success is exactly how the paddlepaddle 3.3.x regression stayed invisible
+    through 82 passing tests, and the same shape of silence in a *reading*
+    service would be read as "the document does not say that".
+    """
+
+
+def _load_pipeline():
+    """Import and construct lazily, exactly like the paddle imports elsewhere.
+
+    The whole point of the lite image is that it can be built without this
+    stack; a module-level import here would put it back.
+    """
+    global _pipeline
+    if _pipeline is not None:
+        return _pipeline
+
+    if not os.path.isdir(VL_MODEL_DIR):
+        raise VlUnavailable(
+            f"VL weights not found at {VL_MODEL_DIR}. They are the fp32 "
+            "conversion, not the published bfloat16 release — a bf16 load "
+            "aborts on a CPU without AVX512-BF16."
+        )
+
+    try:
+        from paddleocr import PaddleOCRVL
+    except ImportError as exc:  # pragma: no cover - depends on image
+        raise VlUnavailable(
+            "PaddleOCR-VL requires the full image; the lite build ships no "
+            "recognition stack."
+        ) from exc
+
+    _pipeline = PaddleOCRVL(vl_rec_model_dir=VL_MODEL_DIR)
+    logger.info("vl_service: pipeline ready (%s)", VL_MODEL_DIR)
+    return _pipeline
+
+
+def read_pages(pdf_bytes: bytes, pages: list[int]) -> dict[str, Any]:
+    """Read the named pages with VL.
+
+    :param pages: 1-based page numbers. Explicit and required — there is no
+        "all pages" convenience, because at 25 s/page that convenience is how a
+        caller accidentally spends a quarter of an hour.
+    :returns: ``{"pages": [{"page": int, "blocks": [{"label", "text"}]}]}``
+
+    Block-level only, and named so at the boundary: callers that need word
+    boxes must use ``/text/ocr``. Returning a shape that merely *looks* like
+    the OCR response would invite silently wiring VL into the viewer highlight,
+    where it would produce nothing to highlight.
+    """
+    if not pages:
+        raise ValueError("pages must be a non-empty list of 1-based page numbers")
+    if len(pages) > MAX_VL_PAGES:
+        raise ValueError(
+            f"{len(pages)} pages requested, limit is {MAX_VL_PAGES}. "
+            f"VL runs ~25 s/page; ask for the pages in doubt, not the document."
+        )
+
+    import tempfile
+
+    import fitz
+
+    pipeline = _load_pipeline()
+    document = fitz.open(stream=pdf_bytes, filetype="pdf")
+
+    out: list[dict[str, Any]] = []
+    for page_number in pages:
+        if page_number < 1 or page_number > document.page_count:
+            raise ValueError(
+                f"page {page_number} out of range (document has "
+                f"{document.page_count})"
+            )
+
+        # One page at a time: a caller asking for page 7 of a 40-page return
+        # should pay for one page, not for the pipeline walking to it.
+        single = fitz.open()
+        single.insert_pdf(document, from_page=page_number - 1, to_page=page_number - 1)
+
+        # `predict` takes a path or a numpy array, never bytes. Handed bytes it
+        # does not raise — it logs "Not supported input data type ... has been
+        # ignored" and yields a result with nothing in it, which is how the
+        # first real run reported success on zero blocks.
+        blocks: list[dict[str, Any]] = []
+        with tempfile.NamedTemporaryFile(suffix=".pdf") as page_file:
+            single.save(page_file.name)
+            page_file.flush()
+            for result in pipeline.predict(page_file.name):
+                res = (result.json if hasattr(result, "json") else {}).get("res", {})
+                for block in res.get("parsing_res_list") or []:
+                    text = (block.get("block_content") or "").strip()
+                    if text:
+                        blocks.append(
+                            {"label": block.get("block_label"), "text": text}
+                        )
+                break
+
+        out.append({"page": page_number, "blocks": blocks})
+
+    # A read that returns nothing is not a successful read.
+    #
+    # This module's own docstring says an empty result reported as success is
+    # the failure mode to avoid, and the first real run did exactly that:
+    # `{"ok": true, "blocks": 0}` on a page that plainly has text. Guarding
+    # only the *unavailable* case was not enough — the pipeline ran, returned,
+    # and produced nothing, which downstream reads as "the document does not
+    # say that" rather than "the reader is broken".
+    if not any(page["blocks"] for page in out):
+        raise VlUnavailable(
+            f"VL returned no text for page(s) {pages}. Either the pages are "
+            "genuinely blank, or the block payload key changed — check "
+            "`parsing_res_list` block keys against `block_content`."
+        )
+
+    return {"pages": out, "model": "PaddleOCR-VL-1.6", "geometry": "block"}
+
+
+def read_region(
+    pdf_bytes: bytes,
+    page: int,
+    bbox: tuple[float, float, float, float],
+    padding: float = 8.0,
+) -> dict[str, Any]:
+    """Read one region of one page — the shape VL is actually affordable in.
+
+    ── Why this exists ────────────────────────────────────────────────────────
+
+    VL decodes block by block, so its cost tracks *generated characters*, not
+    pages. Measured on this CPU:
+
+        a driving licence, a few dozen chars       25 s
+        a page with 8,847 chars                   579 s
+        a dense 1099-INT, 31 blocks               615 s
+
+    Sending a page to settle one disputed number means paying to regenerate
+    thousands of characters we already hold — the text layer gives them exactly,
+    in 8-13 ms, for 81% of the corpus. The 20-odd characters actually in doubt
+    are what VL should be asked for.
+
+    That is the difference between a ten-minute call and a seconds-long one,
+    and it is why VL can sit in the pipeline at all rather than in a nightly
+    batch.
+
+    :param bbox: ``(x0, y0, x1, y1)`` in PDF points, as PaddleOCR reports word
+        geometry. Where the disputed value sits.
+    :param padding: points added on every side. Characters clipped at the crop
+        edge are read wrong or dropped, and a tight box around OCR's idea of a
+        word is exactly where that happens — the padding costs nothing and the
+        clipping costs the answer.
+    """
+    if page < 1:
+        raise ValueError("page is 1-based")
+
+    import tempfile
+
+    import fitz
+
+    pipeline = _load_pipeline()
+    document = fitz.open(stream=pdf_bytes, filetype="pdf")
+    if page > document.page_count:
+        raise ValueError(
+            f"page {page} out of range (document has {document.page_count})"
+        )
+
+    x0, y0, x1, y1 = bbox
+    if x1 <= x0 or y1 <= y0:
+        raise ValueError(f"bbox {bbox} is empty or inverted")
+
+    source = document[page - 1]
+    clip = fitz.Rect(x0 - padding, y0 - padding, x1 + padding, y1 + padding)
+    clip = clip & source.rect
+    if clip.is_empty:
+        raise ValueError(f"bbox {bbox} falls outside page {page}")
+    if clip.width > MAX_REGION_POINTS or clip.height > MAX_REGION_POINTS:
+        logger.warning(
+            "vl_service: region %.0fx%.0f pt exceeds %.0f, clamping",
+            clip.width,
+            clip.height,
+            MAX_REGION_POINTS,
+        )
+        clip = fitz.Rect(
+            clip.x0,
+            clip.y0,
+            clip.x0 + min(clip.width, MAX_REGION_POINTS),
+            clip.y0 + min(clip.height, MAX_REGION_POINTS),
+        )
+
+    # Render the crop rather than carving a one-region PDF: VL takes an image,
+    # and rendering is where the resolution decision belongs. 300 dpi because
+    # the crop is small — the cost here is pixels, and pixels are cheap next to
+    # generated tokens.
+    crop = fitz.open()
+    page_out = crop.new_page(width=clip.width, height=clip.height)
+    page_out.show_pdf_page(page_out.rect, document, page - 1, clip=clip)
+
+    blocks: list[dict[str, Any]] = []
+    with tempfile.NamedTemporaryFile(suffix=".pdf") as region_file:
+        crop.save(region_file.name)
+        region_file.flush()
+        for result in pipeline.predict(region_file.name):
+            res = (result.json if hasattr(result, "json") else {}).get("res", {})
+            for block in res.get("parsing_res_list") or []:
+                text = (block.get("block_content") or "").strip()
+                if text:
+                    blocks.append({"label": block.get("block_label"), "text": text})
+            break
+
+    # Same rule as read_pages: nothing read is not a successful read. On a crop
+    # it is likelier than on a page — an empty result usually means the bbox is
+    # wrong, and silently returning "" would read as "the field is blank".
+    if not blocks:
+        raise VlUnavailable(
+            f"VL read nothing in {bbox} on page {page}. The region is probably "
+            "wrong, or the value is not where the geometry says it is."
+        )
+
+    return {
+        "page": page,
+        "bbox": list(bbox),
+        "blocks": blocks,
+        "model": "PaddleOCR-VL-1.6",
+        "geometry": "block",
+    }

@@ -12,6 +12,8 @@ services:
       - WORKERS=2
       - REQUEST_TIMEOUT_SECONDS=120
       - PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK=True
+      # Single-threaded BLAS costs PaddleOCR-VL ~23x. Match your core count.
+      - OMP_NUM_THREADS=8
     volumes:
       - ./app:/app/app
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload

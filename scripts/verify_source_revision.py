@@ -165,12 +165,16 @@ def _download_archive(commit: str, archive_path: Path) -> None:
 def _extract_archive(archive_path: Path, extract_root: Path) -> None:
     extract_root.mkdir()
     with tarfile.open(archive_path, mode="r:gz") as archive:
-        members = archive.getmembers()
-        if len(members) > MAX_ARCHIVE_MEMBERS:
-            raise ValueError("public source archive has too many members")
-        expanded_bytes = sum(member.size for member in members if member.isfile())
-        if expanded_bytes > MAX_EXTRACTED_SOURCE_BYTES:
-            raise ValueError("public source archive exceeds expanded size limit")
+        members: list[tarfile.TarInfo] = []
+        expanded_bytes = 0
+        for member in archive:
+            if len(members) >= MAX_ARCHIVE_MEMBERS:
+                raise ValueError("public source archive has too many members")
+            if member.isfile():
+                expanded_bytes += member.size
+                if expanded_bytes > MAX_EXTRACTED_SOURCE_BYTES:
+                    raise ValueError("public source archive exceeds expanded size limit")
+            members.append(member)
         archive.extractall(extract_root, members=members, filter="data")
 
 

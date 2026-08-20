@@ -161,3 +161,14 @@ def test_source_extraction_rejects_expansion_bomb(monkeypatch, tmp_path):
 
     with pytest.raises(ValueError, match="expanded size limit"):
         verifier._extract_archive(archive_path, tmp_path / "public")
+
+
+def test_source_extraction_stops_before_materializing_too_many_members(monkeypatch, tmp_path):
+    archive_path = tmp_path / "source.tar.gz"
+    with tarfile.open(archive_path, mode="w:gz") as archive:
+        archive.addfile(tarfile.TarInfo("repo/first"))
+        archive.addfile(tarfile.TarInfo("repo/second"))
+    monkeypatch.setattr(verifier, "MAX_ARCHIVE_MEMBERS", 1)
+
+    with pytest.raises(ValueError, match="too many members"):
+        verifier._extract_archive(archive_path, tmp_path / "public")

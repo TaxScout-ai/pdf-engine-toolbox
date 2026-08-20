@@ -10,6 +10,7 @@ import re
 import socket
 import ssl
 import sys
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -25,6 +26,9 @@ SYSTEM_CA_FILES = (
     Path("/etc/pki/tls/certs/ca-bundle.crt"),
     Path("/etc/ssl/cert.pem"),
 )
+MAX_JSON_RESPONSE_BYTES = 1024 * 1024
+JSON_TOTAL_TIMEOUT_SECONDS = 20
+JSON_READ_CHUNK_BYTES = 64 * 1024
 
 
 def _trusted_tls_context() -> ssl.SSLContext:
@@ -165,6 +169,46 @@ def probe_url(url: str) -> None:
         return
 
 
+def _set_response_socket_timeout(
+    response: http.client.HTTPResponse,
+    timeout_seconds: float,
+) -> None:
+    """Apply the remaining total deadline to the underlying socket when available."""
+    fp = getattr(response, "fp", None)
+    raw = getattr(fp, "raw", None)
+    sock = getattr(raw, "_sock", None)
+    if sock is not None:
+        sock.settimeout(max(0.001, timeout_seconds))
+
+
+def _read_bounded_json(response: http.client.HTTPResponse) -> dict[str, Any]:
+    """Decode one JSON object within strict byte and wall-clock limits."""
+    deadline = time.monotonic() + JSON_TOTAL_TIMEOUT_SECONDS
+    chunks: list[bytes] = []
+    total = 0
+    reader = getattr(response, "read1", None)
+    if reader is None:
+        reader = response.read
+
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("JSON response exceeded total time limit")
+        _set_response_socket_timeout(response, remaining)
+        chunk = reader(min(JSON_READ_CHUNK_BYTES, MAX_JSON_RESPONSE_BYTES - total + 1))
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > MAX_JSON_RESPONSE_BYTES:
+            raise ValueError("JSON response exceeds size limit")
+        chunks.append(chunk)
+
+    payload = json.loads(b"".join(chunks))
+    if not isinstance(payload, dict):
+        raise ValueError("JSON response must be an object")
+    return payload
+
+
 def fetch_public_json(
     url: str,
     *,
@@ -177,7 +221,7 @@ def fetch_public_json(
         timeout=20,
         max_redirects=5 if allow_redirects else 0,
     ) as response:
-        payload = json.load(response)
+        payload = _read_bounded_json(response)
         headers = {key.lower(): value for key, value in response.getheaders()}
     return payload, headers
 

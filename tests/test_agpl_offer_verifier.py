@@ -273,3 +273,32 @@ def test_tls_context_ignores_poisoned_ca_environment(monkeypatch):
     assert context.verify_mode == verifier.ssl.CERT_REQUIRED
     assert context.check_hostname is True
     assert context.get_ca_certs()
+
+
+def test_json_fetch_rejects_oversized_success_response(monkeypatch):
+    class OversizedResponse:
+        def read1(self, size):
+            return b"x" * size
+
+    monkeypatch.setattr(verifier, "MAX_JSON_RESPONSE_BYTES", 16)
+
+    with pytest.raises(ValueError, match="size limit"):
+        verifier._read_bounded_json(OversizedResponse())
+
+
+def test_json_fetch_enforces_total_deadline_during_stream(monkeypatch):
+    class SlowResponse:
+        reads = 0
+
+        def read1(self, _size):
+            self.reads += 1
+            return b"{"
+
+    response = SlowResponse()
+    moments = iter((0.0, 0.25, 2.0))
+    monkeypatch.setattr(verifier, "JSON_TOTAL_TIMEOUT_SECONDS", 1)
+    monkeypatch.setattr(verifier.time, "monotonic", lambda: next(moments))
+
+    with pytest.raises(TimeoutError, match="total time limit"):
+        verifier._read_bounded_json(response)
+    assert response.reads == 1

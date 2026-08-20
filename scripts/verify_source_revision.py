@@ -42,6 +42,8 @@ def scoped_files(root: Path) -> dict[str, str]:
         path.relative_to(root).as_posix()
         for path in app_root.rglob("*")
         if path.is_file()
+        and "__pycache__" not in path.parts
+        and path.suffix not in {".pyc", ".pyo"}
     )
 
     missing = sorted(path for path in paths if not (root / path).is_file())

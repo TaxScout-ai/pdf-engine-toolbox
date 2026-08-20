@@ -5,7 +5,7 @@ import time
 
 from fastapi import APIRouter, Depends, Response
 
-from app.dependencies import require_auth
+from app.dependencies import require_auth, require_sensitive_auth
 from app.models.requests import (
     AuthorizeAndUnlockRequest,
     DecryptRequest,
@@ -39,7 +39,7 @@ async def decrypt_pdf(request: DecryptRequest):
 @router.post(
     "/authorize-and-unlock",
     response_model=AuthorizedUnlockResponse,
-    dependencies=[Depends(require_auth)],
+    dependencies=[Depends(require_sensitive_auth)],
 )
 async def authorize_and_unlock_pdf(request: AuthorizeAndUnlockRequest, response: Response):
     """Authorize one known password and return a temporary in-memory derivative."""

@@ -12,7 +12,7 @@ class Settings(BaseSettings):
     # Server
     log_level: str = "info"
     max_upload_size_mb: int = 100
-    workers: int = 2
+    workers: int = 1
     request_timeout_seconds: int = 120
 
     # Outbound source downloads. Requests fail closed unless the hostname is
@@ -22,6 +22,8 @@ class Settings(BaseSettings):
 
     # HMAC auth
     max_timestamp_drift_ms: int = 5 * 60 * 1000  # 5 minutes
+    sensitive_auth_max_timestamp_drift_ms: int = 60 * 1000
+    sensitive_nonce_cache_max_entries: int = 10_000
 
     # Cache
     cache_enabled: bool = True

@@ -2,14 +2,15 @@
 
 import hashlib
 import hmac
+import secrets
 import time
 
 import fitz  # PyMuPDF
 import pytest
 from fastapi.testclient import TestClient
 
-from app.main import app
 from app.config import settings
+from app.main import app
 
 
 @pytest.fixture
@@ -22,20 +23,35 @@ def client():
 def auth_headers():
     """Generate valid HMAC auth headers for testing."""
 
-    def _make_headers(method: str = "POST", path: str = "/info", body: str = "{}"):
+    def _make_headers(
+        method: str = "POST",
+        path: str = "/info",
+        body: str = "{}",
+        *,
+        version: int = 1,
+        nonce: str | None = None,
+    ):
         timestamp = str(int(time.time() * 1000))
         body_hash = hashlib.sha256(body.encode()).hexdigest()
-        message = f"{timestamp}:{method}:{path}:{body_hash}"
+        if version == 2:
+            nonce = nonce or secrets.token_hex(16)
+            message = f"v2:{timestamp}:{nonce}:{method}:{path}:{body_hash}"
+        else:
+            message = f"{timestamp}:{method}:{path}:{body_hash}"
         signature = hmac.new(
             settings.pdf_engine_secret.encode(),
             message.encode(),
             hashlib.sha256,
         ).hexdigest()
-        return {
+        headers = {
             "X-Timestamp": timestamp,
             "X-Signature": signature,
             "Content-Type": "application/json",
         }
+        if version == 2:
+            headers["X-Auth-Version"] = "2"
+            headers["X-Nonce"] = nonce
+        return headers
 
     return _make_headers
 
@@ -61,7 +77,7 @@ def sample_pdf_bytes():
         )
         page.insert_text(
             fitz.Point(72, 150),
-            f"Form 1099-INT Interest Statement for tax year 2024",
+            "Form 1099-INT Interest Statement for tax year 2024",
             fontsize=12,
             fontname="helv",
         )

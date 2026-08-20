@@ -46,6 +46,9 @@ def test_validate_source_url_accepts_exact_allowed_presigned_host():
         f"https://user@{ALLOWED_HOST}/file.pdf?{PRESIGNED_QUERY}",
         f"https://{ALLOWED_HOST}:8443/file.pdf?{PRESIGNED_QUERY}",
         f"https://{ALLOWED_HOST}/file.pdf?{PRESIGNED_QUERY}#fragment",
+        f"https://{ALLOWED_HOST}//169.254.169.254/latest/meta-data?{PRESIGNED_QUERY}",
+        f"https://{ALLOWED_HOST}/\\evil.example/file.pdf?{PRESIGNED_QUERY}",
+        f"https://{ALLOWED_HOST}/file%ZZ.pdf?{PRESIGNED_QUERY}",
         f"https://{ALLOWED_HOST}/file.pdf",
     ],
 )
@@ -59,6 +62,17 @@ def test_validate_source_url_fails_closed_without_allowlist(monkeypatch):
 
     with pytest.raises(SourceUrlRejectedError, match="allowlist is not configured"):
         download_service._validate_source_url(source_url())
+
+
+def test_validate_source_url_accepts_percent_encoded_s3_target():
+    url = source_url(
+        path="/clients/Smith%20%26%20Co/2026%20return%20%281%29.pdf"
+    )
+
+    host, target = download_service._validate_source_url(url)
+
+    assert host == ALLOWED_HOST
+    assert target.startswith("/clients/Smith%20%26%20Co/")
 
 
 @pytest.mark.asyncio

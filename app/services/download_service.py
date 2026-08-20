@@ -2,6 +2,7 @@
 
 import asyncio
 import ipaddress
+import re
 import socket
 from urllib.parse import parse_qs, urlsplit
 
@@ -18,6 +19,18 @@ _REQUIRED_PRESIGN_QUERY_KEYS = {
     "x-amz-credential",
     "x-amz-signature",
 }
+
+# Keep the request target within an origin-form HTTP target. In particular,
+# `//attacker.example/path` is forbidden: httpx resolves that network-path
+# reference against base_url by replacing the approved authority.
+#
+# AWS presigned S3 URLs use RFC 3986 unreserved/sub-delim characters plus
+# percent-encoded octets. A raw backslash, whitespace, fragment, malformed
+# percent escape, or second leading slash is never required.
+_SAFE_REQUEST_TARGET = re.compile(
+    r"/(?!/)(?:[A-Za-z0-9._~!$&'()*+,;=:@/-]|%[0-9A-Fa-f]{2})*"
+    r"(?:\?(?:[A-Za-z0-9._~!$&'()*+,;=:@/?-]|%[0-9A-Fa-f]{2})*)?"
+)
 
 
 def _configured_allowed_hosts() -> frozenset[str]:
@@ -89,6 +102,8 @@ def _validate_source_url(url: str) -> tuple[str, str]:
         raise SourceUrlRejectedError()
     if parsed.query:
         request_target = f"{request_target}?{parsed.query}"
+    if not _SAFE_REQUEST_TARGET.fullmatch(request_target):
+        raise SourceUrlRejectedError("Source URL request target is not permitted")
     return canonical_host, request_target
 
 

@@ -36,13 +36,35 @@ RUN python /tmp/download_models.py || echo "Model pre-download failed; models wi
 
 # Copy application code
 COPY app/ ./app/
+COPY LICENSE NOTICE.md README.md third-party-sources.json ./
+
+# Bind the image to the exact public source revision used to build it. The
+# deployment pipeline must supply the full Git SHA after that revision is
+# available in the public repository.
+ARG SOURCE_COMMIT
+RUN set -eu; \
+    printf '%s\n' "$SOURCE_COMMIT" | grep -Eq '^[0-9a-f]{40}$' || { \
+        echo "SOURCE_COMMIT must be a full 40-character lowercase Git SHA" >&2; \
+        exit 1; \
+    }; \
+    curl -fsSLI \
+        "https://github.com/TaxScout-ai/pdf-engine-toolbox/tree/$SOURCE_COMMIT" \
+        >/dev/null || { \
+        echo "SOURCE_COMMIT is not available from the public repository" >&2; \
+        exit 1; \
+    }; \
+    printf '%s\n' "$SOURCE_COMMIT" > /app/build-commit; \
+    chmod 0444 /app/build-commit
+LABEL org.opencontainers.image.source="https://github.com/TaxScout-ai/pdf-engine-toolbox"
+LABEL org.opencontainers.image.licenses="AGPL-3.0-only"
+LABEL org.opencontainers.image.revision=$SOURCE_COMMIT
 
 # Create non-root user and cache/temp directories
 # Copy PaddleX models if they were pre-downloaded
 RUN useradd -m -r appuser && \
     mkdir -p /app/cache /tmp/libreoffice && \
     (cp -r /root/.paddlex /home/appuser/.paddlex 2>/dev/null || true) && \
-    chown -R appuser:appuser /app /tmp/libreoffice /home/appuser
+    chown -R appuser:appuser /app/cache /tmp/libreoffice /home/appuser
 
 USER appuser
 
@@ -53,5 +75,6 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=10s --retries=3 \
     CMD curl -f http://localhost:8000/health || exit 1
 
-# Run with uvicorn
-CMD uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers ${WORKERS:-1}
+# Run with uvicorn. The explicit exec preserves signal delivery while allowing
+# WORKERS to remain runtime-configurable.
+CMD ["sh", "-c", "exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers \"${WORKERS:-1}\""]

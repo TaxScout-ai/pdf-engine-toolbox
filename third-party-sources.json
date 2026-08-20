@@ -1,0 +1,18 @@
+{
+  "components": [
+    {
+      "name": "PyMuPDF",
+      "version": "1.27.1",
+      "license": "AGPL-3.0-only",
+      "source_url": "https://files.pythonhosted.org/packages/1b/0c/40dda0cc4bd2220a2ef75f8c53dd7d8ed1e29681fcb3df75db6ee9677a7e/pymupdf-1.27.1.tar.gz",
+      "sha256": "4afbde0769c336717a149ab0de3330dcb75378f795c1a8c5af55c1a628b17d55"
+    },
+    {
+      "name": "MuPDF",
+      "version": "1.27.1",
+      "license": "AGPL-3.0-or-later",
+      "source_url": "https://mupdf.com/downloads/archive/mupdf-1.27.1-source.tar.gz",
+      "sha256": "5a1fce7373048a3e8985d6616ee37caaa1885ab90c1b0b3956bdb53d6ecd22af"
+    }
+  ]
+}

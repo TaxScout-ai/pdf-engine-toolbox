@@ -18,6 +18,8 @@ REPOSITORY_URL = "https://github.com/TaxScout-ai/pdf-engine-toolbox"
 CODELOAD_HOST = "codeload.github.com"
 CODELOAD_PATH = "/TaxScout-ai/pdf-engine-toolbox/tar.gz"
 MAX_SOURCE_ARCHIVE_BYTES = 50 * 1024 * 1024
+MAX_EXTRACTED_SOURCE_BYTES = 200 * 1024 * 1024
+MAX_ARCHIVE_MEMBERS = 10_000
 SYSTEM_CA_FILES = (
     Path("/etc/ssl/certs/ca-certificates.crt"),
     Path("/etc/pki/tls/certs/ca-bundle.crt"),
@@ -160,14 +162,24 @@ def _download_archive(commit: str, archive_path: Path) -> None:
         connection.close()
 
 
+def _extract_archive(archive_path: Path, extract_root: Path) -> None:
+    extract_root.mkdir()
+    with tarfile.open(archive_path, mode="r:gz") as archive:
+        members = archive.getmembers()
+        if len(members) > MAX_ARCHIVE_MEMBERS:
+            raise ValueError("public source archive has too many members")
+        expanded_bytes = sum(member.size for member in members if member.isfile())
+        if expanded_bytes > MAX_EXTRACTED_SOURCE_BYTES:
+            raise ValueError("public source archive exceeds expanded size limit")
+        archive.extractall(extract_root, members=members, filter="data")
+
+
 def download_public_source(commit: str, destination: Path) -> Path:
     archive_path = destination / "source.tar.gz"
     _download_archive(commit, archive_path)
 
     extract_root = destination / "public"
-    extract_root.mkdir()
-    with tarfile.open(archive_path, mode="r:gz") as archive:
-        archive.extractall(extract_root, filter="data")
+    _extract_archive(archive_path, extract_root)
     roots = [path for path in extract_root.iterdir() if path.is_dir()]
     if len(roots) != 1:
         raise ValueError("public source archive has an unexpected layout")

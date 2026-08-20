@@ -38,7 +38,7 @@ docker build \
   -t pdf-engine-toolbox:"$(git rev-parse --short HEAD)" .
 ```
 
-For Docker Compose, export the same full public revision first:
+For an immutable Docker Compose run, export the same full public revision first:
 
 ```bash
 export SOURCE_COMMIT="$(git rev-parse HEAD)"
@@ -47,7 +47,9 @@ docker compose up --build
 
 The build rejects missing, abbreviated, uppercase, otherwise malformed, or
 non-public source revisions. It verifies that the exact revision is reachable
-from the public repository before producing the image.
+from the public repository before producing the image. The Compose service runs
+the verified image without bind-mounting local source or enabling hot reload, so
+its reported build commit remains true for the code serving requests.
 
 The third-party source URLs are part of this offer. If an upstream source
 archive becomes unavailable, an operator must mirror the hash-identical

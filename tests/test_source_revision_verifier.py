@@ -2,6 +2,7 @@
 
 import io
 import socket
+import tarfile
 from pathlib import Path
 
 import pytest
@@ -54,12 +55,15 @@ def test_compare_sources_rejects_code_claiming_another_revision(tmp_path):
 def test_runtime_removes_generated_bytecode_before_execution():
     dockerfile = Path("Dockerfile").read_text(encoding="utf-8")
     dockerignore = Path(".dockerignore").read_text(encoding="utf-8")
+    compose = Path("docker-compose.yml").read_text(encoding="utf-8")
 
     assert "-name __pycache__" in dockerfile
     assert "-name '*.pyc'" in dockerfile
     assert "PYTHONDONTWRITEBYTECODE=1" in dockerfile
     assert "**/__pycache__" in dockerignore
     assert "**/*.pyc" in dockerignore
+    assert "./app:/app/app" not in compose
+    assert "--reload" not in compose
 
 
 def test_build_source_download_ignores_proxy_and_ca_environment(monkeypatch, tmp_path):
@@ -144,3 +148,16 @@ def test_build_source_download_rejects_redirect_without_reading_body(monkeypatch
 
     with pytest.raises(OSError, match="HTTP 302"):
         verifier._download_archive("a" * 40, tmp_path / "source.tar.gz")
+
+
+def test_source_extraction_rejects_expansion_bomb(monkeypatch, tmp_path):
+    archive_path = tmp_path / "source.tar.gz"
+    payload = b"x" * 20
+    member = tarfile.TarInfo("repo/app/large.py")
+    member.size = len(payload)
+    with tarfile.open(archive_path, mode="w:gz") as archive:
+        archive.addfile(member, io.BytesIO(payload))
+    monkeypatch.setattr(verifier, "MAX_EXTRACTED_SOURCE_BYTES", 10)
+
+    with pytest.raises(ValueError, match="expanded size limit"):
+        verifier._extract_archive(archive_path, tmp_path / "public")

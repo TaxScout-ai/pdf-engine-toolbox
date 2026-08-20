@@ -15,6 +15,11 @@ class Settings(BaseSettings):
     workers: int = 2
     request_timeout_seconds: int = 120
 
+    # Outbound source downloads. Requests fail closed unless the hostname is
+    # listed explicitly (comma-separated, no schemes or paths). Production
+    # should list only the S3 virtual-host endpoints used by TaxScout.
+    pdf_source_allowed_hosts: str = ""
+
     # HMAC auth
     max_timestamp_drift_ms: int = 5 * 60 * 1000  # 5 minutes
 

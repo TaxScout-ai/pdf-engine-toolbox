@@ -13,6 +13,16 @@ from app.config import settings
 from app.main import app
 
 
+@pytest.fixture(autouse=True)
+def isolate_sensitive_nonce_ledger(tmp_path, monkeypatch):
+    """Keep replay-ledger state isolated while exercising persistence semantics."""
+    monkeypatch.setattr(
+        settings,
+        "sensitive_nonce_db_path",
+        str(tmp_path / "sensitive-nonces.sqlite3"),
+    )
+
+
 @pytest.fixture
 def client():
     """FastAPI test client."""

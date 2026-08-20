@@ -2,10 +2,15 @@
 
 import base64
 import hashlib
+import hmac
 import json
+import sqlite3
+import time
 from unittest.mock import AsyncMock, patch
 
 import fitz
+
+from app.config import settings
 
 
 def _encrypted_pdf(
@@ -206,6 +211,55 @@ def test_authorize_and_unlock_rejects_replayed_v2_request(
 
     assert first.status_code == 200
     assert replay.status_code == 401
+
+
+def test_sensitive_nonce_persists_for_full_future_timestamp_window(
+    client,
+    auth_headers,
+    sample_pdf_bytes,
+):
+    encrypted = _encrypted_pdf(sample_pdf_bytes)
+    signed_at_ms = int(time.time() * 1000) + 59_000
+    body = json.dumps(
+        {
+            "source_url": "https://example.com/protected.pdf",
+            "password": "known-password",
+            "authority_attested": True,
+        }
+    )
+    nonce = "cd" * 16
+    body_hash = hashlib.sha256(body.encode()).hexdigest()
+    message = f"v2:{signed_at_ms}:{nonce}:POST:/security/authorize-and-unlock:{body_hash}"
+    signature = hmac.new(
+        settings.pdf_engine_secret.encode(),
+        message.encode(),
+        hashlib.sha256,
+    ).hexdigest()
+    headers = {
+        "X-Timestamp": str(signed_at_ms),
+        "X-Signature": signature,
+        "X-Auth-Version": "2",
+        "X-Nonce": nonce,
+        "Content-Type": "application/json",
+    }
+
+    with patch(
+        "app.services.download_service.download_pdf",
+        new_callable=AsyncMock,
+        return_value=encrypted,
+    ):
+        first = client.post(
+            "/security/authorize-and-unlock",
+            content=body,
+            headers=headers,
+        )
+        with sqlite3.connect(settings.sensitive_nonce_db_path) as connection:
+            expiry = connection.execute(
+                "SELECT expires_at_ms FROM sensitive_hmac_nonces"
+            ).fetchone()[0]
+
+    assert first.status_code == 200
+    assert expiry == signed_at_ms + settings.sensitive_auth_max_timestamp_drift_ms
 
 
 def test_authorize_and_unlock_allows_owner_password_when_copy_is_restricted(

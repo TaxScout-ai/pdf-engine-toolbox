@@ -1,10 +1,11 @@
 """HMAC-SHA256 request authentication."""
 
-import asyncio
 import hashlib
 import hmac
 import re
+import sqlite3
 import time
+from pathlib import Path
 
 from fastapi import Request
 
@@ -12,24 +13,52 @@ from app.config import settings
 from app.utils.errors import AuthenticationError
 
 _NONCE_PATTERN = re.compile(r"^[0-9a-fA-F]{32,64}$")
-_nonce_lock = asyncio.Lock()
-_used_sensitive_nonces: dict[str, int] = {}
 
 
-async def _claim_sensitive_nonce(nonce: str, now_ms: int) -> None:
-    async with _nonce_lock:
-        expired = [
-            value for value, expires_at in _used_sensitive_nonces.items() if expires_at <= now_ms
-        ]
-        for value in expired:
-            _used_sensitive_nonces.pop(value, None)
-
-        if nonce in _used_sensitive_nonces:
-            raise AuthenticationError("Request replay detected")
-        if len(_used_sensitive_nonces) >= settings.sensitive_nonce_cache_max_entries:
+def _claim_sensitive_nonce(nonce: str, now_ms: int, expires_at_ms: int) -> None:
+    """Atomically claim a nonce in the restart- and replica-shared ledger."""
+    path = Path(settings.sensitive_nonce_db_path)
+    nonce_hash = hashlib.sha256(nonce.encode("ascii")).hexdigest()
+    connection: sqlite3.Connection | None = None
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        connection = sqlite3.connect(path, timeout=5, isolation_level=None)
+        connection.execute("PRAGMA busy_timeout = 5000")
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS sensitive_hmac_nonces (
+                nonce_hash TEXT PRIMARY KEY,
+                expires_at_ms INTEGER NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            "DELETE FROM sensitive_hmac_nonces WHERE expires_at_ms < ?",
+            (now_ms,),
+        )
+        count = connection.execute("SELECT COUNT(*) FROM sensitive_hmac_nonces").fetchone()[0]
+        if count >= settings.sensitive_nonce_cache_max_entries:
             raise AuthenticationError("Sensitive request replay cache is full")
-
-        _used_sensitive_nonces[nonce] = now_ms + settings.sensitive_auth_max_timestamp_drift_ms
+        try:
+            connection.execute(
+                "INSERT INTO sensitive_hmac_nonces (nonce_hash, expires_at_ms) VALUES (?, ?)",
+                (nonce_hash, expires_at_ms),
+            )
+        except sqlite3.IntegrityError as error:
+            raise AuthenticationError("Request replay detected") from error
+        connection.execute("COMMIT")
+    except AuthenticationError:
+        if connection is not None and connection.in_transaction:
+            connection.execute("ROLLBACK")
+        raise
+    except (OSError, sqlite3.Error) as error:
+        if connection is not None and connection.in_transaction:
+            connection.execute("ROLLBACK")
+        raise AuthenticationError("Sensitive request replay store unavailable") from error
+    finally:
+        if connection is not None:
+            connection.close()
 
 
 async def verify_hmac(request: Request, *, require_v2: bool = False) -> None:
@@ -88,7 +117,14 @@ async def verify_hmac(request: Request, *, require_v2: bool = False) -> None:
         raise AuthenticationError("Invalid signature")
 
     if require_v2:
-        await _claim_sensitive_nonce(nonce, now_ms)
+        # The cache entry must cover the request's full acceptance window. A
+        # future-dated request accepted near +drift remains replayable until
+        # signed timestamp + drift, not merely first-seen time + drift.
+        _claim_sensitive_nonce(
+            nonce,
+            now_ms,
+            ts + settings.sensitive_auth_max_timestamp_drift_ms,
+        )
 
 
 async def verify_sensitive_hmac(request: Request) -> None:

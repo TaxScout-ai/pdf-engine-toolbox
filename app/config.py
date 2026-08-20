@@ -24,6 +24,7 @@ class Settings(BaseSettings):
     max_timestamp_drift_ms: int = 5 * 60 * 1000  # 5 minutes
     sensitive_auth_max_timestamp_drift_ms: int = 60 * 1000
     sensitive_nonce_cache_max_entries: int = 10_000
+    sensitive_nonce_db_path: str = "/data/pdf-engine-sensitive-nonces.sqlite3"
 
     # Cache
     cache_enabled: bool = True

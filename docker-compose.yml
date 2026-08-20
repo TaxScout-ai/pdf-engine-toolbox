@@ -8,6 +8,8 @@ services:
         SOURCE_COMMIT: ${SOURCE_COMMIT:?Set SOURCE_COMMIT to the full public Git SHA}
     ports:
       - "8000:8000"
+    volumes:
+      - pdf-engine-replay:/data
     environment:
       - PDF_ENGINE_SECRET=local-dev-secret-change-me
       - LOG_LEVEL=debug
@@ -16,3 +18,6 @@ services:
       - REQUEST_TIMEOUT_SECONDS=120
       - PDF_SOURCE_ALLOWED_HOSTS=taxscout-local.s3.us-east-1.amazonaws.com
       - PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK=True
+
+volumes:
+  pdf-engine-replay:

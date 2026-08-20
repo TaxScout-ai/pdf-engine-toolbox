@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends
 
 from app.dependencies import require_auth
 from app.models.requests import InfoRequest
-from app.models.responses import PdfInfoResponse, PdfInfoData, PageInfo, ErrorDetail
+from app.models.responses import PageInfo, PdfInfoData, PdfInfoResponse
 from app.services import download_service, pdf_service
 
 router = APIRouter()
@@ -28,6 +28,11 @@ async def get_pdf_info(request: InfoRequest):
             page_count=info["page_count"],
             pages=[PageInfo(**p) for p in info["pages"]],
             is_encrypted=info["is_encrypted"],
+            requires_password=info["requires_password"],
+            authentication_level=info["authentication_level"],
+            permissions=info["permissions"],
+            has_digital_signatures=info["has_digital_signatures"],
+            signature_state=info["signature_state"],
             metadata=info["metadata"],
         ),
         processing_time_ms=round(elapsed, 2),

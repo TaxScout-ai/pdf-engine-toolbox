@@ -1,7 +1,6 @@
 """Pydantic request models for all API endpoints."""
 
-from pydantic import BaseModel, Field
-
+from pydantic import BaseModel, Field, SecretStr
 
 # ============================================================================
 # Common Types
@@ -367,6 +366,14 @@ class DecryptRequest(BaseModel):
 
     source_url: str
     password: str = Field(min_length=1, description="Password to unlock the PDF")
+
+
+class AuthorizeAndUnlockRequest(BaseModel):
+    """Request for authorized, in-memory PDF unlocking."""
+
+    source_url: str
+    password: SecretStr
+    authority_attested: bool
 
 
 class SanitizeRequest(BaseModel):

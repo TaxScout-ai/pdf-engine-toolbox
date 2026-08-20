@@ -15,13 +15,34 @@ import structlog
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from app.config import settings
-from app.utils.errors import PdfEngineError
-from app.routes import (
-    health, info, pages, transform, redact, text,
-    thumbnails, build, images, metadata, security, annotations,
-    repair, convert, classify, tasks,
+from app.build_identity import (
+    LICENSE_IDENTIFIER,
+    LICENSE_URL,
+    corresponding_license_url,
+    corresponding_source_url,
+    read_build_commit,
 )
+from app.config import settings
+from app.routes import (
+    annotations,
+    build,
+    classify,
+    convert,
+    health,
+    images,
+    info,
+    metadata,
+    pages,
+    redact,
+    repair,
+    security,
+    source,
+    tasks,
+    text,
+    thumbnails,
+    transform,
+)
+from app.utils.errors import PdfEngineError
 
 # Configure structured logging
 structlog.configure(
@@ -35,6 +56,20 @@ structlog.configure(
 )
 
 log = structlog.get_logger()
+
+
+def source_offer_headers() -> dict[str, str]:
+    """Return the revision-pinned AGPL source headers for any response path."""
+    build_commit = read_build_commit()
+    source_url = corresponding_source_url(build_commit)
+    license_url = corresponding_license_url(build_commit)
+    return {
+        "X-Source-Code": source_url,
+        "Link": (
+            f'<{source_url}>; rel="source", '
+            f'<{license_url}>; rel="license"'
+        ),
+    }
 
 
 @asynccontextmanager
@@ -64,8 +99,13 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="PDF Engine Toolbox",
-    description="PyMuPDF-based PDF processing microservice",
+    description=(
+        "PyMuPDF-based PDF processing microservice. Licensed under "
+        f"{LICENSE_IDENTIFIER}. Corresponding Source: "
+        "https://github.com/TaxScout-ai/pdf-engine-toolbox"
+    ),
     version="1.0.0",
+    license_info={"name": LICENSE_IDENTIFIER, "url": LICENSE_URL},
     lifespan=lifespan,
 )
 
@@ -80,6 +120,7 @@ async def pdf_engine_error_handler(request: Request, exc: PdfEngineError):
     """Handle known PDF engine errors."""
     return JSONResponse(
         status_code=exc.status_code,
+        headers=source_offer_headers(),
         content={
             "success": False,
             "error": {"code": exc.code, "message": exc.message},
@@ -93,6 +134,7 @@ async def general_error_handler(request: Request, exc: Exception):
     log.error("unhandled_error", error=str(exc), path=request.url.path)
     return JSONResponse(
         status_code=500,
+        headers=source_offer_headers(),
         content={
             "success": False,
             "error": {"code": "INTERNAL_ERROR", "message": "An unexpected error occurred"},
@@ -107,11 +149,13 @@ async def general_error_handler(request: Request, exc: Exception):
 
 @app.middleware("http")
 async def add_timing_header(request: Request, call_next):
-    """Add X-Processing-Time header to all responses."""
+    """Add timing and AGPL source-offer headers to every response."""
     start = time.monotonic()
     response = await call_next(request)
     elapsed = (time.monotonic() - start) * 1000
     response.headers["X-Processing-Time-Ms"] = f"{elapsed:.2f}"
+    for name, value in source_offer_headers().items():
+        response.headers[name] = value
     return response
 
 
@@ -120,6 +164,7 @@ async def add_timing_header(request: Request, call_next):
 # ============================================================================
 
 app.include_router(health.router, tags=["Health"])
+app.include_router(source.router, tags=["Source"])
 app.include_router(info.router, tags=["Info"])
 app.include_router(pages.router, tags=["Pages"])
 app.include_router(transform.router, tags=["Transform"])

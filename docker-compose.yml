@@ -2,7 +2,10 @@ version: "3.8"
 
 services:
   pdf-engine:
-    build: .
+    build:
+      context: .
+      args:
+        SOURCE_COMMIT: ${SOURCE_COMMIT:?Set SOURCE_COMMIT to the full public Git SHA}
     ports:
       - "8000:8000"
     environment:
@@ -13,6 +16,3 @@ services:
       - REQUEST_TIMEOUT_SECONDS=120
       - PDF_SOURCE_ALLOWED_HOSTS=taxscout-local.s3.us-east-1.amazonaws.com
       - PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK=True
-    volumes:
-      - ./app:/app/app
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload

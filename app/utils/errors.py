@@ -36,6 +36,13 @@ class DownloadFailedError(PdfEngineError):
         super().__init__("DOWNLOAD_FAILED", message, 502)
 
 
+class SourceUrlRejectedError(PdfEngineError):
+    """Source URL failed the outbound-download security policy."""
+
+    def __init__(self, message: str = "Source URL is not permitted"):
+        super().__init__("SOURCE_URL_REJECTED", message, 400)
+
+
 class AuthenticationError(PdfEngineError):
     """Request authentication failed."""
 

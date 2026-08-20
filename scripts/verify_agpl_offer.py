@@ -12,22 +12,31 @@ import ssl
 import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Any
 from urllib.parse import urljoin, urlsplit
-from urllib.request import Request, urlopen
 
 FULL_SHA = re.compile(r"^[0-9a-f]{40}$")
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 REPOSITORY = "https://github.com/TaxScout-ai/pdf-engine-toolbox"
 RAW_REPOSITORY = "https://raw.githubusercontent.com/TaxScout-ai/pdf-engine-toolbox"
+SYSTEM_CA_FILES = (
+    Path("/etc/ssl/certs/ca-certificates.crt"),
+    Path("/etc/pki/tls/certs/ca-bundle.crt"),
+    Path("/etc/ssl/cert.pem"),
+)
 
 
-def fetch_json(url: str) -> tuple[dict[str, Any], dict[str, str]]:
-    request = Request(url, headers={"User-Agent": "TaxScout-AGPL-Verifier/1.0"})
-    with urlopen(request, timeout=20) as response:  # noqa: S310 - operator-supplied URL
-        payload = json.load(response)
-        headers = {key.lower(): value for key, value in response.headers.items()}
-    return payload, headers
+def _trusted_tls_context() -> ssl.SSLContext:
+    """Load OS trust roots without honoring SSL_CERT_FILE/SSL_CERT_DIR."""
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    context.check_hostname = True
+    context.verify_mode = ssl.CERT_REQUIRED
+    for ca_file in SYSTEM_CA_FILES:
+        if ca_file.is_file():
+            context.load_verify_locations(cafile=str(ca_file))
+            return context
+    raise OSError("no supported system CA bundle is available")
 
 
 class _PinnedHTTPSConnection(http.client.HTTPSConnection):
@@ -38,7 +47,7 @@ class _PinnedHTTPSConnection(http.client.HTTPSConnection):
             hostname,
             port=443,
             timeout=timeout,
-            context=ssl.create_default_context(),
+            context=_trusted_tls_context(),
         )
         self._validated_address = address
 
@@ -149,6 +158,23 @@ def probe_url(url: str) -> None:
         return
 
 
+def fetch_public_json(
+    url: str,
+    *,
+    allow_redirects: bool,
+) -> tuple[dict[str, Any], dict[str, str]]:
+    """Fetch JSON over the pinned public transport and return normalized headers."""
+    with _open_public_https(
+        url,
+        method="GET",
+        timeout=20,
+        max_redirects=5 if allow_redirects else 0,
+    ) as response:
+        payload = json.load(response)
+        headers = {key.lower(): value for key, value in response.getheaders()}
+    return payload, headers
+
+
 def verify_hash(url: str, expected: str) -> None:
     digest = hashlib.sha256()
     with _open_public_https(url, method="GET", timeout=120) as response:
@@ -164,12 +190,10 @@ def trusted_manifest_url(expected_commit: str) -> str:
 
 def fetch_trusted_components(expected_commit: str) -> list[dict[str, Any]]:
     """Load component metadata from the expected public Git revision."""
-    with _open_public_https(
+    payload, _ = fetch_public_json(
         trusted_manifest_url(expected_commit),
-        method="GET",
-        timeout=20,
-    ) as response:
-        payload = json.load(response)
+        allow_redirects=False,
+    )
     components = payload.get("components")
     if not isinstance(components, list) or not components:
         raise ValueError("trusted third-party source manifest is empty")
@@ -256,8 +280,14 @@ def main() -> int:
     args = parser.parse_args()
 
     base_url = args.base_url.rstrip("/")
-    offer, offer_headers = fetch_json(f"{base_url}/source")
-    health, _ = fetch_json(f"{base_url}/health")
+    offer, offer_headers = fetch_public_json(
+        f"{base_url}/source",
+        allow_redirects=False,
+    )
+    health, _ = fetch_public_json(
+        f"{base_url}/health",
+        allow_redirects=False,
+    )
     trusted_components = fetch_trusted_components(args.expected_commit)
     urls = validate_offer(
         offer,

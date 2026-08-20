@@ -1,5 +1,6 @@
 """Tests for the post-deployment AGPL source-offer verifier."""
 
+import io
 import socket
 
 import pytest
@@ -195,3 +196,52 @@ def test_redirect_is_revalidated_before_second_connection(monkeypatch):
     with pytest.raises(ValueError, match="non-public address"):
         verifier.probe_url("https://public.example/source.tar.gz")
     assert FakeConnection.connections == 1
+
+
+def test_deployment_identity_fetch_ignores_proxy_and_rejects_redirects(monkeypatch):
+    class FakeResponse(io.BytesIO):
+        status = 302
+
+        def __init__(self):
+            super().__init__(b"")
+
+        def getheader(self, name):
+            assert name == "Location"
+            return "https://counterfeit.example/source"
+
+    class FakeConnection:
+        seen_hosts = []
+
+        def __init__(self, hostname, _address, _timeout):
+            self.__class__.seen_hosts.append(hostname)
+
+        def request(self, *_args, **_kwargs):
+            return None
+
+        def getresponse(self):
+            return FakeResponse()
+
+        def close(self):
+            return None
+
+    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:7777")
+    monkeypatch.setenv("https_proxy", "http://127.0.0.1:7777")
+    monkeypatch.setattr(verifier, "_PinnedHTTPSConnection", FakeConnection)
+
+    with pytest.raises(ValueError, match="redirect limit"):
+        verifier.fetch_public_json(
+            "https://deployment.example/source",
+            allow_redirects=False,
+        )
+    assert FakeConnection.seen_hosts == ["deployment.example"]
+
+
+def test_tls_context_ignores_poisoned_ca_environment(monkeypatch):
+    monkeypatch.setenv("SSL_CERT_FILE", "/nonexistent/hostile-ca.pem")
+    monkeypatch.setenv("SSL_CERT_DIR", "/nonexistent/hostile-ca-directory")
+
+    context = verifier._trusted_tls_context()
+
+    assert context.verify_mode == verifier.ssl.CERT_REQUIRED
+    assert context.check_hostname is True
+    assert context.get_ca_certs()

@@ -120,6 +120,32 @@ async def test_public_dns_returns_validated_address_without_reresolving(monkeypa
     resolver.assert_awaited_once()
 
 
+@pytest.mark.asyncio
+async def test_http_client_ignores_ambient_proxy_and_ca_environment(monkeypatch):
+    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:9999")
+    monkeypatch.setenv("ALL_PROXY", "http://127.0.0.1:9998")
+    monkeypatch.setenv("SSL_CERT_FILE", "/untrusted/environment/ca.pem")
+
+    real_async_client = httpx.AsyncClient
+    captured_kwargs = None
+
+    def capture_async_client(**kwargs):
+        nonlocal captured_kwargs
+        captured_kwargs = kwargs
+        return real_async_client(**kwargs)
+
+    monkeypatch.setattr(download_service.httpx, "AsyncClient", capture_async_client)
+
+    client = download_service._create_http_client("93.184.216.34")
+    try:
+        assert captured_kwargs is not None
+        assert captured_kwargs["base_url"] == "https://93.184.216.34"
+        assert captured_kwargs["follow_redirects"] is False
+        assert captured_kwargs["trust_env"] is False
+    finally:
+        await client.aclose()
+
+
 def install_mock_transport(monkeypatch, handler):
     monkeypatch.setattr(
         download_service,

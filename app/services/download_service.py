@@ -149,6 +149,10 @@ def _create_http_client(address: str) -> httpx.AsyncClient:
         base_url=f"https://{url_host}",
         timeout=httpx.Timeout(settings.request_timeout_seconds),
         follow_redirects=False,
+        # Presigned credentials must travel only over the validated direct
+        # socket. Ambient proxy and CA variables would otherwise let the
+        # process environment replace that network/TLS boundary.
+        trust_env=False,
     )
 
 

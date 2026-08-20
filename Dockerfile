@@ -1,4 +1,20 @@
+ARG SOURCE_COMMIT
+
+# Fail the build unless every source/build input copied into the runtime image
+# is byte-for-byte identical to the public Git revision advertised by it.
+FROM python:3.12-slim AS source-verifier
+ARG SOURCE_COMMIT
+WORKDIR /source-context
+COPY app/ ./app/
+COPY scripts/download_models.py scripts/verify_source_revision.py ./scripts/
+COPY Dockerfile requirements.txt pyproject.toml LICENSE NOTICE.md README.md third-party-sources.json ./
+RUN python scripts/verify_source_revision.py \
+        "$SOURCE_COMMIT" \
+        --root /source-context \
+        --marker /source-commit.verified
+
 FROM python:3.12-slim
+ARG SOURCE_COMMIT
 
 WORKDIR /app
 
@@ -38,23 +54,11 @@ RUN python /tmp/download_models.py || echo "Model pre-download failed; models wi
 COPY app/ ./app/
 COPY LICENSE NOTICE.md README.md third-party-sources.json ./
 
-# Bind the image to the exact public source revision used to build it. The
-# deployment pipeline must supply the full Git SHA after that revision is
-# available in the public repository.
-ARG SOURCE_COMMIT
-RUN set -eu; \
-    printf '%s\n' "$SOURCE_COMMIT" | grep -Eq '^[0-9a-f]{40}$' || { \
-        echo "SOURCE_COMMIT must be a full 40-character lowercase Git SHA" >&2; \
-        exit 1; \
-    }; \
-    curl -fsSLI \
-        "https://github.com/TaxScout-ai/pdf-engine-toolbox/tree/$SOURCE_COMMIT" \
-        >/dev/null || { \
-        echo "SOURCE_COMMIT is not available from the public repository" >&2; \
-        exit 1; \
-    }; \
-    printf '%s\n' "$SOURCE_COMMIT" > /app/build-commit; \
-    chmod 0444 /app/build-commit
+# The verifier stage downloads the advertised public archive and compares all
+# runtime/build inputs before emitting this marker. Referencing the stage here
+# makes that proof a required dependency of the final image under BuildKit.
+COPY --from=source-verifier /source-commit.verified /app/build-commit
+RUN test "$(cat /app/build-commit)" = "$SOURCE_COMMIT" && chmod 0444 /app/build-commit
 LABEL org.opencontainers.image.source="https://github.com/TaxScout-ai/pdf-engine-toolbox"
 LABEL org.opencontainers.image.licenses="AGPL-3.0-only"
 LABEL org.opencontainers.image.revision=$SOURCE_COMMIT

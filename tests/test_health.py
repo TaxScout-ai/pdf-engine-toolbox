@@ -3,7 +3,15 @@
 import json
 from pathlib import Path
 
+from fastapi.testclient import TestClient
+
 from app import build_identity
+from app.main import app
+
+
+@app.get("/__test_unhandled_source_offer")
+async def _raise_unhandled_error():
+    raise RuntimeError("test-only unhandled failure")
 
 
 def test_health_check(client):
@@ -24,6 +32,16 @@ def test_every_response_prominently_offers_source(client):
     response = client.get("/does-not-exist")
 
     assert response.status_code == 404
+    assert response.headers["X-Source-Code"] == build_identity.REPOSITORY_URL
+    assert f'<{build_identity.REPOSITORY_URL}>; rel="source"' in response.headers["Link"]
+    assert f'<{build_identity.LICENSE_URL}>; rel="license"' in response.headers["Link"]
+
+
+def test_unexpected_error_prominently_offers_source():
+    with TestClient(app, raise_server_exceptions=False) as failure_client:
+        response = failure_client.get("/__test_unhandled_source_offer")
+
+    assert response.status_code == 500
     assert response.headers["X-Source-Code"] == build_identity.REPOSITORY_URL
     assert f'<{build_identity.REPOSITORY_URL}>; rel="source"' in response.headers["Link"]
     assert f'<{build_identity.LICENSE_URL}>; rel="license"' in response.headers["Link"]

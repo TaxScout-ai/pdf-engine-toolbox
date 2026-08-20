@@ -18,3 +18,7 @@ jobs:
           python-version: "3.12"
       - name: Verify public source-tree contract
         run: python scripts/check_agpl_source_tree.py
+      - name: Bind checkout to its exact public source revision
+        env:
+          SOURCE_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: python scripts/verify_source_revision.py "$SOURCE_COMMIT"

@@ -58,6 +58,20 @@ structlog.configure(
 log = structlog.get_logger()
 
 
+def source_offer_headers() -> dict[str, str]:
+    """Return the revision-pinned AGPL source headers for any response path."""
+    build_commit = read_build_commit()
+    source_url = corresponding_source_url(build_commit)
+    license_url = corresponding_license_url(build_commit)
+    return {
+        "X-Source-Code": source_url,
+        "Link": (
+            f'<{source_url}>; rel="source", '
+            f'<{license_url}>; rel="license"'
+        ),
+    }
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan: startup and shutdown."""
@@ -106,6 +120,7 @@ async def pdf_engine_error_handler(request: Request, exc: PdfEngineError):
     """Handle known PDF engine errors."""
     return JSONResponse(
         status_code=exc.status_code,
+        headers=source_offer_headers(),
         content={
             "success": False,
             "error": {"code": exc.code, "message": exc.message},
@@ -119,6 +134,7 @@ async def general_error_handler(request: Request, exc: Exception):
     log.error("unhandled_error", error=str(exc), path=request.url.path)
     return JSONResponse(
         status_code=500,
+        headers=source_offer_headers(),
         content={
             "success": False,
             "error": {"code": "INTERNAL_ERROR", "message": "An unexpected error occurred"},
@@ -138,14 +154,8 @@ async def add_timing_header(request: Request, call_next):
     response = await call_next(request)
     elapsed = (time.monotonic() - start) * 1000
     response.headers["X-Processing-Time-Ms"] = f"{elapsed:.2f}"
-    build_commit = read_build_commit()
-    source_url = corresponding_source_url(build_commit)
-    license_url = corresponding_license_url(build_commit)
-    response.headers["X-Source-Code"] = source_url
-    response.headers["Link"] = (
-        f'<{source_url}>; rel="source", '
-        f'<{license_url}>; rel="license"'
-    )
+    for name, value in source_offer_headers().items():
+        response.headers[name] = value
     return response
 
 

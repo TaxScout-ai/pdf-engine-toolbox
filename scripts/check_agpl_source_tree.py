@@ -24,6 +24,9 @@ def main() -> int:
     dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
     app_main = (ROOT / "app/main.py").read_text(encoding="utf-8")
     source_route = (ROOT / "app/routes/source.py").read_text(encoding="utf-8")
+    revision_verifier = (ROOT / "scripts/verify_source_revision.py").read_text(
+        encoding="utf-8"
+    )
     manifest = json.loads(
         (ROOT / "third-party-sources.json").read_text(encoding="utf-8")
     )
@@ -34,12 +37,20 @@ def main() -> int:
     require("PyMuPDF" in notice and "MuPDF" in notice, "third-party notice is incomplete")
     require('license = "AGPL-3.0-or-later"' in pyproject, "pyproject license drift")
     require("GET /source" in readme, "README omits the network source offer")
-    require('response.headers["X-Source-Code"]' in app_main, "source header is missing")
+    require('"X-Source-Code": source_url' in app_main, "source header is missing")
     require('rel="source"' in app_main, "Link rel=source is missing")
     require('@router.get("/source"' in source_route, "public source route is missing")
     require("ARG SOURCE_COMMIT" in dockerfile, "image is not bound to a source revision")
-    require("github.com/TaxScout-ai/pdf-engine-toolbox/tree/$SOURCE_COMMIT" in dockerfile,
-            "Docker build does not verify that SOURCE_COMMIT is public")
+    require("FROM python:3.12-slim AS source-verifier" in dockerfile,
+            "Docker build has no source-verifier stage")
+    require("scripts/verify_source_revision.py" in dockerfile,
+            "Docker build does not compare its context to public source")
+    require("COPY --from=source-verifier" in dockerfile,
+            "runtime image does not depend on source verification")
+    require("archive/{commit}.tar.gz" in revision_verifier,
+            "source verifier does not download the exact public revision")
+    require("compare_sources" in revision_verifier,
+            "source verifier does not compare build inputs")
     require("org.opencontainers.image.source" in dockerfile, "OCI source label is missing")
     require("org.opencontainers.image.revision" in dockerfile, "OCI revision label is missing")
     require('org.opencontainers.image.licenses="AGPL-3.0-only"' in dockerfile,

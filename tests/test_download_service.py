@@ -11,7 +11,6 @@ from app.config import settings
 from app.services import download_service
 from app.utils.errors import DownloadFailedError, SourceUrlRejectedError
 
-
 PRESIGNED_QUERY = (
     "X-Amz-Algorithm=AWS4-HMAC-SHA256"
     "&X-Amz-Credential=test"
@@ -76,33 +75,84 @@ def test_validate_source_url_accepts_percent_encoded_s3_target():
 
 
 @pytest.mark.asyncio
-async def test_public_dns_rejects_private_answer(monkeypatch):
+@pytest.mark.parametrize(
+    "address",
+    [
+        "10.0.0.5",
+        "127.0.0.1",
+        "169.254.169.254",
+        "224.0.0.1",
+        "fec0::1",
+        "ff02::1",
+        "::1",
+    ],
+)
+async def test_public_dns_rejects_non_unicast_answer(monkeypatch, address):
     asyncio_loop = asyncio.get_running_loop()
+    family = socket.AF_INET6 if ":" in address else socket.AF_INET
     monkeypatch.setattr(
         asyncio_loop,
         "getaddrinfo",
         AsyncMock(
             return_value=[
-                (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("10.0.0.5", 443))
+                (family, socket.SOCK_STREAM, 6, "", (address, 443))
             ]
         ),
     )
 
     with pytest.raises(SourceUrlRejectedError, match="non-public"):
-        await download_service._ensure_public_dns(ALLOWED_HOST)
+        await download_service._resolve_public_addresses(ALLOWED_HOST)
+
+
+@pytest.mark.asyncio
+async def test_public_dns_returns_validated_address_without_reresolving(monkeypatch):
+    asyncio_loop = asyncio.get_running_loop()
+    resolver = AsyncMock(
+        return_value=[
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))
+        ]
+    )
+    monkeypatch.setattr(asyncio_loop, "getaddrinfo", resolver)
+
+    assert await download_service._resolve_public_addresses(ALLOWED_HOST) == (
+        "93.184.216.34",
+    )
+    resolver.assert_awaited_once()
 
 
 def install_mock_transport(monkeypatch, handler):
     monkeypatch.setattr(
         download_service,
         "_create_http_client",
-        lambda host: httpx.AsyncClient(
-            base_url=f"https://{host}",
+        lambda address: httpx.AsyncClient(
+            base_url=f"https://{address}",
             transport=httpx.MockTransport(handler),
             follow_redirects=False,
         ),
     )
-    monkeypatch.setattr(download_service, "_ensure_public_dns", AsyncMock())
+    monkeypatch.setattr(
+        download_service,
+        "_resolve_public_addresses",
+        AsyncMock(return_value=("93.184.216.34",)),
+    )
+
+
+@pytest.mark.asyncio
+async def test_download_pins_validated_ip_with_original_host_and_tls_sni(monkeypatch):
+    seen_request = None
+
+    def handler(request):
+        nonlocal seen_request
+        seen_request = request
+        return httpx.Response(200, content=b"%PDF-pinned")
+
+    install_mock_transport(monkeypatch, handler)
+
+    assert await download_service.download_pdf(source_url()) == b"%PDF-pinned"
+    assert seen_request is not None
+    assert seen_request.url.host == "93.184.216.34"
+    assert seen_request.headers["host"] == ALLOWED_HOST
+    assert seen_request.extensions["sni_hostname"] == ALLOWED_HOST
 
 
 @pytest.mark.asyncio

@@ -109,13 +109,23 @@ def _validate_source_url(url: str) -> tuple[str, str]:
 
 def _is_public_address(raw_address: str) -> bool:
     try:
-        return ipaddress.ip_address(raw_address).is_global
+        address = ipaddress.ip_address(raw_address)
     except ValueError:
         return False
+    return (
+        address.is_global
+        and not address.is_private
+        and not address.is_loopback
+        and not address.is_link_local
+        and not address.is_multicast
+        and not address.is_reserved
+        and not address.is_unspecified
+        and not getattr(address, "is_site_local", False)
+    )
 
 
-async def _ensure_public_dns(host: str) -> None:
-    """Reject hosts whose current DNS answers include non-public addresses."""
+async def _resolve_public_addresses(host: str) -> tuple[str, ...]:
+    """Resolve once and return only validated public unicast addresses."""
     try:
         records = await asyncio.get_running_loop().getaddrinfo(
             host,
@@ -125,15 +135,18 @@ async def _ensure_public_dns(host: str) -> None:
     except OSError as exc:
         raise DownloadFailedError("Source URL hostname could not be resolved") from exc
 
-    addresses = {record[4][0] for record in records if record[4]}
+    addresses = tuple(dict.fromkeys(record[4][0] for record in records if record[4]))
     if not addresses or not all(_is_public_address(address) for address in addresses):
         raise SourceUrlRejectedError("Source URL resolved to a non-public address")
+    return addresses
 
 
-def _create_http_client(host: str) -> httpx.AsyncClient:
-    """Create a no-redirect client pinned to an operator-approved authority."""
+def _create_http_client(address: str) -> httpx.AsyncClient:
+    """Create a no-redirect client whose TCP authority is a validated IP."""
+    parsed_address = ipaddress.ip_address(address)
+    url_host = f"[{parsed_address}]" if parsed_address.version == 6 else str(parsed_address)
     return httpx.AsyncClient(
-        base_url=f"https://{host}",
+        base_url=f"https://{url_host}",
         timeout=httpx.Timeout(settings.request_timeout_seconds),
         follow_redirects=False,
     )
@@ -152,12 +165,18 @@ async def download_pdf(url: str) -> bytes:
         DownloadFailedError: If download fails
     """
     host, request_target = _validate_source_url(url)
-    await _ensure_public_dns(host)
+    addresses = await _resolve_public_addresses(host)
+    pinned_address = addresses[0]
     max_bytes = settings.max_upload_size_mb * 1024 * 1024
 
     try:
-        async with _create_http_client(host) as client:
-            async with client.stream("GET", request_target) as response:
+        async with _create_http_client(pinned_address) as client:
+            async with client.stream(
+                "GET",
+                request_target,
+                headers={"Host": host},
+                extensions={"sni_hostname": host},
+            ) as response:
                 if response.is_redirect:
                     raise DownloadFailedError("Redirects are not permitted for source URLs")
                 response.raise_for_status()

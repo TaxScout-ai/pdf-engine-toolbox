@@ -43,6 +43,28 @@ class AuthenticationError(PdfEngineError):
         super().__init__("AUTH_FAILED", message, 401)
 
 
+class PdfPasswordAuthorizationError(PdfEngineError):
+    """Known-password authorization failed without exposing an auth oracle."""
+
+    def __init__(self):
+        super().__init__(
+            "PDF_PASSWORD_AUTHORIZATION_FAILED",
+            "Password is incorrect or document access is not authorized",
+            403,
+        )
+
+
+class PdfPasswordNotRequiredError(PdfEngineError):
+    """The caller attempted password authorization for a plain PDF."""
+
+    def __init__(self):
+        super().__init__(
+            "PDF_PASSWORD_NOT_REQUIRED",
+            "Document does not require password authorization",
+            409,
+        )
+
+
 class TimeoutError(PdfEngineError):
     """Operation timed out."""
 

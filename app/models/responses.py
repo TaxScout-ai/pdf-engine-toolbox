@@ -1,6 +1,8 @@
 """Pydantic response models for all API endpoints."""
 
-from pydantic import BaseModel
+from typing import Literal
+
+from pydantic import BaseModel, Field
 
 
 class ErrorDetail(BaseModel):
@@ -20,12 +22,35 @@ class PageInfo(BaseModel):
     has_text: bool
 
 
+PdfAuthenticationLevel = Literal["none", "user", "owner", "user-and-owner"]
+PdfSignatureState = Literal[
+    "unknown",
+    "none-detected",
+    "signature-fields-present",
+    "signatures-may-be-invalidated",
+]
+
+
+class PdfPermissionState(BaseModel):
+    """Normalized extraction-relevant PDF permission flags."""
+
+    copy_allowed: bool = Field(alias="copy", serialization_alias="copy")
+    modify: bool
+    annotate: bool
+    print: bool
+
+
 class PdfInfoData(BaseModel):
     """PDF metadata response data."""
 
     page_count: int
     pages: list[PageInfo]
     is_encrypted: bool
+    requires_password: bool
+    authentication_level: PdfAuthenticationLevel
+    permissions: PdfPermissionState | None
+    has_digital_signatures: bool | None
+    signature_state: PdfSignatureState
     metadata: dict | None = None
 
 
@@ -34,6 +59,25 @@ class PdfInfoResponse(BaseModel):
 
     success: bool
     data: PdfInfoData | None = None
+    error: ErrorDetail | None = None
+    processing_time_ms: float | None = None
+
+
+class AuthorizedUnlockData(BaseModel):
+    """Authorized in-memory derivative plus normalized policy evidence."""
+
+    authentication_level: PdfAuthenticationLevel
+    permissions: PdfPermissionState
+    has_digital_signatures: bool | None
+    signature_state: PdfSignatureState
+    pdf_base64: str
+
+
+class AuthorizedUnlockResponse(BaseModel):
+    """Response for POST /security/authorize-and-unlock."""
+
+    success: bool
+    data: AuthorizedUnlockData | None = None
     error: ErrorDetail | None = None
     processing_time_ms: float | None = None
 

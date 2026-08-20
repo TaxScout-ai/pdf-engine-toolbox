@@ -12,7 +12,12 @@ import numpy as np
 import structlog
 from PIL import Image
 
-from app.utils.errors import PdfCorruptError, PageOutOfRangeError
+from app.utils.errors import (
+    PageOutOfRangeError,
+    PdfCorruptError,
+    PdfPasswordAuthorizationError,
+    PdfPasswordNotRequiredError,
+)
 
 log = structlog.get_logger()
 
@@ -47,30 +52,157 @@ def _hex_to_rgb(hex_color: str) -> tuple[float, float, float]:
 # Info
 # ============================================================================
 
+_AUTHENTICATION_LEVELS = {
+    2: "user",
+    4: "owner",
+    6: "user-and-owner",
+}
+
+
+def _normalized_permissions(doc: fitz.Document) -> dict[str, bool]:
+    """Translate PyMuPDF's bitmask into explicit policy inputs."""
+    permissions = doc.permissions
+    return {
+        "copy": bool(permissions & fitz.PDF_PERM_COPY),
+        "modify": bool(permissions & fitz.PDF_PERM_MODIFY),
+        "annotate": bool(permissions & fitz.PDF_PERM_ANNOTATE),
+        "print": bool(permissions & fitz.PDF_PERM_PRINT),
+    }
+
+
+def _digital_signature_state(doc: fitz.Document) -> tuple[bool | None, str]:
+    """Return conservative signature evidence without modifying the document."""
+    signature_flags = doc.get_sigflags()
+    if signature_flags == 3:
+        return True, "signatures-may-be-invalidated"
+    if signature_flags == 1:
+        return True, "signature-fields-present"
+
+    try:
+        for page in doc:
+            widgets = page.widgets()
+            if widgets and any(
+                widget.field_type == fitz.PDF_WIDGET_TYPE_SIGNATURE
+                for widget in widgets
+            ):
+                return True, "signature-fields-present"
+    except (RuntimeError, ValueError):
+        return None, "unknown"
+
+    if signature_flags == -1:
+        return None, "unknown"
+    return False, "none-detected"
+
+
+def _has_encryption(doc: fitz.Document) -> bool:
+    """Detect both user-password and owner-only encryption."""
+    metadata = doc.metadata or {}
+    return bool(doc.needs_pass or metadata.get("encryption"))
+
 
 def get_info(pdf_bytes: bytes) -> dict:
-    """Get PDF metadata and page information."""
+    """Get policy-safe PDF information without reading locked content."""
     doc = _open_pdf(pdf_bytes)
-    pages = []
-    for i in range(len(doc)):
-        page = doc[i]
-        text = page.get_text().strip()
-        pages.append(
-            {
-                "index": i,
-                "width": round(page.rect.width, 2),
-                "height": round(page.rect.height, 2),
-                "rotation": page.rotation,
-                "has_text": bool(text),
+    try:
+        requires_password = bool(doc.needs_pass)
+        if requires_password:
+            return {
+                "page_count": 0,
+                "pages": [],
+                "is_encrypted": True,
+                "requires_password": True,
+                "authentication_level": "none",
+                "permissions": None,
+                "has_digital_signatures": None,
+                "signature_state": "unknown",
+                "metadata": None,
             }
-        )
 
-    return {
-        "page_count": len(doc),
-        "pages": pages,
-        "is_encrypted": doc.is_encrypted,
-        "metadata": doc.metadata or {},
-    }
+        is_encrypted = _has_encryption(doc)
+        authentication_level = "none"
+        if is_encrypted:
+            authentication_level = _AUTHENTICATION_LEVELS.get(
+                doc.authenticate(""),
+                "none",
+            )
+
+        pages = []
+        for i in range(len(doc)):
+            page = doc[i]
+            text = page.get_text().strip()
+            pages.append(
+                {
+                    "index": i,
+                    "width": round(page.rect.width, 2),
+                    "height": round(page.rect.height, 2),
+                    "rotation": page.rotation,
+                    "has_text": bool(text),
+                }
+            )
+
+        has_signatures, signature_state = _digital_signature_state(doc)
+        return {
+            "page_count": len(doc),
+            "pages": pages,
+            "is_encrypted": is_encrypted,
+            "requires_password": False,
+            "authentication_level": authentication_level,
+            "permissions": _normalized_permissions(doc),
+            "has_digital_signatures": has_signatures,
+            "signature_state": signature_state,
+            "metadata": doc.metadata or {},
+        }
+    finally:
+        doc.close()
+
+
+def authorize_and_unlock_pdf(
+    pdf_bytes: bytes,
+    password: str,
+    *,
+    authority_attested: bool,
+) -> dict:
+    """Authenticate one known password and return an in-memory derivative.
+
+    This function never guesses or retries passwords. User-level access is
+    allowed only when the PDF explicitly permits copying/extraction.
+    """
+    try:
+        password_bytes = password.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise PdfPasswordAuthorizationError() from exc
+    if not authority_attested or not 1 <= len(password_bytes) <= 256:
+        raise PdfPasswordAuthorizationError()
+
+    doc = _open_pdf(pdf_bytes)
+    try:
+        if not _has_encryption(doc):
+            raise PdfPasswordNotRequiredError()
+
+        authentication_level = _AUTHENTICATION_LEVELS.get(doc.authenticate(password))
+        if authentication_level is None:
+            raise PdfPasswordAuthorizationError()
+
+        permissions = _normalized_permissions(doc)
+        owner_authenticated = authentication_level in {"owner", "user-and-owner"}
+        if not owner_authenticated and not permissions["copy"]:
+            raise PdfPasswordAuthorizationError()
+
+        has_signatures, signature_state = _digital_signature_state(doc)
+        unlocked_pdf = doc.tobytes(
+            garbage=4,
+            deflate=True,
+            encryption=fitz.PDF_ENCRYPT_NONE,
+        )
+        return {
+            "authentication_level": authentication_level,
+            "permissions": permissions,
+            "has_digital_signatures": has_signatures,
+            "signature_state": signature_state,
+            "pdf_bytes": unlocked_pdf,
+        }
+    finally:
+        doc.close()
 
 
 # ============================================================================

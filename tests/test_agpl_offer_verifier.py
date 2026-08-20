@@ -1,11 +1,22 @@
 """Tests for the post-deployment AGPL source-offer verifier."""
 
+import socket
+
 import pytest
 
+import scripts.verify_agpl_offer as verifier
 from scripts.verify_agpl_offer import validate_offer
 
 COMMIT = "a" * 40
 REPOSITORY = "https://github.com/TaxScout-ai/pdf-engine-toolbox"
+
+
+@pytest.fixture(autouse=True)
+def resolve_test_hosts_to_public_address(monkeypatch):
+    def getaddrinfo(_hostname, port, **_kwargs):
+        return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("8.8.8.8", port))]
+
+    monkeypatch.setattr(verifier.socket, "getaddrinfo", getaddrinfo)
 
 
 def valid_offer():
@@ -124,3 +135,63 @@ def test_offer_rejects_component_metadata_not_in_trusted_revision():
 
     with pytest.raises(ValueError, match="trusted revision manifest"):
         validate_offer(offer, headers, health, COMMIT, trusted)
+
+
+@pytest.mark.parametrize(
+    "hostname",
+    [
+        "2130706433",
+        "0x7f000001",
+        "localhost.localdomain",
+        "127.0.0.1.nip.io",
+    ],
+)
+def test_dns_resolution_rejects_noncanonical_loopback_hosts(monkeypatch, hostname):
+    def resolve_loopback(_hostname, port, **_kwargs):
+        return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("127.0.0.1", port))]
+
+    monkeypatch.setattr(verifier.socket, "getaddrinfo", resolve_loopback)
+
+    with pytest.raises(ValueError, match="non-public address"):
+        verifier._resolve_public_https_url(f"https://{hostname}/source.tar.gz")
+
+
+def test_redirect_is_revalidated_before_second_connection(monkeypatch):
+    class FakeResponse:
+        status = 302
+
+        def getheader(self, name):
+            assert name == "Location"
+            return "https://redirect-to-loopback.test/internal"
+
+        def read(self):
+            return b""
+
+        def close(self):
+            return None
+
+    class FakeConnection:
+        connections = 0
+
+        def __init__(self, *_args, **_kwargs):
+            self.__class__.connections += 1
+
+        def request(self, *_args, **_kwargs):
+            return None
+
+        def getresponse(self):
+            return FakeResponse()
+
+        def close(self):
+            return None
+
+    def resolve(hostname, port, **_kwargs):
+        address = "127.0.0.1" if hostname == "redirect-to-loopback.test" else "8.8.8.8"
+        return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", (address, port))]
+
+    monkeypatch.setattr(verifier.socket, "getaddrinfo", resolve)
+    monkeypatch.setattr(verifier, "_PinnedHTTPSConnection", FakeConnection)
+
+    with pytest.raises(ValueError, match="non-public address"):
+        verifier.probe_url("https://public.example/source.tar.gz")
+    assert FakeConnection.connections == 1

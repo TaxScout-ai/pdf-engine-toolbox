@@ -3,12 +3,17 @@
 
 import argparse
 import hashlib
+import http.client
 import ipaddress
 import json
 import re
+import socket
+import ssl
 import sys
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import urljoin, urlsplit
 from urllib.request import Request, urlopen
 
 FULL_SHA = re.compile(r"^[0-9a-f]{40}$")
@@ -25,32 +30,37 @@ def fetch_json(url: str) -> tuple[dict[str, Any], dict[str, str]]:
     return payload, headers
 
 
-def probe_url(url: str) -> None:
-    request = Request(
-        url,
-        method="HEAD",
-        headers={"User-Agent": "TaxScout-AGPL-Verifier/1.0"},
-    )
-    with urlopen(request, timeout=20):  # noqa: S310 - source URLs are offer data
-        return
+class _PinnedHTTPSConnection(http.client.HTTPSConnection):
+    """HTTPS connection whose TCP peer is the address already validated below."""
+
+    def __init__(self, hostname: str, address: str, timeout: int):
+        super().__init__(
+            hostname,
+            port=443,
+            timeout=timeout,
+            context=ssl.create_default_context(),
+        )
+        self._validated_address = address
+
+    def connect(self) -> None:
+        self.sock = socket.create_connection(
+            (self._validated_address, self.port),
+            self.timeout,
+            self.source_address,
+        )
+        self.sock = self._context.wrap_socket(self.sock, server_hostname=self.host)
 
 
-def verify_hash(url: str, expected: str) -> None:
-    digest = hashlib.sha256()
-    request = Request(url, headers={"User-Agent": "TaxScout-AGPL-Verifier/1.0"})
-    with urlopen(request, timeout=120) as response:  # noqa: S310
-        while chunk := response.read(1024 * 1024):
-            digest.update(chunk)
-    if digest.hexdigest() != expected:
-        raise ValueError(f"source archive hash mismatch: {url}")
-
-
-def _require_public_https_url(url: str) -> None:
-    """Reject destinations that could turn the verifier into an SSRF client."""
+def _resolve_public_https_url(url: str) -> tuple[str, str, tuple[str, ...]]:
+    """Resolve one HTTPS URL and require every address to be public unicast."""
     parsed = urlsplit(url)
     if parsed.scheme != "https" or not parsed.hostname:
         raise ValueError(f"source URL must use HTTPS: {url}")
-    if parsed.username or parsed.password or parsed.port not in (None, 443):
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError(f"source URL has an invalid port: {url}") from exc
+    if parsed.username or parsed.password or port not in (None, 443):
         raise ValueError(f"source URL has unsafe authority: {url}")
     if parsed.fragment:
         raise ValueError(f"source URL must not contain a fragment: {url}")
@@ -58,12 +68,94 @@ def _require_public_https_url(url: str) -> None:
     hostname = parsed.hostname.rstrip(".").lower()
     if hostname == "localhost" or hostname.endswith(".localhost"):
         raise ValueError(f"source URL must not target localhost: {url}")
+
     try:
         address = ipaddress.ip_address(hostname)
     except ValueError:
+        pass
+    else:
+        if not address.is_global:
+            raise ValueError(f"source URL must target a public address: {url}")
+
+    try:
+        answers = socket.getaddrinfo(hostname, 443, type=socket.SOCK_STREAM)
+    except socket.gaierror as exc:
+        raise ValueError(f"source URL hostname does not resolve: {url}") from exc
+    addresses = tuple(dict.fromkeys(answer[4][0] for answer in answers))
+    if not addresses:
+        raise ValueError(f"source URL hostname has no addresses: {url}")
+    for resolved in addresses:
+        if not ipaddress.ip_address(resolved).is_global:
+            raise ValueError(f"source URL DNS includes a non-public address: {url}")
+
+    request_target = parsed.path or "/"
+    if parsed.query:
+        request_target = f"{request_target}?{parsed.query}"
+    return hostname, request_target, addresses
+
+
+@contextmanager
+def _open_public_https(
+    url: str,
+    *,
+    method: str,
+    timeout: int,
+    max_redirects: int = 5,
+) -> Iterator[http.client.HTTPResponse]:
+    """Open a public HTTPS URL without proxy trust or DNS-rebinding exposure."""
+    current_url = url
+    for redirect_count in range(max_redirects + 1):
+        hostname, request_target, addresses = _resolve_public_https_url(current_url)
+        connection = _PinnedHTTPSConnection(hostname, addresses[0], timeout)
+        try:
+            connection.request(
+                method,
+                request_target,
+                headers={"User-Agent": "TaxScout-AGPL-Verifier/1.0"},
+            )
+            response = connection.getresponse()
+        except Exception:
+            connection.close()
+            raise
+
+        if response.status in {301, 302, 303, 307, 308}:
+            location = response.getheader("Location")
+            response.read()
+            response.close()
+            connection.close()
+            if not location:
+                raise ValueError(f"source URL redirect has no Location: {current_url}")
+            if redirect_count == max_redirects:
+                raise ValueError(f"source URL exceeded redirect limit: {url}")
+            current_url = urljoin(current_url, location)
+            continue
+
+        if response.status < 200 or response.status >= 300:
+            response.read()
+            response.close()
+            connection.close()
+            raise OSError(f"source URL returned HTTP {response.status}: {current_url}")
+        try:
+            yield response
+        finally:
+            response.close()
+            connection.close()
         return
-    if not address.is_global:
-        raise ValueError(f"source URL must target a public address: {url}")
+    raise ValueError(f"source URL exceeded redirect limit: {url}")
+
+
+def probe_url(url: str) -> None:
+    with _open_public_https(url, method="HEAD", timeout=20):
+        return
+
+
+def verify_hash(url: str, expected: str) -> None:
+    digest = hashlib.sha256()
+    with _open_public_https(url, method="GET", timeout=120) as response:
+        while chunk := response.read(1024 * 1024):
+            digest.update(chunk)
+    if digest.hexdigest() != expected:
+        raise ValueError(f"source archive hash mismatch: {url}")
 
 
 def trusted_manifest_url(expected_commit: str) -> str:
@@ -72,7 +164,12 @@ def trusted_manifest_url(expected_commit: str) -> str:
 
 def fetch_trusted_components(expected_commit: str) -> list[dict[str, Any]]:
     """Load component metadata from the expected public Git revision."""
-    payload, _ = fetch_json(trusted_manifest_url(expected_commit))
+    with _open_public_https(
+        trusted_manifest_url(expected_commit),
+        method="GET",
+        timeout=20,
+    ) as response:
+        payload = json.load(response)
     components = payload.get("components")
     if not isinstance(components, list) or not components:
         raise ValueError("trusted third-party source manifest is empty")
@@ -136,7 +233,7 @@ def validate_offer(
     for component in components:
         if not SHA256.fullmatch(str(component.get("sha256", ""))):
             raise ValueError(f"invalid source hash for {component.get('name')}")
-        _require_public_https_url(str(component.get("source_url", "")))
+        _resolve_public_https_url(str(component.get("source_url", "")))
 
     return [
         source_url,

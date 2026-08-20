@@ -2,10 +2,15 @@
 
 import base64
 import hashlib
+import hmac
 import json
+import sqlite3
+import time
 from unittest.mock import AsyncMock, patch
 
 import fitz
+
+from app.config import settings
 
 
 def _encrypted_pdf(
@@ -34,7 +39,12 @@ def _authorize_request(client, auth_headers, encrypted_bytes, password, *, attes
             "authority_attested": attested,
         }
     )
-    headers = auth_headers("POST", "/security/authorize-and-unlock", body)
+    headers = auth_headers(
+        "POST",
+        "/security/authorize-and-unlock",
+        body,
+        version=2,
+    )
     with patch(
         "app.services.download_service.download_pdf",
         new_callable=AsyncMock,
@@ -49,11 +59,13 @@ def _authorize_request(client, auth_headers, encrypted_bytes, password, *, attes
 
 def test_encrypt_pdf(client, auth_headers, sample_pdf_bytes):
     """Encrypt should return a password-protected PDF."""
-    body = json.dumps({
-        "source_url": "https://example.com/test.pdf",
-        "user_password": "user123",
-        "owner_password": "owner456",
-    })
+    body = json.dumps(
+        {
+            "source_url": "https://example.com/test.pdf",
+            "user_password": "user123",
+            "owner_password": "owner456",
+        }
+    )
     headers = auth_headers("POST", "/security/encrypt", body)
 
     with patch(
@@ -81,10 +93,12 @@ def test_decrypt_pdf(client, auth_headers, sample_pdf_bytes):
         owner_pw="owner456",
     )
 
-    body = json.dumps({
-        "source_url": "https://example.com/test.pdf",
-        "password": "test123",
-    })
+    body = json.dumps(
+        {
+            "source_url": "https://example.com/test.pdf",
+            "password": "test123",
+        }
+    )
     headers = auth_headers("POST", "/security/decrypt", body)
 
     with patch(
@@ -134,6 +148,118 @@ def test_authorize_and_unlock_allows_known_user_password_with_copy_permission(
     )
     assert unlocked.is_encrypted is False
     assert len(unlocked) == 5
+
+
+def test_authorize_and_unlock_rejects_v1_auth(
+    client,
+    auth_headers,
+    sample_pdf_bytes,
+):
+    body = json.dumps(
+        {
+            "source_url": "https://example.com/protected.pdf",
+            "password": "known-password",
+            "authority_attested": True,
+        }
+    )
+
+    response = client.post(
+        "/security/authorize-and-unlock",
+        content=body,
+        headers=auth_headers("POST", "/security/authorize-and-unlock", body),
+    )
+
+    assert response.status_code == 401
+
+
+def test_authorize_and_unlock_rejects_replayed_v2_request(
+    client,
+    auth_headers,
+    sample_pdf_bytes,
+):
+    encrypted = _encrypted_pdf(sample_pdf_bytes)
+    body = json.dumps(
+        {
+            "source_url": "https://example.com/protected.pdf",
+            "password": "known-password",
+            "authority_attested": True,
+        }
+    )
+    headers = auth_headers(
+        "POST",
+        "/security/authorize-and-unlock",
+        body,
+        version=2,
+        nonce="ab" * 16,
+    )
+
+    with patch(
+        "app.services.download_service.download_pdf",
+        new_callable=AsyncMock,
+        return_value=encrypted,
+    ):
+        first = client.post(
+            "/security/authorize-and-unlock",
+            content=body,
+            headers=headers,
+        )
+        replay = client.post(
+            "/security/authorize-and-unlock",
+            content=body,
+            headers=headers,
+        )
+
+    assert first.status_code == 200
+    assert replay.status_code == 401
+
+
+def test_sensitive_nonce_persists_for_full_future_timestamp_window(
+    client,
+    auth_headers,
+    sample_pdf_bytes,
+):
+    encrypted = _encrypted_pdf(sample_pdf_bytes)
+    signed_at_ms = int(time.time() * 1000) + 59_000
+    body = json.dumps(
+        {
+            "source_url": "https://example.com/protected.pdf",
+            "password": "known-password",
+            "authority_attested": True,
+        }
+    )
+    nonce = "cd" * 16
+    body_hash = hashlib.sha256(body.encode()).hexdigest()
+    message = f"v2:{signed_at_ms}:{nonce}:POST:/security/authorize-and-unlock:{body_hash}"
+    signature = hmac.new(
+        settings.pdf_engine_secret.encode(),
+        message.encode(),
+        hashlib.sha256,
+    ).hexdigest()
+    headers = {
+        "X-Timestamp": str(signed_at_ms),
+        "X-Signature": signature,
+        "X-Auth-Version": "2",
+        "X-Nonce": nonce,
+        "Content-Type": "application/json",
+    }
+
+    with patch(
+        "app.services.download_service.download_pdf",
+        new_callable=AsyncMock,
+        return_value=encrypted,
+    ):
+        first = client.post(
+            "/security/authorize-and-unlock",
+            content=body,
+            headers=headers,
+        )
+        with sqlite3.connect(settings.sensitive_nonce_db_path) as connection:
+            expiry = connection.execute(
+                "SELECT expires_at_ms FROM sensitive_hmac_nonces"
+            ).fetchone()[0]
+
+    assert first.status_code == 200
+    assert expiry == signed_at_ms + settings.sensitive_auth_max_timestamp_drift_ms
 
 
 def test_authorize_and_unlock_allows_owner_password_when_copy_is_restricted(
@@ -276,11 +402,13 @@ def test_sanitize_removes_metadata(client, auth_headers, sample_pdf_bytes):
     doc.set_metadata({"title": "Secret Title", "author": "Secret Author"})
     pdf_with_metadata = doc.tobytes()
 
-    body = json.dumps({
-        "source_url": "https://example.com/test.pdf",
-        "remove_metadata": True,
-        "remove_javascript": True,
-    })
+    body = json.dumps(
+        {
+            "source_url": "https://example.com/test.pdf",
+            "remove_metadata": True,
+            "remove_javascript": True,
+        }
+    )
     headers = auth_headers("POST", "/security/sanitize", body)
 
     with patch(

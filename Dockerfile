@@ -68,9 +68,9 @@ LABEL org.opencontainers.image.revision=$SOURCE_COMMIT
 # Create non-root user and cache/temp directories
 # Copy PaddleX models if they were pre-downloaded
 RUN useradd -m -r appuser && \
-    mkdir -p /app/cache /tmp/libreoffice && \
+    mkdir -p /app/cache /data /tmp/libreoffice && \
     (cp -r /root/.paddlex /home/appuser/.paddlex 2>/dev/null || true) && \
-    chown -R appuser:appuser /app/cache /tmp/libreoffice /home/appuser
+    chown -R appuser:appuser /app/cache /data /tmp/libreoffice /home/appuser
 
 USER appuser
 

@@ -51,7 +51,12 @@ def valid_offer():
         "x-source-code": source_url,
         "link": f'<{source_url}>; rel="source", <{license_url}>; rel="license"',
     }
-    health = {"build_commit": COMMIT}
+    health = {
+        "build_commit": COMMIT,
+        "license": "AGPL-3.0-only",
+        "project_license": "AGPL-3.0-or-later",
+        "source_code_url": source_url,
+    }
     return offer, headers, health
 
 
@@ -62,7 +67,14 @@ def trusted_components(offer):
 def test_valid_offer_returns_every_url_that_must_remain_available():
     offer, headers, health = valid_offer()
 
-    urls = validate_offer(offer, headers, health, COMMIT, trusted_components(offer))
+    urls = validate_offer(
+        offer,
+        headers,
+        health,
+        COMMIT,
+        trusted_components(offer),
+        health_headers=headers,
+    )
 
     assert urls == [
         offer["source_code_url"],
@@ -87,7 +99,14 @@ def test_offer_fails_closed_on_identity_or_license_drift(field, value, message):
     offer[field] = value
 
     with pytest.raises(ValueError, match=message):
-        validate_offer(offer, headers, health, COMMIT, trusted_components(offer))
+        validate_offer(
+            offer,
+            headers,
+            health,
+            COMMIT,
+            trusted_components(offer),
+            health_headers=headers,
+        )
 
 
 @pytest.mark.parametrize(
@@ -107,7 +126,14 @@ def test_offer_rejects_counterfeit_revision_urls(field, value):
     offer[field] = value
 
     with pytest.raises(ValueError, match="trusted revision-pinned URL"):
-        validate_offer(offer, headers, health, COMMIT, trusted_components(offer))
+        validate_offer(
+            offer,
+            headers,
+            health,
+            COMMIT,
+            trusted_components(offer),
+            health_headers=headers,
+        )
 
 
 @pytest.mark.parametrize(
@@ -126,7 +152,14 @@ def test_offer_rejects_untrusted_or_private_component_destinations(url):
     trusted[0]["source_url"] = url
 
     with pytest.raises(ValueError, match="source URL"):
-        validate_offer(offer, headers, health, COMMIT, trusted)
+        validate_offer(
+            offer,
+            headers,
+            health,
+            COMMIT,
+            trusted,
+            health_headers=headers,
+        )
 
 
 def test_offer_rejects_component_metadata_not_in_trusted_revision():
@@ -135,7 +168,14 @@ def test_offer_rejects_component_metadata_not_in_trusted_revision():
     offer["third_party_sources"][0]["sha256"] = "d" * 64
 
     with pytest.raises(ValueError, match="trusted revision manifest"):
-        validate_offer(offer, headers, health, COMMIT, trusted)
+        validate_offer(
+            offer,
+            headers,
+            health,
+            COMMIT,
+            trusted,
+            health_headers=headers,
+        )
 
 
 @pytest.mark.parametrize(
@@ -283,7 +323,10 @@ def test_json_fetch_rejects_oversized_success_response(monkeypatch):
     monkeypatch.setattr(verifier, "MAX_JSON_RESPONSE_BYTES", 16)
 
     with pytest.raises(ValueError, match="size limit"):
-        verifier._read_bounded_json(OversizedResponse())
+        verifier._read_bounded_json(
+            OversizedResponse(),
+            verifier.time.monotonic() + verifier.JSON_TOTAL_TIMEOUT_SECONDS,
+        )
 
 
 def test_json_fetch_enforces_total_deadline_during_stream(monkeypatch):
@@ -295,10 +338,82 @@ def test_json_fetch_enforces_total_deadline_during_stream(monkeypatch):
             return b"{"
 
     response = SlowResponse()
-    moments = iter((0.0, 0.25, 2.0))
-    monkeypatch.setattr(verifier, "JSON_TOTAL_TIMEOUT_SECONDS", 1)
+    moments = iter((0.25, 2.0))
     monkeypatch.setattr(verifier.time, "monotonic", lambda: next(moments))
 
     with pytest.raises(TimeoutError, match="total time limit"):
-        verifier._read_bounded_json(response)
+        verifier._read_bounded_json(response, 1.0)
     assert response.reads == 1
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("build_commit", "d" * 40),
+        ("source_code_url", "https://attacker.example/wrong"),
+        ("license", "Proprietary"),
+        ("project_license", "Proprietary"),
+    ],
+)
+def test_offer_rejects_counterfeit_health_identity(field, value):
+    offer, headers, health = valid_offer()
+    health[field] = value
+
+    with pytest.raises(ValueError, match=f"health {field}"):
+        validate_offer(
+            offer,
+            headers,
+            health,
+            COMMIT,
+            trusted_components(offer),
+            health_headers=headers,
+        )
+
+
+@pytest.mark.parametrize("header", ["x-source-code", "link"])
+def test_offer_requires_source_headers_on_health(header):
+    offer, headers, health = valid_offer()
+    health_headers = dict(headers)
+    health_headers.pop(header)
+
+    with pytest.raises(ValueError, match="health"):
+        validate_offer(
+            offer,
+            headers,
+            health,
+            COMMIT,
+            trusted_components(offer),
+            health_headers=health_headers,
+        )
+
+
+def test_json_fetch_rejects_response_whose_headers_exceed_total_deadline(monkeypatch):
+    now = [0.0]
+
+    class FakeResponse(io.BytesIO):
+        status = 200
+
+        def __init__(self):
+            super().__init__(b"{}")
+
+    class SlowHeaderConnection:
+        sock = None
+
+        def __init__(self, *_args, **_kwargs):
+            return None
+
+        def request(self, *_args, **_kwargs):
+            return None
+
+        def getresponse(self):
+            now[0] = 1000.0
+            return FakeResponse()
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(verifier, "_PinnedHTTPSConnection", SlowHeaderConnection)
+    monkeypatch.setattr(verifier.time, "monotonic", lambda: now[0])
+
+    with pytest.raises(TimeoutError, match="total time limit"):
+        verifier.fetch_public_json("https://deployment.example/source", allow_redirects=False)

@@ -7,6 +7,7 @@ import http.client
 import ipaddress
 import json
 import re
+import signal
 import socket
 import ssl
 import sys
@@ -46,7 +47,7 @@ def _trusted_tls_context() -> ssl.SSLContext:
 class _PinnedHTTPSConnection(http.client.HTTPSConnection):
     """HTTPS connection whose TCP peer is the address already validated below."""
 
-    def __init__(self, hostname: str, address: str, timeout: int):
+    def __init__(self, hostname: str, address: str, timeout: float):
         super().__init__(
             hostname,
             port=443,
@@ -62,6 +63,38 @@ class _PinnedHTTPSConnection(http.client.HTTPSConnection):
             self.source_address,
         )
         self.sock = self._context.wrap_socket(self.sock, server_hostname=self.host)
+
+
+def _remaining_seconds(deadline: float) -> float:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("JSON request exceeded total time limit")
+    return remaining
+
+
+@contextmanager
+def _json_request_deadline() -> Iterator[float]:
+    """Enforce one wall-clock limit across connect, headers, and JSON body."""
+    if not hasattr(signal, "SIGALRM") or not hasattr(signal, "setitimer"):
+        raise OSError("platform cannot enforce the JSON request total deadline")
+    if signal.getitimer(signal.ITIMER_REAL)[0] > 0:
+        raise OSError("cannot replace an existing process alarm")
+
+    def timeout_handler(_signum, _frame):
+        raise TimeoutError("JSON request exceeded total time limit")
+
+    try:
+        previous_handler = signal.signal(signal.SIGALRM, timeout_handler)
+    except ValueError as exc:
+        raise OSError("JSON verifier must run on the main thread") from exc
+
+    deadline = time.monotonic() + JSON_TOTAL_TIMEOUT_SECONDS
+    signal.setitimer(signal.ITIMER_REAL, JSON_TOTAL_TIMEOUT_SECONDS)
+    try:
+        yield deadline
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous_handler)
 
 
 def _resolve_public_https_url(url: str) -> tuple[str, str, tuple[str, ...]]:
@@ -123,19 +156,28 @@ def _open_public_https(
     method: str,
     timeout: int,
     max_redirects: int = 5,
+    deadline: float | None = None,
 ) -> Iterator[http.client.HTTPResponse]:
     """Open a public HTTPS URL without proxy trust or DNS-rebinding exposure."""
     current_url = url
     for redirect_count in range(max_redirects + 1):
         hostname, request_target, addresses = _resolve_public_https_url(current_url)
-        connection = _PinnedHTTPSConnection(hostname, addresses[0], timeout)
+        connection_timeout = timeout
+        if deadline is not None:
+            connection_timeout = min(timeout, _remaining_seconds(deadline))
+        connection = _PinnedHTTPSConnection(hostname, addresses[0], connection_timeout)
         try:
             connection.request(
                 method,
                 request_target,
                 headers={"User-Agent": "TaxScout-AGPL-Verifier/1.0"},
             )
+            connection_socket = getattr(connection, "sock", None)
+            if deadline is not None and connection_socket is not None:
+                connection_socket.settimeout(_remaining_seconds(deadline))
             response = connection.getresponse()
+            if deadline is not None:
+                _remaining_seconds(deadline)
         except Exception:
             connection.close()
             raise
@@ -181,9 +223,11 @@ def _set_response_socket_timeout(
         sock.settimeout(max(0.001, timeout_seconds))
 
 
-def _read_bounded_json(response: http.client.HTTPResponse) -> dict[str, Any]:
+def _read_bounded_json(
+    response: http.client.HTTPResponse,
+    deadline: float,
+) -> dict[str, Any]:
     """Decode one JSON object within strict byte and wall-clock limits."""
-    deadline = time.monotonic() + JSON_TOTAL_TIMEOUT_SECONDS
     chunks: list[bytes] = []
     total = 0
     reader = getattr(response, "read1", None)
@@ -193,7 +237,7 @@ def _read_bounded_json(response: http.client.HTTPResponse) -> dict[str, Any]:
     while True:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            raise TimeoutError("JSON response exceeded total time limit")
+            raise TimeoutError("JSON request exceeded total time limit")
         _set_response_socket_timeout(response, remaining)
         chunk = reader(min(JSON_READ_CHUNK_BYTES, MAX_JSON_RESPONSE_BYTES - total + 1))
         if not chunk:
@@ -215,14 +259,16 @@ def fetch_public_json(
     allow_redirects: bool,
 ) -> tuple[dict[str, Any], dict[str, str]]:
     """Fetch JSON over the pinned public transport and return normalized headers."""
-    with _open_public_https(
-        url,
-        method="GET",
-        timeout=20,
-        max_redirects=5 if allow_redirects else 0,
-    ) as response:
-        payload = _read_bounded_json(response)
-        headers = {key.lower(): value for key, value in response.getheaders()}
+    with _json_request_deadline() as deadline:
+        with _open_public_https(
+            url,
+            method="GET",
+            timeout=JSON_TOTAL_TIMEOUT_SECONDS,
+            max_redirects=5 if allow_redirects else 0,
+            deadline=deadline,
+        ) as response:
+            payload = _read_bounded_json(response, deadline)
+            headers = {key.lower(): value for key, value in response.getheaders()}
     return payload, headers
 
 
@@ -257,6 +303,8 @@ def validate_offer(
     health: dict[str, Any],
     expected_commit: str,
     trusted_components: list[dict[str, Any]],
+    *,
+    health_headers: dict[str, str],
 ) -> list[str]:
     if not FULL_SHA.fullmatch(expected_commit):
         raise ValueError("expected commit must be a full lowercase Git SHA")
@@ -266,9 +314,6 @@ def validate_offer(
         raise ValueError("project source does not report AGPL-3.0-or-later")
     if offer.get("build_commit") != expected_commit:
         raise ValueError("deployed build commit does not match the expected public revision")
-    if health.get("build_commit") != expected_commit:
-        raise ValueError("health and source endpoints disagree on build identity")
-
     source_url = f"{REPOSITORY}/tree/{expected_commit}"
     archive_url = f"{REPOSITORY}/archive/{expected_commit}.tar.gz"
     license_url = f"{REPOSITORY}/blob/{expected_commit}/LICENSE"
@@ -284,13 +329,24 @@ def validate_offer(
         if offer.get(field) != expected_value:
             raise ValueError(f"{field} does not match the trusted revision-pinned URL")
 
-    if offer_headers.get("x-source-code") != source_url:
-        raise ValueError("X-Source-Code header is missing or inconsistent")
-    link = offer_headers.get("link", "")
-    if f'<{source_url}>; rel="source"' not in link:
-        raise ValueError("Link rel=source is missing")
-    if f'<{license_url}>; rel="license"' not in link:
-        raise ValueError("Link rel=license is missing")
+    exact_health_fields = {
+        "build_commit": expected_commit,
+        "license": "AGPL-3.0-only",
+        "project_license": "AGPL-3.0-or-later",
+        "source_code_url": source_url,
+    }
+    for field, expected_value in exact_health_fields.items():
+        if health.get(field) != expected_value:
+            raise ValueError(f"health {field} does not match the trusted build identity")
+
+    for endpoint, headers in (("source", offer_headers), ("health", health_headers)):
+        if headers.get("x-source-code") != source_url:
+            raise ValueError(f"{endpoint} X-Source-Code header is missing or inconsistent")
+        link = headers.get("link", "")
+        if f'<{source_url}>; rel="source"' not in link:
+            raise ValueError(f"{endpoint} Link rel=source is missing")
+        if f'<{license_url}>; rel="license"' not in link:
+            raise ValueError(f"{endpoint} Link rel=license is missing")
 
     components = offer.get("third_party_sources")
     if not isinstance(components, list):
@@ -335,7 +391,7 @@ def main() -> int:
         f"{base_url}/source",
         allow_redirects=False,
     )
-    health, _ = fetch_public_json(
+    health, health_headers = fetch_public_json(
         f"{base_url}/health",
         allow_redirects=False,
     )
@@ -346,6 +402,7 @@ def main() -> int:
         health,
         args.expected_commit,
         trusted_components,
+        health_headers=health_headers,
     )
     for url in urls:
         probe_url(url)

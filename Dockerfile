@@ -53,6 +53,8 @@ RUN python /tmp/download_models.py || echo "Model pre-download failed; models wi
 # Copy application code
 COPY app/ ./app/
 COPY LICENSE NOTICE.md README.md third-party-sources.json ./
+RUN find /app/app -type d -name __pycache__ -prune -exec rm -r -- {} + && \
+    find /app/app -type f \( -name '*.pyc' -o -name '*.pyo' \) -delete
 
 # The verifier stage downloads the advertised public archive and compares all
 # runtime/build inputs before emitting this marker. Referencing the stage here
@@ -71,6 +73,8 @@ RUN useradd -m -r appuser && \
     chown -R appuser:appuser /app/cache /tmp/libreoffice /home/appuser
 
 USER appuser
+
+ENV PYTHONDONTWRITEBYTECODE=1
 
 # Expose port
 EXPOSE 8000

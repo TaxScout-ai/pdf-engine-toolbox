@@ -46,3 +46,14 @@ def test_compare_sources_rejects_code_claiming_another_revision(tmp_path):
 
     with pytest.raises(ValueError, match="app/main.py"):
         compare_sources(local, public)
+
+
+def test_runtime_removes_generated_bytecode_before_execution():
+    dockerfile = Path("Dockerfile").read_text(encoding="utf-8")
+    dockerignore = Path(".dockerignore").read_text(encoding="utf-8")
+
+    assert "-name __pycache__" in dockerfile
+    assert "-name '*.pyc'" in dockerfile
+    assert "PYTHONDONTWRITEBYTECODE=1" in dockerfile
+    assert "**/__pycache__" in dockerignore
+    assert "**/*.pyc" in dockerignore

@@ -22,6 +22,7 @@ def main() -> int:
     pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
     requirements = (ROOT / "requirements.txt").read_text(encoding="utf-8")
     dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+    dockerignore = (ROOT / ".dockerignore").read_text(encoding="utf-8")
     app_main = (ROOT / "app/main.py").read_text(encoding="utf-8")
     source_route = (ROOT / "app/routes/source.py").read_text(encoding="utf-8")
     revision_verifier = (ROOT / "scripts/verify_source_revision.py").read_text(
@@ -47,6 +48,12 @@ def main() -> int:
             "Docker build does not compare its context to public source")
     require("COPY --from=source-verifier" in dockerfile,
             "runtime image does not depend on source verification")
+    require("-name __pycache__" in dockerfile and "-name '*.pyc'" in dockerfile,
+            "runtime image does not remove unverified Python bytecode")
+    require("PYTHONDONTWRITEBYTECODE=1" in dockerfile,
+            "runtime image can regenerate untracked Python bytecode")
+    require("**/__pycache__" in dockerignore and "**/*.pyc" in dockerignore,
+            "Docker context does not exclude generated Python bytecode")
     require("archive/{commit}.tar.gz" in revision_verifier,
             "source verifier does not download the exact public revision")
     require("compare_sources" in revision_verifier,

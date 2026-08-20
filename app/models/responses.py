@@ -147,7 +147,33 @@ class HealthResponse(BaseModel):
 
     status: str
     version: str
+    build_commit: str
     pymupdf_version: str
+    license: str
+    source_code_url: str
+
+
+class ThirdPartySource(BaseModel):
+    """Source archive for a covered third-party component."""
+
+    name: str
+    version: str
+    license: str
+    source_url: str
+    sha256: str
+
+
+class SourceOfferResponse(BaseModel):
+    """AGPL Corresponding Source offer for network users."""
+
+    license: str
+    license_url: str
+    repository_url: str
+    build_commit: str
+    source_code_url: str
+    source_archive_url: str
+    third_party_source_manifest_url: str
+    third_party_sources: list[ThirdPartySource]
 
 
 # ============================================================================

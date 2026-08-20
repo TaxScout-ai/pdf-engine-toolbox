@@ -83,7 +83,7 @@ def _resolve_public_https_url(url: str) -> tuple[str, str, tuple[str, ...]]:
     except ValueError:
         pass
     else:
-        if not address.is_global:
+        if not _is_public_unicast(address):
             raise ValueError(f"source URL must target a public address: {url}")
 
     try:
@@ -94,13 +94,22 @@ def _resolve_public_https_url(url: str) -> tuple[str, str, tuple[str, ...]]:
     if not addresses:
         raise ValueError(f"source URL hostname has no addresses: {url}")
     for resolved in addresses:
-        if not ipaddress.ip_address(resolved).is_global:
+        if not _is_public_unicast(ipaddress.ip_address(resolved)):
             raise ValueError(f"source URL DNS includes a non-public address: {url}")
 
     request_target = parsed.path or "/"
     if parsed.query:
         request_target = f"{request_target}?{parsed.query}"
     return hostname, request_target, addresses
+
+
+def _is_public_unicast(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    """Distinguish routable unicast from multicast/site-local special ranges."""
+    return (
+        address.is_global
+        and not address.is_multicast
+        and not getattr(address, "is_site_local", False)
+    )
 
 
 @contextmanager
@@ -129,7 +138,6 @@ def _open_public_https(
 
         if response.status in {301, 302, 303, 307, 308}:
             location = response.getheader("Location")
-            response.read()
             response.close()
             connection.close()
             if not location:
@@ -140,7 +148,6 @@ def _open_public_https(
             continue
 
         if response.status < 200 or response.status >= 300:
-            response.read()
             response.close()
             connection.close()
             raise OSError(f"source URL returned HTTP {response.status}: {current_url}")

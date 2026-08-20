@@ -157,6 +157,31 @@ def test_dns_resolution_rejects_noncanonical_loopback_hosts(monkeypatch, hostnam
         verifier._resolve_public_https_url(f"https://{hostname}/source.tar.gz")
 
 
+@pytest.mark.parametrize(
+    "address",
+    ["224.0.0.1", "239.255.255.250", "ff02::1", "ff0e::1", "fec0::1"],
+)
+@pytest.mark.parametrize("as_dns_answer", [False, True])
+def test_resolution_rejects_non_unicast_special_ranges(monkeypatch, address, as_dns_answer):
+    if as_dns_answer:
+        family = socket.AF_INET6 if ":" in address else socket.AF_INET
+
+        def resolve_special(_hostname, port, **_kwargs):
+            return [(family, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", (address, port))]
+
+        monkeypatch.setattr(verifier.socket, "getaddrinfo", resolve_special)
+        url = "https://special-range.example/source.tar.gz"
+    else:
+        url = (
+            f"https://[{address}]/source.tar.gz"
+            if ":" in address
+            else f"https://{address}/source.tar.gz"
+        )
+
+    with pytest.raises(ValueError, match="public address|non-public address"):
+        verifier._resolve_public_https_url(url)
+
+
 def test_redirect_is_revalidated_before_second_connection(monkeypatch):
     class FakeResponse:
         status = 302
@@ -208,6 +233,9 @@ def test_deployment_identity_fetch_ignores_proxy_and_rejects_redirects(monkeypat
         def getheader(self, name):
             assert name == "Location"
             return "https://counterfeit.example/source"
+
+        def read(self, *_args, **_kwargs):
+            raise AssertionError("rejected response bodies must not be drained")
 
     class FakeConnection:
         seen_hosts = []

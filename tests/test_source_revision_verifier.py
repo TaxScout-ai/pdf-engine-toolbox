@@ -1,9 +1,12 @@
 """Tests for build-context to public-source binding."""
 
+import io
+import socket
 from pathlib import Path
 
 import pytest
 
+import scripts.verify_source_revision as verifier
 from scripts.verify_source_revision import compare_sources
 
 
@@ -57,3 +60,87 @@ def test_runtime_removes_generated_bytecode_before_execution():
     assert "PYTHONDONTWRITEBYTECODE=1" in dockerfile
     assert "**/__pycache__" in dockerignore
     assert "**/*.pyc" in dockerignore
+
+
+def test_build_source_download_ignores_proxy_and_ca_environment(monkeypatch, tmp_path):
+    class FakeResponse(io.BytesIO):
+        status = 200
+
+        def __init__(self):
+            super().__init__(b"archive bytes")
+
+    class FakeConnection:
+        created = []
+
+        def __init__(self, address, timeout):
+            self.__class__.created.append((address, timeout))
+
+        def request(self, method, path, headers):
+            assert method == "GET"
+            assert path == f"{verifier.CODELOAD_PATH}/{'a' * 40}"
+            assert "User-Agent" in headers
+
+        def getresponse(self):
+            return FakeResponse()
+
+        def close(self):
+            return None
+
+    def public_dns(_hostname, port, **_kwargs):
+        return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("8.8.8.8", port))]
+
+    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:7777")
+    monkeypatch.setenv("SSL_CERT_FILE", "/nonexistent/hostile-ca.pem")
+    monkeypatch.setenv("SSL_CERT_DIR", "/nonexistent/hostile-ca-directory")
+    monkeypatch.setattr(verifier.socket, "getaddrinfo", public_dns)
+    monkeypatch.setattr(verifier, "_PinnedHTTPSConnection", FakeConnection)
+
+    destination = tmp_path / "source.tar.gz"
+    verifier._download_archive("a" * 40, destination)
+
+    assert destination.read_bytes() == b"archive bytes"
+    assert FakeConnection.created == [("8.8.8.8", 60)]
+    assert verifier._trusted_tls_context().get_ca_certs()
+
+
+@pytest.mark.parametrize("address", ["127.0.0.1", "224.0.0.1", "ff02::1", "fec0::1"])
+def test_build_source_download_rejects_non_public_dns(monkeypatch, address):
+    family = socket.AF_INET6 if ":" in address else socket.AF_INET
+
+    def unsafe_dns(_hostname, port, **_kwargs):
+        return [(family, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", (address, port))]
+
+    monkeypatch.setattr(verifier.socket, "getaddrinfo", unsafe_dns)
+
+    with pytest.raises(ValueError, match="non-public address"):
+        verifier._resolve_codeload_addresses()
+
+
+def test_build_source_download_rejects_redirect_without_reading_body(monkeypatch, tmp_path):
+    class RedirectResponse(io.BytesIO):
+        status = 302
+
+        def __init__(self):
+            super().__init__(b"")
+
+        def read(self, *_args, **_kwargs):
+            raise AssertionError("redirect body must not be read")
+
+    class RedirectConnection:
+        def __init__(self, *_args, **_kwargs):
+            return None
+
+        def request(self, *_args, **_kwargs):
+            return None
+
+        def getresponse(self):
+            return RedirectResponse()
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(verifier, "_resolve_codeload_addresses", lambda: ("8.8.8.8",))
+    monkeypatch.setattr(verifier, "_PinnedHTTPSConnection", RedirectConnection)
+
+    with pytest.raises(OSError, match="HTTP 302"):
+        verifier._download_archive("a" * 40, tmp_path / "source.tar.gz")

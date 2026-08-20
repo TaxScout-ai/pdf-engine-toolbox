@@ -3,15 +3,26 @@
 
 import argparse
 import hashlib
+import http.client
+import ipaddress
 import re
+import socket
+import ssl
 import sys
 import tarfile
 import tempfile
 from pathlib import Path
-from urllib.request import Request, urlopen
 
 FULL_SHA = re.compile(r"^[0-9a-f]{40}$")
 REPOSITORY_URL = "https://github.com/TaxScout-ai/pdf-engine-toolbox"
+CODELOAD_HOST = "codeload.github.com"
+CODELOAD_PATH = "/TaxScout-ai/pdf-engine-toolbox/tar.gz"
+MAX_SOURCE_ARCHIVE_BYTES = 50 * 1024 * 1024
+SYSTEM_CA_FILES = (
+    Path("/etc/ssl/certs/ca-certificates.crt"),
+    Path("/etc/pki/tls/certs/ca-bundle.crt"),
+    Path("/etc/ssl/cert.pem"),
+)
 EXACT_FILES = {
     "Dockerfile",
     "LICENSE",
@@ -59,27 +70,99 @@ def compare_sources(local_root: Path, public_root: Path) -> None:
         missing = sorted(public.keys() - local.keys())
         extra = sorted(local.keys() - public.keys())
         raise ValueError(
-            "source input set differs from public revision "
-            f"(missing={missing}, extra={extra})"
+            f"source input set differs from public revision (missing={missing}, extra={extra})"
         )
     changed = [path for path in local if local[path] != public[path]]
     if changed:
         raise ValueError(
-            "source inputs differ from advertised public revision: "
-            + ", ".join(changed)
+            "source inputs differ from advertised public revision: " + ", ".join(changed)
         )
 
 
-def download_public_source(commit: str, destination: Path) -> Path:
-    archive_url = f"{REPOSITORY_URL}/archive/{commit}.tar.gz"
-    request = Request(
-        archive_url,
-        headers={"User-Agent": "TaxScout-Source-Revision-Verifier/1.0"},
+def _is_public_unicast(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    return (
+        address.is_global
+        and not address.is_multicast
+        and not getattr(address, "is_site_local", False)
     )
+
+
+def _resolve_codeload_addresses() -> tuple[str, ...]:
+    try:
+        answers = socket.getaddrinfo(CODELOAD_HOST, 443, type=socket.SOCK_STREAM)
+    except socket.gaierror as exc:
+        raise ValueError("GitHub codeload hostname does not resolve") from exc
+    addresses = tuple(dict.fromkeys(answer[4][0] for answer in answers))
+    if not addresses:
+        raise ValueError("GitHub codeload hostname has no addresses")
+    if any(not _is_public_unicast(ipaddress.ip_address(address)) for address in addresses):
+        raise ValueError("GitHub codeload DNS includes a non-public address")
+    return addresses
+
+
+def _trusted_tls_context() -> ssl.SSLContext:
+    """Load OS trust roots without honoring SSL_CERT_FILE/SSL_CERT_DIR."""
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    context.check_hostname = True
+    context.verify_mode = ssl.CERT_REQUIRED
+    for ca_file in SYSTEM_CA_FILES:
+        if ca_file.is_file():
+            context.load_verify_locations(cafile=str(ca_file))
+            return context
+    raise OSError("no supported system CA bundle is available")
+
+
+class _PinnedHTTPSConnection(http.client.HTTPSConnection):
+    def __init__(self, address: str, timeout: int):
+        super().__init__(
+            CODELOAD_HOST,
+            port=443,
+            timeout=timeout,
+            context=_trusted_tls_context(),
+        )
+        self._validated_address = address
+
+    def connect(self) -> None:
+        self.sock = socket.create_connection(
+            (self._validated_address, self.port),
+            self.timeout,
+            self.source_address,
+        )
+        self.sock = self._context.wrap_socket(self.sock, server_hostname=self.host)
+
+
+def _download_archive(commit: str, archive_path: Path) -> None:
+    if not FULL_SHA.fullmatch(commit):
+        raise ValueError("SOURCE_COMMIT must be a full lowercase Git SHA")
+    addresses = _resolve_codeload_addresses()
+    connection = _PinnedHTTPSConnection(addresses[0], timeout=60)
+    try:
+        connection.request(
+            "GET",
+            f"{CODELOAD_PATH}/{commit}",
+            headers={"User-Agent": "TaxScout-Source-Revision-Verifier/1.0"},
+        )
+        response = connection.getresponse()
+        if response.status != 200:
+            response.close()
+            raise OSError(f"GitHub codeload returned HTTP {response.status}")
+        downloaded = 0
+        try:
+            with archive_path.open("wb") as output:
+                while chunk := response.read(1024 * 1024):
+                    downloaded += len(chunk)
+                    if downloaded > MAX_SOURCE_ARCHIVE_BYTES:
+                        raise ValueError("public source archive exceeds size limit")
+                    output.write(chunk)
+        finally:
+            response.close()
+    finally:
+        connection.close()
+
+
+def download_public_source(commit: str, destination: Path) -> Path:
     archive_path = destination / "source.tar.gz"
-    with urlopen(request, timeout=60) as response, archive_path.open("wb") as output:
-        while chunk := response.read(1024 * 1024):
-            output.write(chunk)
+    _download_archive(commit, archive_path)
 
     extract_root = destination / "public"
     extract_root.mkdir()

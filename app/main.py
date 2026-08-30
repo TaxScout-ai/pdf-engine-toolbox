@@ -20,7 +20,9 @@ from app.build_identity import (
     LICENSE_URL,
     corresponding_license_url,
     corresponding_source_url,
+    UNVERIFIED_REVISIONS,
     read_build_commit,
+    verify_build_identity,
 )
 from app.config import settings
 from app.routes import (
@@ -76,6 +78,14 @@ def source_offer_headers() -> dict[str, str]:
 async def lifespan(app: FastAPI):
     """Application lifespan: startup and shutdown."""
     log.info("pdf_engine_starting", log_level=settings.log_level)
+
+    # Before serving anything: either we can name the revision we are running,
+    # or we are explicitly allowed not to. Raising here aborts startup.
+    revision = verify_build_identity()
+    if revision in UNVERIFIED_REVISIONS:
+        log.warning("pdf_engine_build_identity_unverified", build_commit=revision)
+    else:
+        log.info("pdf_engine_build_identity", build_commit=revision)
 
     # Pre-warm PaddleOCR models so the first OCR request doesn't cold-start.
     # Only warm up the core OCR pipeline (_get_paddle_ocr) — NOT PPStructureV3

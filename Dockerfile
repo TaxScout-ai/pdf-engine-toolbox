@@ -74,6 +74,9 @@ RUN useradd -m -r appuser && \
 
 USER appuser
 
+# The image carries a verified revision, so refuse to serve without one rather
+# than fall back to advertising the mutable main branch as Corresponding Source.
+ENV REQUIRE_BUILD_IDENTITY=true
 ENV PYTHONDONTWRITEBYTECODE=1
 
 # Expose port

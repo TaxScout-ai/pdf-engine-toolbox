@@ -20,6 +20,11 @@ class Settings(BaseSettings):
     # should list only the S3 virtual-host endpoints used by TaxScout.
     pdf_source_allowed_hosts: str = ""
 
+    # AGPL Corresponding Source. Built images turn this on so that an absent or
+    # corrupt /app/build-commit refuses to start, instead of quietly advertising
+    # the mutable main branch as the source of the code actually running.
+    require_build_identity: bool = False
+
     # HMAC auth
     max_timestamp_drift_ms: int = 5 * 60 * 1000  # 5 minutes
     sensitive_auth_max_timestamp_drift_ms: int = 60 * 1000

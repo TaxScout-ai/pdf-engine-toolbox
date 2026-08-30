@@ -5,6 +5,8 @@ import re
 from pathlib import Path
 from typing import Any
 
+from app.config import settings
+
 REPOSITORY_URL = "https://github.com/TaxScout-ai/pdf-engine-toolbox"
 PROJECT_LICENSE_IDENTIFIER = "AGPL-3.0-or-later"
 RUNTIME_LICENSE_IDENTIFIER = "AGPL-3.0-only"
@@ -15,6 +17,38 @@ LICENSE_URL = f"{REPOSITORY_URL}/blob/main/LICENSE"
 BUILD_COMMIT_PATH = Path("/app/build-commit")
 THIRD_PARTY_SOURCES_PATH = Path("/app/third-party-sources.json")
 _FULL_GIT_SHA = re.compile(r"^[0-9a-f]{40}$")
+
+# Sentinels returned instead of a revision. Named so callers can recognise an
+# unverified build without re-deriving the rule.
+DEVELOPMENT_REVISION = "development"
+INVALID_REVISION = "invalid"
+UNVERIFIED_REVISIONS = (DEVELOPMENT_REVISION, INVALID_REVISION)
+
+
+class BuildIdentityError(RuntimeError):
+    """The running build cannot prove which source revision it is."""
+
+
+def verify_build_identity() -> str:
+    """Return the build revision, refusing to run when it must be provable.
+
+    The URL helpers below fall back to the mutable `main` branch when the
+    revision is unknown. That fallback is honest for a local checkout and wrong
+    for a shipped artifact: it would offer a source tree that is neither
+    immutable nor necessarily the running code, exactly when the running code
+    cannot be identified. Images set require_build_identity so this fails fast.
+    """
+    revision = read_build_commit()
+    if _FULL_GIT_SHA.fullmatch(revision):
+        return revision
+    if settings.require_build_identity:
+        raise BuildIdentityError(
+            f"build identity is required but {BUILD_COMMIT_PATH} is "
+            f"{'malformed' if revision == INVALID_REVISION else 'absent'}; refusing to "
+            "serve, because the AGPL source offer would point at the mutable "
+            "main branch rather than at the running code"
+        )
+    return revision
 
 
 def read_build_commit() -> str:
@@ -27,10 +61,10 @@ def read_build_commit() -> str:
     try:
         commit = BUILD_COMMIT_PATH.read_text(encoding="utf-8").strip()
     except OSError:
-        return "development"
+        return DEVELOPMENT_REVISION
 
     if not _FULL_GIT_SHA.fullmatch(commit):
-        return "invalid"
+        return INVALID_REVISION
     return commit
 
 

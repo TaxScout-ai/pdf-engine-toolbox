@@ -1,5 +1,7 @@
 """Pydantic request models for all API endpoints."""
 
+from typing import Literal
+
 from pydantic import BaseModel, Field, SecretStr
 
 # ============================================================================
@@ -178,6 +180,15 @@ class RedactRequest(BaseModel):
 
     source_url: str
     redactions: list[RedactionSpec]
+
+
+class RedactIdentifiersRequest(BaseModel):
+    """Request for POST /redact/identifiers (TAX-4858)."""
+
+    content_base64: str = Field(description="The document bytes, base64")
+    media_type: Literal["application/pdf", "image/png", "image/jpeg", "image/webp"] = (
+        "application/pdf"
+    )
 
 
 class DetectPiiRequest(BaseModel):

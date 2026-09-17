@@ -2302,6 +2302,7 @@ def ocr_pages(
     pages: list[int] | None = None,
     language: str = "en",
     dpi: int = 300,
+    force_ocr: bool = False,
 ) -> dict:
     """Run PaddleOCR on scanned pages and return rich results.
 
@@ -2355,7 +2356,9 @@ def ocr_pages(
         # but the "words" are extremely short (avg ~1.8 chars vs ~4-5 for
         # real English text).  We use average token length as the heuristic.
         existing_text = page.get_text().strip()
-        if len(existing_text) > 50:
+        # force_ocr (TAX-4858): identifier redaction must read what the page
+        # shows, not what its text layer claims.
+        if len(existing_text) > 50 and not force_ocr:
             tokens = existing_text.split()
             avg_token_len = (
                 sum(len(t) for t in tokens) / len(tokens) if tokens else 0

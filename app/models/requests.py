@@ -189,6 +189,14 @@ class RedactIdentifiersRequest(BaseModel):
     media_type: Literal["application/pdf", "image/png", "image/jpeg", "image/webp"] = (
         "application/pdf"
     )
+    text_layer_only: bool = Field(
+        default=False,
+        description=(
+            "Redact only a document whose every page has a usable text layer. A "
+            "document that would need OCR (a scan, a photo, a mostly-image page) is "
+            "answered at once with status `needs_ocr` and no task is started."
+        ),
+    )
 
 
 class DetectPiiRequest(BaseModel):

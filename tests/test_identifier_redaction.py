@@ -233,3 +233,57 @@ def test_route_refuses_invalid_base64(client, auth_headers):
         headers=auth_headers("POST", "/redact/identifiers", body),
     )
     assert response.status_code == 400
+
+
+def test_route_text_layer_only_declines_a_scan_without_starting_ocr(
+    client, auth_headers, monkeypatch
+):
+    """TAX-4858 C: a caller that redacts text-layer documents only gets an
+    immediate answer for a scan, and no minutes-long OCR task is queued."""
+    import base64
+    import json
+
+    from app.routes import redact as route
+
+    queued = []
+    monkeypatch.setattr(route, "_run_identifier_redaction", lambda *args: queued.append(args))
+    scan, _ = _scanned_w2()
+    body = json.dumps(
+        {
+            "content_base64": base64.b64encode(scan).decode(),
+            "media_type": "application/pdf",
+            "text_layer_only": True,
+        }
+    )
+    response = client.post(
+        "/redact/identifiers",
+        content=body,
+        headers=auth_headers("POST", "/redact/identifiers", body),
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "needs_ocr"
+    assert "data" not in response.json()
+    assert queued == []
+
+
+def test_route_text_layer_only_still_redacts_a_digital_pdf(client, auth_headers):
+    import base64
+    import json
+
+    body = json.dumps(
+        {
+            "content_base64": base64.b64encode(_digital_w2()).decode(),
+            "media_type": "application/pdf",
+            "text_layer_only": True,
+        }
+    )
+    response = client.post(
+        "/redact/identifiers",
+        content=body,
+        headers=auth_headers("POST", "/redact/identifiers", body),
+    )
+    assert response.status_code == 200, response.text
+    data = response.json()["data"]
+    out = fitz.open(stream=base64.b64decode(data["pdf_base64"]), filetype="pdf")[0].get_text()
+    assert SSN not in out and EIN not in out
+    assert "5678" in out

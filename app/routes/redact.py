@@ -109,6 +109,10 @@ async def redact_identifiers(request: RedactIdentifiersRequest, background_tasks
     needs_ocr = request.media_type != "application/pdf" or any(
         identifier_redaction.needs_ocr(page) for page in pdf_service._open_pdf(data)
     )
+    if needs_ocr and request.text_layer_only:
+        # The caller redacts text-layer documents only and sends the rest as
+        # before; minutes of OCR it will not use are not started (TAX-4858 C).
+        return {"success": True, "status": "needs_ocr"}
     if needs_ocr:
         task = task_service.create_task(_OPERATION)
         background_tasks.add_task(

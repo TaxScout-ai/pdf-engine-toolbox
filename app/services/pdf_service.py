@@ -12,6 +12,7 @@ import numpy as np
 import structlog
 from PIL import Image
 
+from app.config import settings
 from app.utils.errors import (
     PageOutOfRangeError,
     PdfCorruptError,
@@ -2293,8 +2294,17 @@ def _get_paddle_ocr(lang: str = "en"):
             use_doc_orientation_classify=False,
             use_doc_unwarping=False,
             use_textline_orientation=True,
+            **_det_limit_kwargs(),
         )
     return _paddle_ocr_instances[lang]
+
+
+def _det_limit_kwargs() -> dict:
+    """Bound text detection's input size (see settings.ocr_det_limit_side_len)."""
+    side = settings.ocr_det_limit_side_len
+    if side <= 0:
+        return {}
+    return {"text_det_limit_type": "max", "text_det_limit_side_len": side}
 
 
 def ocr_pages(

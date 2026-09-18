@@ -31,6 +31,14 @@ class Settings(BaseSettings):
     sensitive_nonce_cache_max_entries: int = 10_000
     sensitive_nonce_db_path: str = "/data/pdf-engine-sensitive-nonces.sqlite3"
 
+    # OCR text detection runs on the page scaled so its longer side is at most
+    # this many pixels; recognition still reads each line from the full-DPI
+    # render. Unbounded detection on a 300-DPI letter page peaked at 5.7 GB and
+    # was OOM-killed on the 4 GiB production host; 1280 peaks at ~1.55 GB, is
+    # 3.5x faster and read 496/496 identifiers in small-print stress scans
+    # (TAX-4858). 0 restores the unbounded PaddleOCR default.
+    ocr_det_limit_side_len: int = 1280
+
     # Cache
     cache_enabled: bool = True
     cache_dir: str = "/tmp/pdf_engine_cache"

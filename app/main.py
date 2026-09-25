@@ -39,6 +39,7 @@ from app.routes import (
     repair,
     security,
     source,
+    forms,
     tasks,
     text,
     thumbnails,
@@ -190,3 +191,4 @@ app.include_router(repair.router, tags=["Repair"])
 app.include_router(convert.router, tags=["Convert"])
 app.include_router(classify.router, tags=["Classify"])
 app.include_router(tasks.router, tags=["Tasks"])
+app.include_router(forms.router, tags=["Forms"])

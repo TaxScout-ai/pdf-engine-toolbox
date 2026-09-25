@@ -532,3 +532,17 @@ class OcrRequest(BaseModel):
     pages: list[int] | None = Field(default=None, description="Pages to OCR (all if omitted)")
     language: str = Field(default="en", description="PaddleOCR language code (en, fr, de, ch, etc.)")
     dpi: int = Field(default=300, ge=150, le=600, description="Rendering DPI for OCR")
+
+
+class FormFieldsRequest(BaseModel):
+    """Request for POST /forms/fields (TAX-5565)."""
+
+    source_url: str
+
+
+class FormFillRequest(BaseModel):
+    """Request for POST /forms/fill (TAX-5565)."""
+
+    source_url: str
+    values: dict[str, str | bool | None] = Field(default_factory=dict)
+    flatten: bool = False

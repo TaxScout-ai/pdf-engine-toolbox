@@ -24,12 +24,27 @@ log = structlog.get_logger()
 
 
 def _open_pdf(pdf_bytes: bytes) -> fitz.Document:
-    """Open a PDF from bytes, raising PdfCorruptError on failure."""
+    """Open a PDF from bytes, raising PdfCorruptError on failure.
+
+    MuPDF sniffs the content, so a JPEG or PNG opens as an image document even
+    with ``filetype="pdf"``. PyMuPDF cannot serve such a document to most of
+    this service (``permissions`` raises TypeError, ``tobytes`` asserts), so an
+    image is converted to a one-page PDF here and every operation sees a PDF
+    (TAX-5613).
+    """
     try:
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-        return doc
     except Exception as e:
         raise PdfCorruptError(f"Cannot open PDF: {e}")
+    if doc.is_pdf:
+        return doc
+    try:
+        converted = fitz.open("pdf", doc.convert_to_pdf())
+    except Exception as e:
+        raise PdfCorruptError(f"Cannot convert document to PDF: {e}")
+    finally:
+        doc.close()
+    return converted
 
 
 def _validate_pages(doc: fitz.Document, pages: list[int]) -> None:

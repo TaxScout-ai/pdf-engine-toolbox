@@ -2501,3 +2501,91 @@ def ocr_pages(
         "avg_confidence": avg_confidence,
         "pdf_bytes": doc.tobytes(garbage=4, deflate=True),
     }
+
+
+# ============================================================================
+# Form fields (TAX-5565)
+# ============================================================================
+
+_WIDGET_TYPES = {
+    fitz.PDF_WIDGET_TYPE_TEXT: "text",
+    fitz.PDF_WIDGET_TYPE_CHECKBOX: "checkbox",
+    fitz.PDF_WIDGET_TYPE_RADIOBUTTON: "radio",
+    fitz.PDF_WIDGET_TYPE_COMBOBOX: "choice",
+    fitz.PDF_WIDGET_TYPE_LISTBOX: "choice",
+}
+
+
+def _fillable_widgets(doc: fitz.Document):
+    """Every widget a form fill may touch; signature fields are not filled."""
+    for page in doc:
+        for widget in page.widgets() or []:
+            if widget.field_type in _WIDGET_TYPES:
+                yield page, widget
+
+
+def list_form_fields(pdf_bytes: bytes) -> list[dict]:
+    """The fillable fields of a PDF form, in page order, one entry per name."""
+    doc = _open_pdf(pdf_bytes)
+    fields: dict[str, dict] = {}
+    for page, widget in _fillable_widgets(doc):
+        name = widget.field_name or ""
+        if not name:
+            continue
+        kind = _WIDGET_TYPES[widget.field_type]
+        entry = fields.get(name)
+        if entry is None:
+            entry = {
+                "name": name,
+                "label": widget.field_label or name,
+                "type": kind,
+                "value": widget.field_value,
+                "page_index": page.number,
+                "options": list(widget.choice_values or []),
+                "read_only": bool(widget.field_flags & fitz.PDF_FIELD_IS_READ_ONLY),
+            }
+            fields[name] = entry
+        if kind == "radio":
+            on_state = widget.on_state()
+            if on_state and on_state not in entry["options"]:
+                entry["options"].append(on_state)
+            if widget.field_value not in (None, "", "Off", False):
+                entry["value"] = on_state
+    return list(fields.values())
+
+
+def _is_checked(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"true", "yes", "on", "1", "x"}
+
+
+def fill_form_fields(
+    pdf_bytes: bytes, values: dict, flatten: bool = False
+) -> tuple[bytes, int]:
+    """Fill form fields by name; read-only and unknown names are left alone.
+
+    Returns the PDF and how many widgets changed. With ``flatten`` the fields
+    are burned into the page content and the form disappears.
+    """
+    doc = _open_pdf(pdf_bytes)
+    changed = 0
+    for _page, widget in _fillable_widgets(doc):
+        name = widget.field_name
+        if name not in values:
+            continue
+        if widget.field_flags & fitz.PDF_FIELD_IS_READ_ONLY:
+            continue
+        value = values[name]
+        kind = _WIDGET_TYPES[widget.field_type]
+        if kind == "checkbox":
+            widget.field_value = widget.on_state() if _is_checked(value) else "Off"
+        elif kind == "radio":
+            widget.field_value = widget.on_state() == str(value)
+        else:
+            widget.field_value = "" if value is None else str(value)
+        widget.update()
+        changed += 1
+    if flatten:
+        doc.bake(annots=False, widgets=True)
+    return doc.tobytes(garbage=4, deflate=True), changed

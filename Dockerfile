@@ -25,6 +25,7 @@ WORKDIR /app
 # - libgl1: required by opencv-python-headless
 # - libreoffice-core + writer + calc + impress: for office-to-PDF conversion
 # - fonts-liberation: standard fonts for LibreOffice rendering
+# - ghostscript: PDF/A output (TAX-5637)
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         curl \
@@ -36,6 +37,7 @@ RUN apt-get update && \
         libreoffice-calc \
         libreoffice-impress \
         fonts-liberation \
+        ghostscript \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements first (Docker layer caching)

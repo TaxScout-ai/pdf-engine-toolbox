@@ -284,7 +284,8 @@ def merge_pdfs(sources: list[dict]) -> bytes:
 
                 dst.insert_pdf(src, from_page=page_idx, to_page=page_idx)
                 if rotation:
-                    dst[-1].set_rotation(rotation)
+                    # A delta on the page's own /Rotate, as the toolbox shows it.
+                    dst[-1].set_rotation((dst[-1].rotation + rotation) % 360)
 
         elif source.get("page_ranges"):
             # Page ranges
@@ -298,7 +299,7 @@ def merge_pdfs(sources: list[dict]) -> bytes:
                     dst.insert_pdf(src, from_page=idx, to_page=idx)
                     rot = rotations.get(str(idx), 0)
                     if rot:
-                        dst[-1].set_rotation(rot)
+                        dst[-1].set_rotation((dst[-1].rotation + rot) % 360)
         else:
             # All pages
             dst.insert_pdf(src)

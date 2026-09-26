@@ -546,3 +546,9 @@ class FormFillRequest(BaseModel):
     source_url: str
     values: dict[str, str | bool | None] = Field(default_factory=dict)
     flatten: bool = False
+
+
+class PdfaRequest(BaseModel):
+    """Request for POST /convert/pdfa (TAX-5637)."""
+
+    source_url: str

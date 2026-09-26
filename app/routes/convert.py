@@ -4,12 +4,14 @@ import os
 import time
 
 from fastapi import APIRouter, BackgroundTasks, Depends
-from fastapi.responses import Response
+from fastapi.concurrency import run_in_threadpool
+from fastapi.responses import JSONResponse, Response
 
 from app.dependencies import require_auth
-from app.models.requests import ImageToPdfRequest, OfficeToPdfRequest
+from app.models.requests import ImageToPdfRequest, OfficeToPdfRequest, PdfaRequest
 from app.models.responses import TaskAcceptedResponse
 from app.services import download_service, pdf_service, cache_service, task_service
+from app.services.pdfa_service import PdfaConversionError, pdf_to_pdfa
 
 router = APIRouter()
 
@@ -121,3 +123,18 @@ async def office_to_pdf(request: OfficeToPdfRequest, background_tasks: Backgroun
             "X-Processing-Time-Ms": f"{elapsed:.2f}",
         },
     )
+
+
+@router.post("/convert/pdfa", dependencies=[Depends(require_auth)])
+async def pdf_to_pdfa_route(request: PdfaRequest):
+    """Convert a PDF to PDF/A-2b for archiving (TAX-5637)."""
+    pdf_bytes = await download_service.download_pdf(request.source_url)
+    try:
+        # Ghostscript runs in a worker thread so it does not block the loop.
+        result = await run_in_threadpool(pdf_to_pdfa, pdf_bytes)
+    except PdfaConversionError as e:
+        return JSONResponse(
+            status_code=422,
+            content={"success": False, "error": {"code": "PDFA_FAILED", "message": str(e)}},
+        )
+    return Response(content=result, media_type="application/pdf")

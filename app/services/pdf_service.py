@@ -602,7 +602,8 @@ def flatten_annotations(pdf_bytes: bytes, annotations: list[dict]) -> bytes:
         color = _hex_to_rgb(annot.get("color", "#DC2626"))
 
         if annot_type == "stamp":
-            stamp_text = annot.get("stamp_type", annot.get("text", ""))
+            # The toolbox sends stamp_type: null for text stamps (TAX-5655).
+            stamp_text = annot.get("stamp_type") or annot.get("text") or ""
             if stamp_text:
                 page.insert_text(
                     fitz.Point(x, y + 12),  # Offset for baseline
@@ -684,6 +685,29 @@ def flatten_annotations(pdf_bytes: bytes, annotations: list[dict]) -> bytes:
                 color=color,
                 fontname="helv",
             )
+
+        elif annot_type == "text_box":
+            # Bates numbers, page numbers and typed notes (TAX-5655).
+            text = annot.get("text") or ""
+            if text:
+                w = (annot.get("width") or 0) / 100.0 * rect.width or 160
+                h = (annot.get("height") or 0) / 100.0 * rect.height or 14
+                box = fitz.Rect(x, y, x + w, y + max(h, 12))
+                if page.insert_textbox(
+                    box, text, fontsize=9, color=color, fontname="helv"
+                ) < 0:
+                    page.insert_text(
+                        fitz.Point(x, y + 10), text, fontsize=9,
+                        color=color, fontname="helv",
+                    )
+
+        elif annot_type == "cross_reference":
+            label = annot.get("text") or ""
+            if label:
+                page.insert_text(
+                    fitz.Point(x, y + 10), label, fontsize=9,
+                    color=color, fontname="helv",
+                )
 
         elif annot_type == "date_stamp":
             import datetime

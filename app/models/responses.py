@@ -52,6 +52,7 @@ class PdfInfoData(BaseModel):
     has_digital_signatures: bool | None
     signature_state: PdfSignatureState
     metadata: dict | None = None
+    outline: list[dict] = []
 
 
 class PdfInfoResponse(BaseModel):

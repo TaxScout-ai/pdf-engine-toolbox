@@ -72,6 +72,7 @@ def test_locked_info_returns_no_content_bearing_fields(
         "has_digital_signatures": None,
         "signature_state": "unknown",
         "metadata": None,
+        "outline": [],
     }
 
 
@@ -106,3 +107,25 @@ def test_owner_only_encryption_reports_permissions_without_requesting_password(
     assert data["authentication_level"] == "user"
     assert data["permissions"]["copy"] is False
     assert data["permissions"]["print"] is True
+
+
+def test_info_returns_the_outline(client, auth_headers, sample_pdf_bytes):
+    """TAX-5689: bookmarks come back with 0-based pages, for editing."""
+    doc = fitz.open(stream=sample_pdf_bytes, filetype="pdf")
+    doc.set_toc([[1, "W-2", 1], [2, "Box 12", 1], [1, "1099-INT", 3]])
+    body = json.dumps({"source_url": "https://example.com/test.pdf"})
+    headers = auth_headers("POST", "/info", body)
+
+    with patch(
+        "app.services.download_service.download_pdf",
+        new_callable=AsyncMock,
+        return_value=doc.tobytes(),
+    ):
+        response = client.post("/info", content=body, headers=headers)
+
+    assert response.status_code == 200
+    assert response.json()["data"]["outline"] == [
+        {"level": 1, "label": "W-2", "page": 0},
+        {"level": 2, "label": "Box 12", "page": 0},
+        {"level": 1, "label": "1099-INT", "page": 2},
+    ]

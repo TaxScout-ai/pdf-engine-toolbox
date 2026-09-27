@@ -167,6 +167,12 @@ def get_info(pdf_bytes: bytes) -> dict:
             "has_digital_signatures": has_signatures,
             "signature_state": signature_state,
             "metadata": doc.metadata or {},
+            # Bookmarks with 0-based pages, so a caller can edit and write
+            # them back through /text/bookmarks (TAX-5689).
+            "outline": [
+                {"level": level, "label": title, "page": max(page - 1, 0)}
+                for level, title, page, *_ in doc.get_toc(simple=True)
+            ],
         }
     finally:
         doc.close()

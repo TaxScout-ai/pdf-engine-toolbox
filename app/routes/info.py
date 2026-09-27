@@ -34,6 +34,7 @@ async def get_pdf_info(request: InfoRequest):
             has_digital_signatures=info["has_digital_signatures"],
             signature_state=info["signature_state"],
             metadata=info["metadata"],
+            outline=info.get("outline", []),
         ),
         processing_time_ms=round(elapsed, 2),
     )

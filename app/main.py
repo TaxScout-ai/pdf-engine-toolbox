@@ -95,6 +95,9 @@ async def lifespan(app: FastAPI):
     # PPStructure models load lazily on first classify/table request.
     try:
         def _warmup():
+            if settings.ocr_backend == "rapid":
+                # The pilot loads only its selected engine, on first scan.
+                return
             from app.services.pdf_service import _get_paddle_ocr
             _get_paddle_ocr("en")
 

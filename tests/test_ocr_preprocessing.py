@@ -54,3 +54,18 @@ def test_visible_text_on_scan_is_not_trusted():
             "important scanned fields to be skipped",
         )
         assert "substantial_raster_content" in text_layer_quality(p)["reasons"]
+
+
+def test_crop_never_discards_faint_text_outside_dark_content():
+    import cv2
+
+    image = np.full((900, 900, 3), 255, dtype=np.uint8)
+    cv2.putText(image, "CENTER DOCUMENT", (250, 450), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 0), 2)
+    cv2.putText(
+        image, "Amount: 12345.67", (50, 80), cv2.FONT_HERSHEY_SIMPLEX, 1, (190, 190, 190), 2
+    )
+    prepared, inverse, meta = prepare_scan(image)
+    assert meta["crop_pixels"] == [0, 0, 900, 900]
+    assert meta["crop_skipped_reason"] == "nonwhite_margin_content"
+    assert np.array_equal(prepared, image)
+    assert np.array_equal(inverse, np.eye(3))

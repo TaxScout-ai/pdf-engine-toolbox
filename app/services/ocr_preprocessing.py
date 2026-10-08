@@ -60,9 +60,22 @@ def prepare_scan(image):
         pad = max(24, int(max(x1 - x0, y1 - y0) * 0.06))
         x0, y0 = max(0, x0 - pad), max(0, y0 - pad)
         x1, y1 = min(width, x1 + pad), min(height, y1 + pad)
-        image = image[y0:y1, x0:x1].copy()
-        inverse[:2, 2] = [x0, y0]
-        meta["crop_pixels"] = [int(x0), int(y0), int(x1), int(y1)]
+        # Dark components only propose a crop. Any non-white pixel outside
+        # it vetoes removal: faint text must never become "blank margin".
+        # Noisy scans may remain uncropped; preserving evidence takes priority.
+        nonwhite = gray < 255
+        outside = (
+            nonwhite[:y0].any()
+            or nonwhite[y1:].any()
+            or nonwhite[y0:y1, :x0].any()
+            or nonwhite[y0:y1, x1:].any()
+        )
+        if outside:
+            meta["crop_skipped_reason"] = "nonwhite_margin_content"
+        else:
+            image = image[y0:y1, x0:x1].copy()
+            inverse[:2, 2] = [x0, y0]
+            meta["crop_pixels"] = [int(x0), int(y0), int(x1), int(y1)]
     # Vote using small connected glyphs; border lines and portraits don't vote.
     glyphs = [
         stats[i]

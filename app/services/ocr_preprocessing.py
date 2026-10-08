@@ -89,24 +89,27 @@ def prepare_scan(image):
         horizontal = float(np.median(ratios))
         # Wide characters also occur in upright small print. Require aligned
         # vertical neighbours as independent evidence before rotating a page.
-        components = np.array(glyphs)
-        centers = components[:, :2] + components[:, 2:4] / 2
         votes = [0, 0]
-        for index, component in enumerate(components):
-            distance = np.abs(centers - centers[index])
-            size = np.maximum(components[:, 2:4], component[2:4])
-            gap = distance - (components[:, 2:4] + component[2:4]) / 2
-            comparable = (
-                np.minimum(components[:, 2], component[2]) / size[:, 0] > 0.4
-            ) & (np.minimum(components[:, 3], component[3]) / size[:, 1] > 0.4)
-            for axis in (0, 1):
-                aligned = (
-                    (distance[:, 1 - axis] < size[:, 1 - axis] * 0.3)
-                    & (gap[:, axis] >= 0)
-                    & (gap[:, axis] < size[:, axis] * 1.5)
-                    & comparable
-                )
-                votes[axis] += int(aligned.any())
+        if horizontal < 0.8 and len(glyphs) <= 3000:
+            components = np.array(glyphs)
+            centers = components[:, :2] + components[:, 2:4] / 2
+            for index, component in enumerate(components):
+                distance = np.abs(centers - centers[index])
+                size = np.maximum(components[:, 2:4], component[2:4])
+                gap = distance - (components[:, 2:4] + component[2:4]) / 2
+                comparable = (
+                    np.minimum(components[:, 2], component[2]) / size[:, 0] > 0.4
+                ) & (np.minimum(components[:, 3], component[3]) / size[:, 1] > 0.4)
+                for axis in (0, 1):
+                    aligned = (
+                        (distance[:, 1 - axis] < size[:, 1 - axis] * 0.3)
+                        & (gap[:, axis] >= 0)
+                        & (gap[:, axis] < size[:, axis] * 1.5)
+                        & comparable
+                    )
+                    votes[axis] += int(aligned.any())
+        elif horizontal < 0.8:
+            meta["orientation_skipped_reason"] = "glyph_limit"
         vertical_layout = votes[1] >= 15 and votes[1] > votes[0] * 1.4
         if horizontal < 0.8 and vertical_layout:
             old_width = image.shape[1]

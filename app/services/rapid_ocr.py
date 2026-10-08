@@ -28,7 +28,7 @@ MODEL_HASHES = {
 }
 PACKAGES = {"rapidocr": "3.9.2", "onnxruntime": "1.30.0"}
 # Change this when preprocessing, weights, or output semantics change.
-PROFILE = "rapid-3.9.2-ort-1.30.0-v6-small-prepared-word-v4"
+PROFILE = "rapid-3.9.2-ort-1.30.0-v6-small-prepared-word-v5"
 MAX_DPI = 216
 MAX_RENDER_PIXELS = 16_000_000
 QUEUE_TIMEOUT_SECONDS = 30

@@ -148,7 +148,7 @@ you to offer those users the Corresponding Source of that modified version.
 
 ### RapidOCR scan preparation and manual review (TAX-6490)
 
-The opt-in `rapid-3.9.2-ort-1.30.0-v6-small-prepared-word-v4` profile
+The opt-in `rapid-3.9.2-ort-1.30.0-v6-small-prepared-word-v5` profile
 checks the existing PDF text layer before skipping recognition. Invisible text,
 invalid characters, insufficient text and substantial raster content trigger OCR.
 Accepted digital pages return actual native word rectangles without loading a model.

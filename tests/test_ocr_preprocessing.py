@@ -81,3 +81,15 @@ def test_wide_upright_glyphs_do_not_trigger_false_rotation():
     assert meta["orientation_ambiguous"]
     votes = meta["glyph_alignment_votes"]
     assert votes["horizontal"] > votes["vertical"]
+
+
+def test_dense_wide_glyphs_skip_quadratic_orientation_work():
+    image = np.full((1600, 1600, 3), 255, dtype=np.uint8)
+    for y in range(50, 1550, 20):
+        for x in range(50, 1550, 24):
+            image[y:y+12, x:x+18] = 0
+    _, _, meta = prepare_scan(image)
+    assert meta["rotation_ccw"] == 0
+    assert meta["orientation_skipped_reason"] == "glyph_limit"
+    assert meta["orientation_ambiguous"]
+    assert meta["glyph_alignment_votes"] == {"horizontal": 0, "vertical": 0}

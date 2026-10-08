@@ -46,7 +46,7 @@ def prepare_scan(image):
     meta = {
         "crop_pixels": [0, 0, width, height],
         "rotation_ccw": 0,
-        "method": "foreground-components-v1",
+        "method": "foreground-components-v2",
         "orientation_ambiguous": False,
     }
     if not keep:
@@ -87,13 +87,37 @@ def prepare_scan(image):
     if len(glyphs) >= 15:
         ratios = np.array([s[3] / s[2] for s in glyphs])
         horizontal = float(np.median(ratios))
-        if horizontal < 0.8:
+        # Wide characters also occur in upright small print. Require aligned
+        # vertical neighbours as independent evidence before rotating a page.
+        components = np.array(glyphs)
+        centers = components[:, :2] + components[:, 2:4] / 2
+        votes = [0, 0]
+        for index, component in enumerate(components):
+            distance = np.abs(centers - centers[index])
+            size = np.maximum(components[:, 2:4], component[2:4])
+            gap = distance - (components[:, 2:4] + component[2:4]) / 2
+            comparable = (
+                np.minimum(components[:, 2], component[2]) / size[:, 0] > 0.4
+            ) & (np.minimum(components[:, 3], component[3]) / size[:, 1] > 0.4)
+            for axis in (0, 1):
+                aligned = (
+                    (distance[:, 1 - axis] < size[:, 1 - axis] * 0.3)
+                    & (gap[:, axis] >= 0)
+                    & (gap[:, axis] < size[:, axis] * 1.5)
+                    & comparable
+                )
+                votes[axis] += int(aligned.any())
+        vertical_layout = votes[1] >= 15 and votes[1] > votes[0] * 1.4
+        if horizontal < 0.8 and vertical_layout:
             old_width = image.shape[1]
             image = np.ascontiguousarray(np.rot90(image))
             # Prepared (u,v) -> original crop (old_width-1-v,u).
             inverse = inverse @ np.array([[0, -1, old_width - 1], [1, 0, 0], [0, 0, 1]])
             meta["rotation_ccw"] = 90
-        meta["orientation_ambiguous"] = 0.8 <= horizontal <= 1.1
+        meta["orientation_ambiguous"] = (0.8 <= horizontal <= 1.1) or (
+            horizontal < 0.8 and not vertical_layout
+        )
+        meta["glyph_alignment_votes"] = {"horizontal": votes[0], "vertical": votes[1]}
         meta["glyph_aspect_median"] = round(horizontal, 4)
     return image, inverse, meta
 

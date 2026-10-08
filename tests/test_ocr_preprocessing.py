@@ -17,8 +17,8 @@ def test_crop_preserves_original_coordinates():
 
 def test_sideways_glyphs_map_back_to_original():
     image = np.full((600, 600, 3), 255, dtype=np.uint8)
-    for y in range(100, 500, 40):
-        for x in range(100, 400, 40):
+    for y in range(100, 500, 20):
+        for x in range(100, 400, 60):
             image[y : y + 10, x : x + 16] = 0
     prepared, inverse, meta = prepare_scan(image)
     assert meta["rotation_ccw"] == 90
@@ -69,3 +69,15 @@ def test_crop_never_discards_faint_text_outside_dark_content():
     assert meta["crop_skipped_reason"] == "nonwhite_margin_content"
     assert np.array_equal(prepared, image)
     assert np.array_equal(inverse, np.eye(3))
+
+
+def test_wide_upright_glyphs_do_not_trigger_false_rotation():
+    image = np.full((600, 600, 3), 255, dtype=np.uint8)
+    for y in range(100, 500, 60):
+        for x in range(100, 400, 24):
+            image[y:y+10, x:x+16] = 0
+    _, _, meta = prepare_scan(image)
+    assert meta["rotation_ccw"] == 0
+    assert meta["orientation_ambiguous"]
+    votes = meta["glyph_alignment_votes"]
+    assert votes["horizontal"] > votes["vertical"]

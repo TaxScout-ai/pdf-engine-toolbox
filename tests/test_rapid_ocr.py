@@ -142,8 +142,9 @@ def test_inference_error_fails_task_without_paddle_fallback(client, auth_headers
 def test_oversized_page_rejected_before_render_or_engine_load(monkeypatch):
     engine = MagicMock(side_effect=AssertionError("unexpected model load"))
     monkeypatch.setattr(rapid_ocr, "_get_engine", engine)
-    with pytest.raises(ValueError, match="pixel limit"):
-        rapid_ocr.ocr_pages(scan(width=5000, height=5000))
+    result = rapid_ocr.ocr_pages(scan(width=5000, height=5000))
+    assert result["pages"][0]["status"] == "failed"
+    assert result["coverage"]["status"] == "unavailable"
     engine.assert_not_called()
 
 
@@ -169,10 +170,85 @@ def test_invalid_geometry_is_not_silently_reported_as_success(monkeypatch):
     result = prediction()
     result.word_results[0][0][2][0][0] = float("nan")
     monkeypatch.setattr(rapid_ocr, "_get_engine", lambda: lambda *a, **kw: result)
-    with pytest.raises(ValueError, match="invalid geometry"):
-        rapid_ocr.ocr_pages(scan())
+    response = rapid_ocr.ocr_pages(scan())
+    assert response["coverage"]["status"] == "unavailable"
+    assert response["pages"][0]["status"] == "partial"
+    assert response["pages"][0]["discarded_words"] == 1
+    assert response["pages"][0]["words"] == []
 
 
 def test_pilot_refuses_multiple_workers():
     with pytest.raises(ValueError, match="WORKERS=1"):
         Settings(ocr_backend="rapid", workers=2, _env_file=None)
+
+
+def test_empty_detector_sentinel_preserves_other_pages(monkeypatch):
+    empty = SimpleNamespace(txts=None, boxes=None, word_results=[[[], [], []]])
+    engine = MagicMock(side_effect=[prediction(), empty, prediction()])
+    monkeypatch.setattr(rapid_ocr, "_get_engine", lambda: engine)
+    with fitz.open() as doc:
+        for _ in range(3): doc.new_page()
+        result = rapid_ocr.ocr_pages(doc.tobytes())
+    assert [p["status"] for p in result["pages"]] == ["complete", "empty", "complete"]
+    assert [len(p["words"]) for p in result["pages"]] == [1, 0, 1]
+    assert result["pages"][1]["warnings"] == ["no_text_detected"]
+    assert result["coverage"]["status"] == "partial"
+    assert result["coverage"]["empty_pages"] == 1
+
+
+def test_degenerate_word_is_excluded_without_losing_valid_word(monkeypatch):
+    result = prediction()
+    polygon = np.zeros((4, 2))
+    result.word_results[0].append(("bad", .99, polygon))
+    monkeypatch.setattr(rapid_ocr, "_get_engine", lambda: lambda *a, **kw: result)
+    response = rapid_ocr.ocr_pages(scan())
+    assert len(response["pages"][0]["words"]) == 1
+    assert response["pages"][0]["status"] == "partial"
+    assert response["coverage"]["discarded_words"] == 1
+    assert response["coverage"]["status"] == "partial"
+
+
+def test_provider_failure_isolated_from_following_page(monkeypatch):
+    engine = MagicMock(side_effect=[RuntimeError("private provider detail"), prediction()])
+    monkeypatch.setattr(rapid_ocr, "_get_engine", lambda: engine)
+    with fitz.open() as doc:
+        doc.new_page(); doc.new_page()
+        result = rapid_ocr.ocr_pages(doc.tobytes())
+    assert [p["status"] for p in result["pages"]] == ["failed", "complete"]
+    assert result["pages"][0]["warnings"] == ["provider_error"]
+    assert "private provider detail" not in str(result)
+    assert result["total_words"] == 1
+
+
+def test_partial_coverage_survives_async_and_cached_routes(client, auth_headers, monkeypatch):
+    from app.services import download_service
+    result = prediction()
+    result.word_results[0].append(("bad", .9, np.zeros((4, 2))))
+    monkeypatch.setattr(rapid_ocr, "_get_engine", lambda: lambda *a, **kw: result)
+    monkeypatch.setattr(download_service, "download_pdf", AsyncMock(return_value=scan()))
+    body = json.dumps({"source_url": "https://example.com/scan.pdf"})
+    first = client.post("/text/ocr", content=body, headers=auth_headers("POST", "/text/ocr", body)).json()
+    async_data = task_service.get_task(first["task_id"]).result
+    cached = client.post("/text/ocr", content=body, headers=auth_headers("POST", "/text/ocr", body)).json()["data"]
+    assert cached["coverage"] == async_data["coverage"]
+    assert cached["pages"][0]["status"] == "partial"
+    assert cached["pages"][0]["discarded_words"] == 1
+
+
+def test_missing_line_geometry_marks_page_partial(monkeypatch):
+    result = prediction()
+    result.txts = ["first line", "second line"]
+    result.word_results.append([])
+    monkeypatch.setattr(rapid_ocr, "_get_engine", lambda: lambda *a, **kw: result)
+    response = rapid_ocr.ocr_pages(scan())
+    assert response["coverage"]["status"] == "partial"
+    assert "word_geometry_missing" in response["pages"][0]["warnings"]
+
+
+def test_oversized_page_does_not_erase_previous_page(monkeypatch):
+    monkeypatch.setattr(rapid_ocr, "_get_engine", lambda: lambda *a, **kw: prediction())
+    with fitz.open() as doc:
+        doc.new_page(); doc.new_page(width=5000, height=5000)
+        response = rapid_ocr.ocr_pages(doc.tobytes())
+    assert [p["status"] for p in response["pages"]] == ["complete", "failed"]
+    assert response["coverage"]["status"] == "partial"

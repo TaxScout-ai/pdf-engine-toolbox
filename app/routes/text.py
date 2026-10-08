@@ -143,6 +143,8 @@ def _build_ocr_response(result: dict, elapsed_ms: float) -> OcrResponse:
             visual_height=p.get("visual_height"),
             text_layer_quality=p.get("text_layer_quality"),
             preprocessing=p.get("preprocessing"),
+            status=p.get("status"), warnings=p.get("warnings"),
+            discarded_words=p.get("discarded_words"),
         )
         for p in result["pages"]
     ]
@@ -155,6 +157,7 @@ def _build_ocr_response(result: dict, elapsed_ms: float) -> OcrResponse:
             avg_confidence=result["avg_confidence"],
             pdf_base64=pdf_b64,
             provenance=result.get("provenance"),
+            coverage=result.get("coverage"),
         ),
         processing_time_ms=round(elapsed_ms, 2),
     )
@@ -183,6 +186,7 @@ def _run_ocr(
             "avg_confidence": result["avg_confidence"],
             "pdf_base64": pdf_b64,
             "provenance": result.get("provenance"),
+            "coverage": result.get("coverage"),
         }
 
         # Cache for future identical requests

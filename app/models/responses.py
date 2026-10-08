@@ -440,6 +440,9 @@ class OcrPageResult(BaseModel):
     visual_height: float | None = None
     text_layer_quality: dict | None = None
     preprocessing: dict | None = None
+    status: str | None = None
+    warnings: list[str] | None = None
+    discarded_words: int | None = None
 
 
 class OcrData(BaseModel):
@@ -450,6 +453,7 @@ class OcrData(BaseModel):
     avg_confidence: float
     pdf_base64: str  # Base64-encoded PDF with invisible text layer for Ctrl+F
     provenance: dict | None = None
+    coverage: dict | None = None
 
 
 class OcrResponse(BaseModel):

@@ -1,5 +1,8 @@
 """Application configuration from environment variables."""
 
+from typing import Literal
+
+from pydantic import model_validator
 from pydantic_settings import BaseSettings
 
 
@@ -38,6 +41,18 @@ class Settings(BaseSettings):
     # 3.5x faster and read 496/496 identifiers in small-print stress scans
     # (TAX-4858). 0 restores the unbounded PaddleOCR default.
     ocr_det_limit_side_len: int = 1280
+
+    # Opt-in /text/ocr pilot only. Identifier redaction retains PaddleOCR.
+    ocr_backend: Literal["paddle", "rapid"] = "paddle"
+    rapidocr_model_dir: str = "/opt/rapidocr/models"
+
+    @model_validator(mode="after")
+    def rapid_pilot_single_worker(self):
+        if self.ocr_backend == "rapid" and self.workers != 1:
+            raise ValueError(
+                "RapidOCR pilot requires WORKERS=1 (bounded inference and in-memory tasks)"
+            )
+        return self
 
     # Cache
     cache_enabled: bool = True

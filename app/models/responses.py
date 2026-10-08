@@ -420,11 +420,13 @@ class OcrBbox(BaseModel):
 
 
 class OcrWord(BaseModel):
-    """A single word detected by PaddleOCR."""
+    """An OCR word or line; additional geometry provenance for the Rapid pilot."""
 
     text: str
     bbox: OcrBbox  # {x, y, w, h} in PDF points
     confidence: float
+    polygon: list[list[float]] | None = None
+    geometry_kind: str | None = None
 
 
 class OcrPageResult(BaseModel):
@@ -433,6 +435,7 @@ class OcrPageResult(BaseModel):
     page_index: int
     words: list[OcrWord]
     full_text: str
+    text_source: str | None = None
 
 
 class OcrData(BaseModel):
@@ -442,6 +445,7 @@ class OcrData(BaseModel):
     total_words: int
     avg_confidence: float
     pdf_base64: str  # Base64-encoded PDF with invisible text layer for Ctrl+F
+    provenance: dict | None = None
 
 
 class OcrResponse(BaseModel):

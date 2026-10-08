@@ -81,6 +81,62 @@ uvicorn app.main:app --reload
 Development processes outside the container report `development` as their
 build identity and link to the repository's default branch.
 
+## RapidOCR evaluation pilot (TAX-6490)
+
+`OCR_BACKEND=paddle` remains the default. An isolated evaluation instance may
+select `OCR_BACKEND=rapid`, with `WORKERS=1` and `RAPIDOCR_MODEL_DIR` pointing to
+a read-only directory containing the three models listed in
+`app/services/rapid_ocr.py::MODEL_HASHES`. The ordinary `/text/ocr` endpoint and
+task polling contract select one backend; there is no automatic Paddle retry.
+The application currently rejects experimental results from production
+verification. This is a standalone pilot, not a production replacement.
+
+The pinned runtime is RapidOCR 3.9.2 + ONNX Runtime 1.30.0, CPU only, using
+PP-OCRv6 Small detection/recognition and the mobile v2 line classifier. Public
+weights (31,749,509 bytes total) can be provisioned before startup from these
+versioned upstream locations; the service verifies their SHA-256 before loading:
+
+- https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.9.2/onnx/PP-OCRv6/det/PP-OCRv6_det_small.onnx
+- https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.9.2/onnx/PP-OCRv6/rec/PP-OCRv6_rec_small.onnx
+- https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.9.2/onnx/PP-OCRv4/cls/ch_ppocr_mobile_v2.0_cls_mobile.onnx
+
+Missing, altered or mismatched weights/packages fail the task; runtime does
+not download substitutes. Package installation adds disk usage but model
+instances load lazily, once per process. The pilot skips Paddle startup
+warmup. One document runs at a time, rendering one page at a time, with a
+30-second wait limit for contending requests. ONNX intra/inter-op pools and
+OpenCV are each configured for two threads; these settings are not a hard
+CPU quota. Rendering caps at 216 DPI and 16 million pixels/page. Use a
+container CPU/memory budget during deployment and size it from measured
+whole-service peak RSS, including concurrent non-OCR operations.
+
+Native digital text keeps the existing skip behavior without loading models.
+Rapid scan results include `provenance`, per-page `text_source`, and per-word
+`polygon`/`geometry_kind` alongside existing fields. Coordinates are **visual
+PDF points**, including PDF rotation. Word boxes are CTC-derived estimates,
+not manually validated character boundaries. No field is independently
+verified merely because OCR found the same digits. The application's legacy
+rotation normalization and hard-coded Paddle source label must be adapted
+before accepting these results into the production pipeline (TAX-6471 also
+tracks unsafe sign/decimal/wrong-field matching).
+
+Identifier redaction calls retain the default Paddle backend, regardless of
+`OCR_BACKEND`; explicit Rapid + `force_ocr` is rejected. Table recognition also
+retains its existing implementation. Invoking those features in the same
+process can load Paddle in addition to Rapid, so a Rapid-only memory estimate
+must not be treated as a whole mixed-workload budget. Use the isolated pilot
+for OCR evaluation; rollback the ordinary OCR path by selecting `paddle` and
+restarting. Backend-specific cache keys prevent reusing Rapid results as
+Paddle results after rollback. Existing cached Paddle entries are invalidated
+once by the new versioned key.
+
+`scripts/benchmark_rapid_pilot.py` exercises this adapter against the private,
+reviewed real-document manifests from TAX-6460. Supply `--benchmark-tools`
+with that task's `scripts/ocr-benchmark` directory, `--input` with a manifest
+directory, and `--output` with a new directory outside this repository. Raw
+OCR data stays private. Results measure known field regions, not automatic
+tax-field identification, CPA review time, or an end-to-end Gemini pipeline.
+
 ## License
 
 Copyright (C) 2026 TaxScout.AI Inc. and contributors.

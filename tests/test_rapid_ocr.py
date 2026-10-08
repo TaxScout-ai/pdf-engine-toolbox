@@ -67,7 +67,10 @@ def test_native_pdf_does_not_initialize_either_engine(monkeypatch):
         data = doc.tobytes()
     for backend in ["rapid", "paddle"]:
         result = pdf_service.ocr_pages(data, backend=backend)
-        assert result["pages"][0]["words"] == []
+        if backend == "paddle":
+            assert result["pages"][0]["words"] == []
+        else:
+            assert result["pages"][0]["words"][0]["geometry_kind"] == "native_word"
         assert "selectable" in result["pages"][0]["full_text"]
     fail.assert_not_called()
 

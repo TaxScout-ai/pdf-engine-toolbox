@@ -18,6 +18,7 @@ import numpy as np
 import structlog
 
 from app.config import settings
+from app.services.ocr_preprocessing import map_polygon, prepare_scan, text_layer_quality
 
 log = structlog.get_logger()
 MODEL_HASHES = {
@@ -27,7 +28,7 @@ MODEL_HASHES = {
 }
 PACKAGES = {"rapidocr": "3.9.2", "onnxruntime": "1.30.0"}
 # Change this when preprocessing, weights, or output semantics change.
-PROFILE = "rapid-3.9.2-ort-1.30.0-v6-small-word-v1"
+PROFILE = "rapid-3.9.2-ort-1.30.0-v6-small-prepared-word-v2"
 MAX_DPI = 216
 MAX_RENDER_PIXELS = 16_000_000
 QUEUE_TIMEOUT_SECONDS = 30
@@ -139,15 +140,32 @@ def _ocr_pages(pdf_bytes, pages, dpi):
         for index in targets:
             page = doc[index]
             existing = page.get_text().strip()
-            tokens = existing.split()
-            # Same native-PDF skip contract as Paddle; no model even loads.
-            if len(existing) > 50 and sum(map(len, tokens)) / len(tokens) >= 3:
+            quality = text_layer_quality(page)
+            if quality["accepted"]:
+                native_words = []
+                for x0, y0, x1, y1, text, *_ in page.get_text("words"):
+                    box = fitz.Rect(x0, y0, x1, y1) * page.rotation_matrix
+                    box &= page.rect
+                    if box.is_empty:
+                        continue
+                    native_words.append(
+                        {
+                            "text": text,
+                            "confidence": 1.0,
+                            "bbox": {"x": box.x0, "y": box.y0, "w": box.width, "h": box.height},
+                            "geometry_kind": "native_word",
+                        }
+                    )
+                    scores.append(1.0)
                 results.append(
                     {
                         "page_index": index,
-                        "words": [],
+                        "words": native_words,
                         "full_text": existing,
                         "text_source": "native_pdf",
+                        "text_layer_quality": quality,
+                        "visual_width": page.rect.width,
+                        "visual_height": page.rect.height,
                     }
                 )
                 continue
@@ -161,30 +179,32 @@ def _ocr_pages(pdf_bytes, pages, dpi):
                 matrix=fitz.Matrix(zoom, zoom), colorspace=fitz.csRGB, alpha=False
             )
             rgb = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, 3)
-            prediction = _get_engine()(
-                rgb[:, :, ::-1], return_word_box=True, return_single_char_box=False
-            )
+            prepared, inverse, preprocessing = prepare_scan(rgb[:, :, ::-1])
+            prediction = _get_engine()(prepared, return_word_box=True, return_single_char_box=False)
             words = []
             groups = prediction.word_results or []
             if prediction.txts and not groups:
                 raise ValueError("RapidOCR returned text without requested word geometry")
             for group in groups:
                 for text, confidence, polygon in group:
-                    word = _word(text, confidence, polygon, pix, page)
+                    word = _word(text, confidence, map_polygon(polygon, inverse), pix, page)
                     if word is not None:
                         words.append(word)
                         scores.append(word["confidence"])
             # Insert lines, not separately reconstructed words, into the search
             # layer. PDF /Rotate is undone only for insertion, not API geometry.
             for text, polygon in zip(
-                prediction.txts or [], prediction.boxes if prediction.boxes is not None else []
+                (prediction.txts or [])
+                if not existing and not preprocessing["rotation_ccw"]
+                else [],
+                prediction.boxes if prediction.boxes is not None else [],
             ):
                 points = [
                     fitz.Point(
                         float(x) * page.rect.width / pix.width,
                         float(y) * page.rect.height / pix.height,
                     )
-                    for x, y in polygon
+                    for x, y in map_polygon(polygon, inverse)
                 ]
                 height = max(p.y for p in points) - min(p.y for p in points)
                 width = max(p.x for p in points) - min(p.x for p in points)
@@ -206,6 +226,10 @@ def _ocr_pages(pdf_bytes, pages, dpi):
                     "words": words,
                     "full_text": " ".join(prediction.txts or []),
                     "text_source": "rapidocr",
+                    "text_layer_quality": quality,
+                    "preprocessing": preprocessing,
+                    "visual_width": page.rect.width,
+                    "visual_height": page.rect.height,
                 }
             )
         return {
@@ -218,6 +242,7 @@ def _ocr_pages(pdf_bytes, pages, dpi):
                 "packages": PACKAGES,
                 "model_sha256": MODEL_HASHES,
                 "experimental": True,
+                "searchable_output_verified": False,
                 "coordinate_space": "visual_pdf_points",
                 "render_dpi": dpi,
                 "geometry": "ctc_word_estimate",

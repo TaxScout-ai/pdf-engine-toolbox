@@ -145,3 +145,25 @@ This program is distributed under AGPL-3.0-or-later, without any warranty. See
 [LICENSE](LICENSE). If you modify this program and make the modified version
 available for users to interact with over a network, AGPL section 13 requires
 you to offer those users the Corresponding Source of that modified version.
+
+### RapidOCR scan preparation and manual review (TAX-6490)
+
+The opt-in `rapid-3.9.2-ort-1.30.0-v6-small-prepared-word-v2` profile
+checks the existing PDF text layer before skipping recognition. Invisible text,
+invalid characters, insufficient text and substantial raster content trigger OCR.
+Accepted digital pages return actual native word rectangles without loading a model.
+
+Image preparation conservatively crops large blank margins and uses connected
+glyph geometry to detect sideways text. Ambiguous orientation is reported, not
+claimed corrected. This heuristic is not a general document-orientation model.
+Only one configured OCR engine and one recognition pass are used per scanned page.
+Crop and rotation transforms are inverted before returning every word polygon;
+`visual_width` / `visual_height` always refer to the original visible page.
+
+The response keeps the quality decision, preparation metadata and model profile.
+These are review hints, never proof that a tax field is correct. Prepared
+searchable-PDF output is not certified (`searchable_output_verified=false`); the
+application keeps the original PDF for review. No automatic Paddle fallback or
+second model is invoked. The application must explicitly enable its separate
+manual-review integration before accepting this profile; production defaults
+remain unchanged.

@@ -436,6 +436,10 @@ class OcrPageResult(BaseModel):
     words: list[OcrWord]
     full_text: str
     text_source: str | None = None
+    visual_width: float | None = None
+    visual_height: float | None = None
+    text_layer_quality: dict | None = None
+    preprocessing: dict | None = None
 
 
 class OcrData(BaseModel):

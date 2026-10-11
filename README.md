@@ -167,3 +167,31 @@ application keeps the original PDF for review. No automatic Paddle fallback or
 second model is invoked. The application must explicitly enable its separate
 manual-review integration before accepting this profile; production defaults
 remain unchanged.
+
+## Primary review OCR and rollback (TAX-6713)
+
+`/text/ocr` now defaults to `OCR_BACKEND=rapid`, using PP-OCRv6 Small with
+RapidOCR 3.9.2 / ONNX Runtime 1.30.0. Keep `WORKERS=1`: one lazily loaded engine,
+serialized inference, and one rendered page at a time. Usable native PDF text
+skips inference. The image includes SHA-256-verified weights in
+`/opt/rapidocr/models`; failed downloads abort the build and missing/mismatched
+runtime assets abort startup. Request processing never downloads weights or
+silently invokes another OCR backend.
+
+Deploy the matching application configuration: `OCR_RAPID_REVIEW_ENABLED` is
+on by default (unset or `true`), `OCR_ENABLED=true`, `OCR_DPI=150`. This is
+manual source review only. Word boxes are estimates; partial results require
+inspection of the original. OCR agreement does not approve tax data. The
+searchable PDF output remains unverified and the app does not replace originals
+with it.
+
+Explicit rollback requires **both** `OCR_BACKEND=paddle` on this service and
+`OCR_RAPID_REVIEW_ENABLED=false` on the app, followed by process restarts. Cache
+keys separate backends. A mismatched pair fails closed at the app geometry gate;
+never reinterpret Rapid coordinates as Paddle evidence. Existing stored review
+receipts retain their provenance and can still be viewed after rollback.
+Paddle remains installed for this rollback and for separate identifier-redaction
+and table/classification operations; those operations are not changed here.
+The earlier opt-in pilot instructions above document the evaluation history;
+this section defines the new default. Production activation is a separate,
+coordinated release, not a side effect of local integration tests.

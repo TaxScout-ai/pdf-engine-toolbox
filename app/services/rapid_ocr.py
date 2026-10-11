@@ -1,11 +1,10 @@
-"""Bounded, opt-in PP-OCRv6 Small CPU pilot (TAX-6490).
+"""Bounded PP-OCRv6 Small CPU backend for manual source review.
 
 No downloads, second-engine fallback, or claim of field verification. Word
 polygons are RapidOCR's CTC-derived estimates in the rendered page coordinate
 space, not independently detected character boundaries.
 """
 
-import hashlib
 import importlib.metadata
 import math
 import threading
@@ -21,11 +20,8 @@ from app.config import settings
 from app.services.ocr_preprocessing import map_polygon, prepare_scan, text_layer_quality
 
 log = structlog.get_logger()
-MODEL_HASHES = {
-    "PP-OCRv6_det_small.onnx": "090f04abcd9d9a7498bc4ebf677e4cb9bdce1fe4197ddb7e529f1ef44e1ff94f",
-    "PP-OCRv6_rec_small.onnx": "6f327246b50388f3c176ae304bd95767ea6dc0c9ae92153ef8cbe210b3c14884",
-    "ch_ppocr_mobile_v2.0_cls_mobile.onnx": "e47acedf663230f8863ff1ab0e64dd2d82b838fceb5957146dab185a89d6215c",  # noqa: E501
-}
+from app.services.rapid_ocr_models import MODEL_HASHES, validate_models
+
 PACKAGES = {"rapidocr": "3.9.2", "onnxruntime": "1.30.0"}
 # Change this when preprocessing, weights, or output semantics change.
 PROFILE = "rapid-3.9.2-ort-1.30.0-v6-small-prepared-word-v6"
@@ -42,23 +38,21 @@ def cache_profile(backend: str) -> dict:
     return {"backend": "paddle-v5", "det_limit": settings.ocr_det_limit_side_len}
 
 
+def validate_runtime():
+    """Fail startup on missing/mismatched assets without loading a second OCR engine."""
+    for name, expected in PACKAGES.items():
+        if importlib.metadata.version(name) != expected:
+            raise RuntimeError(f"RapidOCR requires {name}=={expected}")
+    validate_models(Path(settings.rapidocr_model_dir))
+
+
 def _get_engine():
     """Called only while holding the inference lock; initialize once per process."""
     global _engine
     if _engine is not None:
         return _engine
-    for name, expected in PACKAGES.items():
-        if importlib.metadata.version(name) != expected:
-            raise RuntimeError(f"RapidOCR pilot requires {name}=={expected}")
+    validate_runtime()
     root = Path(settings.rapidocr_model_dir)
-    for filename, expected in MODEL_HASHES.items():
-        path = root / filename
-        if not path.is_file():
-            raise RuntimeError(f"RapidOCR pilot model missing or hash mismatch: {filename}")
-        with path.open("rb") as source:
-            actual = hashlib.file_digest(source, "sha256").hexdigest()
-        if actual != expected:
-            raise RuntimeError(f"RapidOCR pilot model missing or hash mismatch: {filename}")
     from rapidocr import RapidOCR
 
     cv2.setNumThreads(2)

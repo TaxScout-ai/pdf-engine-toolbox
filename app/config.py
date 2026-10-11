@@ -42,15 +42,16 @@ class Settings(BaseSettings):
     # (TAX-4858). 0 restores the unbounded PaddleOCR default.
     ocr_det_limit_side_len: int = 1280
 
-    # Opt-in /text/ocr pilot only. Identifier redaction retains PaddleOCR.
-    ocr_backend: Literal["paddle", "rapid"] = "paddle"
+    # Primary review OCR. Explicit OCR_BACKEND=paddle restores the legacy endpoint.
+    # Identifier redaction and table extraction retain their separate Paddle paths.
+    ocr_backend: Literal["paddle", "rapid"] = "rapid"
     rapidocr_model_dir: str = "/opt/rapidocr/models"
 
     @model_validator(mode="after")
-    def rapid_pilot_single_worker(self):
+    def rapid_single_worker(self):
         if self.ocr_backend == "rapid" and self.workers != 1:
             raise ValueError(
-                "RapidOCR pilot requires WORKERS=1 (bounded inference and in-memory tasks)"
+                "RapidOCR requires WORKERS=1 (bounded inference and in-memory tasks)"
             )
         return self
 

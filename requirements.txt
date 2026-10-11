@@ -22,7 +22,7 @@ pillow-heif==1.2.1
 paddlepaddle>=3.2.0,<3.3.0
 paddleocr>=3.0.0,<4.0.0
 paddlex[ocr]
-# Opt-in CPU OCR pilot; weights are supplied locally and hash-checked.
+# Primary review OCR; pinned weights are built into the image and hash-checked.
 rapidocr==3.9.2
 onnxruntime==1.30.0
 # Testing

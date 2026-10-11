@@ -88,7 +88,11 @@ async def lifespan(app: FastAPI):
     else:
         log.info("pdf_engine_build_identity", build_commit=revision)
 
-    # Pre-warm PaddleOCR models so the first OCR request doesn't cold-start.
+    if settings.ocr_backend == "rapid":
+        from app.services.rapid_ocr import validate_runtime
+        validate_runtime()
+
+    # Pre-warm PaddleOCR only when explicitly selected for rollback.
     # Only warm up the core OCR pipeline (_get_paddle_ocr) — NOT PPStructureV3
     # (_get_pp_structure), which loads PP-Chart2Table (~1.5 GB transformer) and
     # would OOM a t3a.medium (4 GB RAM) when combined with the rest of the stack.
@@ -96,7 +100,7 @@ async def lifespan(app: FastAPI):
     try:
         def _warmup():
             if settings.ocr_backend == "rapid":
-                # The pilot loads only its selected engine, on first scan.
+                # RapidOCR loads once, on the first scanned page.
                 return
             from app.services.pdf_service import _get_paddle_ocr
             _get_paddle_ocr("en")

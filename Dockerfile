@@ -50,6 +50,9 @@ RUN pip install --no-cache-dir setuptools && \
 # Script is used instead of inline python -c to avoid Coolify ARG injection bug
 # with multi-line backslash-continued RUN commands.
 COPY scripts/download_models.py /tmp/download_models.py
+COPY app/services/rapid_ocr_models.py /tmp/rapid_ocr_models.py
+# Required default backend: unlike the optional legacy warmup, failures abort.
+RUN python /tmp/download_models.py --rapid-only
 RUN python /tmp/download_models.py || echo "Model pre-download failed; models will download at runtime"
 
 # Copy application code

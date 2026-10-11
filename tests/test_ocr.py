@@ -13,6 +13,15 @@ from unittest.mock import patch, AsyncMock, MagicMock
 
 import fitz
 import numpy as np
+import pytest
+from app.config import settings
+
+
+@pytest.fixture(autouse=True)
+def legacy_paddle_backend(monkeypatch):
+    """These endpoint tests exercise the explicit rollback path."""
+    monkeypatch.setattr(settings, "ocr_backend", "paddle")
+
 
 
 def _create_scanned_pdf():

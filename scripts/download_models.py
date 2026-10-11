@@ -8,6 +8,15 @@ PPStructureV3 loads PP-Chart2Table (~1.5 GB transformer) which causes OOM
 on t3a.medium (4 GB) during both build and runtime. PPStructure models
 load lazily on first classify/table request if ever needed.
 """
+import sys
+from pathlib import Path
+
+if "--rapid-only" in sys.argv:
+    # Docker copies the standalone manifest beside this build script.
+    from rapid_ocr_models import download_models
+    download_models(Path("/opt/rapidocr/models"))
+    raise SystemExit(0)
+
 from paddleocr import PaddleOCR
 
 PaddleOCR(

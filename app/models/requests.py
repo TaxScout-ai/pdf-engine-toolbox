@@ -393,6 +393,8 @@ class AuthorizeAndUnlockRequest(BaseModel):
     source_url: str
     password: SecretStr
     authority_attested: bool
+    # Explicit use of existing open access; consent and copy permissions still apply.
+    without_password: bool = False
 
 
 class SanitizeRequest(BaseModel):

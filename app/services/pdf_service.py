@@ -183,6 +183,7 @@ def authorize_and_unlock_pdf(
     password: str,
     *,
     authority_attested: bool,
+    without_password: bool = False,
 ) -> dict:
     """Authenticate one known password and return an in-memory derivative.
 
@@ -193,13 +194,24 @@ def authorize_and_unlock_pdf(
         password_bytes = password.encode("utf-8")
     except UnicodeEncodeError as exc:
         raise PdfPasswordAuthorizationError() from exc
-    if not authority_attested or not 1 <= len(password_bytes) <= 256:
+    if not authority_attested:
+        raise PdfPasswordAuthorizationError()
+    if without_password:
+        # An explicit request to use the PDF's existing open access, never an
+        # attempt to guess or recover a password. Keep the ordinary contract
+        # strict so an accidentally omitted password still fails closed.
+        if password_bytes:
+            raise PdfPasswordAuthorizationError()
+    elif not 1 <= len(password_bytes) <= 256:
         raise PdfPasswordAuthorizationError()
 
     doc = _open_pdf(pdf_bytes)
     try:
         if not _has_encryption(doc):
             raise PdfPasswordNotRequiredError()
+
+        if without_password and doc.needs_pass:
+            raise PdfPasswordAuthorizationError()
 
         authentication_level = _AUTHENTICATION_LEVELS.get(doc.authenticate(password))
         if authentication_level is None:

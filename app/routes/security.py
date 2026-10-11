@@ -52,6 +52,7 @@ async def authorize_and_unlock_pdf(request: AuthorizeAndUnlockRequest, response:
         pdf_bytes,
         request.password.get_secret_value(),
         authority_attested=request.authority_attested,
+        without_password=request.without_password,
     )
     elapsed = (time.monotonic() - start) * 1000
 

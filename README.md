@@ -195,3 +195,10 @@ and table/classification operations; those operations are not changed here.
 The earlier opt-in pilot instructions above document the evaluation history;
 this section defines the new default. Production activation is a separate,
 coordinated release, not a side effect of local integration tests.
+
+`DOCUMENT_IDENTIFIER_REDACTION=enforce` is not supported with Rapid manual
+review: its receipts cannot automatically restore full identifiers into the
+vault. The matching app rejects document model calls before redaction/inference
+for this combination. Keep the existing redaction policy and use the paired
+Paddle rollback settings above for enforced redaction; do not turn redaction
+off to activate Rapid. The default `text-layer` redaction policy is unchanged.

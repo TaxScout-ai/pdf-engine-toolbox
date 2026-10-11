@@ -1,0 +1,95 @@
+import fitz
+import numpy as np
+import pytest
+
+from app.services.ocr_preprocessing import map_polygon, prepare_scan, text_layer_quality
+
+
+def test_crop_preserves_original_coordinates():
+    image = np.full((900, 900, 3), 255, dtype=np.uint8)
+    image[300:450, 200:600] = 0
+    cropped, inverse, meta = prepare_scan(image)
+    assert cropped.shape[0] < 900 and cropped.shape[1] < 900
+    x, y, _, _ = meta["crop_pixels"]
+    polygon = np.array([[0, 0], [20, 0], [20, 10], [0, 10]])
+    assert map_polygon(polygon, inverse)[0] == pytest.approx([x, y])
+
+
+def test_sideways_glyphs_map_back_to_original():
+    image = np.full((600, 600, 3), 255, dtype=np.uint8)
+    for y in range(100, 500, 20):
+        for x in range(100, 400, 60):
+            image[y : y + 10, x : x + 16] = 0
+    prepared, inverse, meta = prepare_scan(image)
+    assert meta["rotation_ccw"] == 90
+    p = np.array([[5, 6], [15, 6], [15, 20], [5, 20]])
+    mapped = map_polygon(p, inverse)
+    forward = np.linalg.inv(inverse)
+    assert map_polygon(mapped, forward) == pytest.approx(p)
+    assert prepared.size > 0
+
+
+def test_invisible_text_is_not_trusted():
+    with fitz.open() as doc:
+        p = doc.new_page()
+        p.insert_text(
+            (50, 50),
+            "Old OCR layer that contains enough selectable words to pass the previous heuristic",
+            render_mode=3,
+        )
+        q = text_layer_quality(p)
+        assert not q["accepted"]
+        assert "invisible_text_layer" in q["reasons"]
+
+
+def test_visible_text_on_scan_is_not_trusted():
+    with fitz.open() as doc:
+        p = doc.new_page()
+        pix = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 100, 100), False)
+        pix.clear_with(255)
+        p.insert_image(p.rect, pixmap=pix)
+        p.insert_text(
+            (50, 50),
+            "Selectable words on a scanned page must not cause "
+            "important scanned fields to be skipped",
+        )
+        assert "substantial_raster_content" in text_layer_quality(p)["reasons"]
+
+
+def test_crop_never_discards_faint_text_outside_dark_content():
+    import cv2
+
+    image = np.full((900, 900, 3), 255, dtype=np.uint8)
+    cv2.putText(image, "CENTER DOCUMENT", (250, 450), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 0), 2)
+    cv2.putText(
+        image, "Amount: 12345.67", (50, 80), cv2.FONT_HERSHEY_SIMPLEX, 1, (190, 190, 190), 2
+    )
+    prepared, inverse, meta = prepare_scan(image)
+    assert meta["crop_pixels"] == [0, 0, 900, 900]
+    assert meta["crop_skipped_reason"] == "nonwhite_margin_content"
+    assert np.array_equal(prepared, image)
+    assert np.array_equal(inverse, np.eye(3))
+
+
+def test_wide_upright_glyphs_do_not_trigger_false_rotation():
+    image = np.full((600, 600, 3), 255, dtype=np.uint8)
+    for y in range(100, 500, 60):
+        for x in range(100, 400, 24):
+            image[y:y+10, x:x+16] = 0
+    _, _, meta = prepare_scan(image)
+    assert meta["rotation_ccw"] == 0
+    assert meta["orientation_ambiguous"]
+    votes = meta["glyph_alignment_votes"]
+    assert votes["horizontal"] > votes["vertical"]
+
+
+def test_dense_wide_glyphs_skip_quadratic_orientation_work():
+    image = np.full((1600, 1600, 3), 255, dtype=np.uint8)
+    for y in range(50, 1550, 20):
+        for x in range(50, 1550, 24):
+            image[y:y+12, x:x+18] = 0
+    _, _, meta = prepare_scan(image)
+    assert meta["rotation_ccw"] == 0
+    assert meta["orientation_skipped_reason"] == "glyph_limit"
+    assert meta["orientation_ambiguous"]
+    assert meta["glyph_alignment_votes"] == {"horizontal": 0, "vertical": 0}

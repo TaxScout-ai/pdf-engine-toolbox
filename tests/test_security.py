@@ -31,12 +31,13 @@ def _encrypted_pdf(
     return encrypted
 
 
-def _authorize_request(client, auth_headers, encrypted_bytes, password, *, attested=True):
+def _authorize_request(client, auth_headers, encrypted_bytes, password, *, attested=True, without_password=False):
     body = json.dumps(
         {
             "source_url": "https://example.com/protected.pdf",
             "password": password,
             "authority_attested": attested,
+            "without_password": without_password,
         }
     )
     headers = auth_headers(
@@ -422,3 +423,43 @@ def test_sanitize_removes_metadata(client, auth_headers, sample_pdf_bytes):
     result_doc = fitz.open(stream=response.content, filetype="pdf")
     assert result_doc.metadata["title"] == ""
     assert result_doc.metadata["author"] == ""
+
+
+def test_authorize_permissions_only_with_explicit_consent(client, auth_headers, sample_pdf_bytes):
+    encrypted = _encrypted_pdf(sample_pdf_bytes, user_password="", permissions=fitz.PDF_PERM_COPY)
+    original_hash = hashlib.sha256(encrypted).hexdigest()
+    response = _authorize_request(client, auth_headers, encrypted, "", without_password=True)
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["authentication_level"] == "user"
+    assert data["permissions"]["copy"] is True
+    assert data["permissions"]["modify"] is False
+    with fitz.open(stream=base64.b64decode(data["pdf_base64"]), filetype="pdf") as unlocked:
+        assert not unlocked.needs_pass
+        assert unlocked.page_count > 0
+        assert unlocked[0].get_text()
+    assert hashlib.sha256(encrypted).hexdigest() == original_hash
+    assert response.headers["cache-control"] == "no-store, private"
+
+
+def test_without_password_never_bypasses_open_password_or_copy_restrictions(
+    client, auth_headers, sample_pdf_bytes,
+):
+    locked = _encrypted_pdf(sample_pdf_bytes)
+    restricted = _encrypted_pdf(sample_pdf_bytes, user_password="", permissions=fitz.PDF_PERM_PRINT)
+    allowed = _encrypted_pdf(sample_pdf_bytes, user_password="", permissions=fitz.PDF_PERM_COPY)
+    for pdf, password, attested, mode in [
+        (locked, "", True, True),
+        (restricted, "", True, True),
+        (allowed, "", False, True),
+        (allowed, "", True, False),
+        (allowed, "owner-password", True, True),
+    ]:
+        response = _authorize_request(
+            client, auth_headers, pdf, password, attested=attested, without_password=mode,
+        )
+        assert response.status_code == 403
+        assert response.json()["error"] == {
+            "code": "PDF_PASSWORD_AUTHORIZATION_FAILED",
+            "message": "Password is incorrect or document access is not authorized",
+        }

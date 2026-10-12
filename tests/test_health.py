@@ -37,7 +37,9 @@ def test_every_response_prominently_offers_source(client):
     assert f'<{build_identity.LICENSE_URL}>; rel="license"' in response.headers["Link"]
 
 
-def test_unexpected_error_prominently_offers_source():
+def test_unexpected_error_prominently_offers_source(monkeypatch):
+    from app.services import rapid_ocr
+    monkeypatch.setattr(rapid_ocr, "validate_runtime", lambda: None)
     with TestClient(app, raise_server_exceptions=False) as failure_client:
         response = failure_client.get("/__test_unhandled_source_offer")
 

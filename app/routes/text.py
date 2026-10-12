@@ -5,47 +5,45 @@ import time
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Response
 
+from app.config import settings
 from app.dependencies import require_auth
 from app.models.requests import (
-    TextExtractRequest,
-    TextSearchRequest,
     BookmarksRequest,
     ExtractTablesRequest,
     OcrRequest,
+    TextExtractRequest,
+    TextSearchRequest,
 )
 from app.models.responses import (
-    TextExtractResponse,
-    TextExtractData,
-    PageText,
-    TextBlock,
-    TextSearchResponse,
-    TextSearchData,
-    SearchMatch,
-    ExtractTablesResponse,
-    ExtractTablesData,
     ExtractedTable,
-    OcrResponse,
+    ExtractTablesData,
+    ExtractTablesResponse,
     OcrData,
     OcrPageResult,
+    OcrResponse,
     OcrWord,
+    PageText,
+    SearchMatch,
     TaskAcceptedResponse,
+    TextBlock,
+    TextExtractData,
+    TextExtractResponse,
+    TextSearchData,
+    TextSearchResponse,
 )
-from app.services import download_service, pdf_service, task_service, cache_service
+from app.services import cache_service, download_service, pdf_service, task_service
+from app.services.rapid_ocr import cache_profile
 
 router = APIRouter(prefix="/text")
 
 
-@router.post(
-    "/extract", response_model=TextExtractResponse, dependencies=[Depends(require_auth)]
-)
+@router.post("/extract", response_model=TextExtractResponse, dependencies=[Depends(require_auth)])
 async def extract_text(request: TextExtractRequest):
     """Extract text from PDF pages with optional position data."""
     start = time.monotonic()
 
     pdf_bytes = await download_service.download_pdf(request.source_url)
-    pages_data = pdf_service.extract_text(
-        pdf_bytes, request.pages, request.include_positions
-    )
+    pages_data = pdf_service.extract_text(pdf_bytes, request.pages, request.include_positions)
 
     elapsed = (time.monotonic() - start) * 1000
 
@@ -69,9 +67,7 @@ async def extract_text(request: TextExtractRequest):
     )
 
 
-@router.post(
-    "/search", response_model=TextSearchResponse, dependencies=[Depends(require_auth)]
-)
+@router.post("/search", response_model=TextSearchResponse, dependencies=[Depends(require_auth)])
 async def search_text(request: TextSearchRequest):
     """Search for text across all PDF pages."""
     start = time.monotonic()
@@ -100,9 +96,7 @@ async def add_bookmarks(request: BookmarksRequest):
     return Response(content=result, media_type="application/pdf")
 
 
-@router.post(
-    "/tables", response_model=ExtractTablesResponse, dependencies=[Depends(require_auth)]
-)
+@router.post("/tables", response_model=ExtractTablesResponse, dependencies=[Depends(require_auth)])
 async def extract_tables(request: ExtractTablesRequest):
     """Extract tabular data from PDF pages.
 
@@ -144,6 +138,13 @@ def _build_ocr_response(result: dict, elapsed_ms: float) -> OcrResponse:
             page_index=p["page_index"],
             words=[OcrWord(**w) for w in p["words"]],
             full_text=p["full_text"],
+            text_source=p.get("text_source"),
+            visual_width=p.get("visual_width"),
+            visual_height=p.get("visual_height"),
+            text_layer_quality=p.get("text_layer_quality"),
+            preprocessing=p.get("preprocessing"),
+            status=p.get("status"), warnings=p.get("warnings"),
+            discarded_words=p.get("discarded_words"),
         )
         for p in result["pages"]
     ]
@@ -155,12 +156,16 @@ def _build_ocr_response(result: dict, elapsed_ms: float) -> OcrResponse:
             total_words=result["total_words"],
             avg_confidence=result["avg_confidence"],
             pdf_base64=pdf_b64,
+            provenance=result.get("provenance"),
+            coverage=result.get("coverage"),
         ),
         processing_time_ms=round(elapsed_ms, 2),
     )
 
 
-def _run_ocr(task_id: str, pdf_bytes: bytes, pages, language: str, dpi: int):
+def _run_ocr(
+    task_id: str, pdf_bytes: bytes, pages, language: str, dpi: int, backend: str = "paddle"
+):
     """Background worker for OCR processing.
 
     IMPORTANT: Must be a regular ``def`` (not ``async def``) so Starlette
@@ -171,7 +176,7 @@ def _run_ocr(task_id: str, pdf_bytes: bytes, pages, language: str, dpi: int):
     """
     task_service.set_processing(task_id)
     try:
-        result = pdf_service.ocr_pages(pdf_bytes, pages, language, dpi)
+        result = pdf_service.ocr_pages(pdf_bytes, pages, language, dpi, backend=backend)
         pdf_b64 = base64.b64encode(result["pdf_bytes"]).decode("ascii")
 
         # Build the full result the client expects (pages + pdf_base64)
@@ -180,6 +185,8 @@ def _run_ocr(task_id: str, pdf_bytes: bytes, pages, language: str, dpi: int):
             "total_words": result["total_words"],
             "avg_confidence": result["avg_confidence"],
             "pdf_base64": pdf_b64,
+            "provenance": result.get("provenance"),
+            "coverage": result.get("coverage"),
         }
 
         # Cache for future identical requests
@@ -188,6 +195,7 @@ def _run_ocr(task_id: str, pdf_bytes: bytes, pages, language: str, dpi: int):
             "pages": sorted(pages) if pages else None,
             "language": language,
             "dpi": dpi,
+            **cache_profile(backend),
         }
         cache_service.put_cached(src_hash, "ocr", ocr_data, cache_params)
 
@@ -198,19 +206,17 @@ def _run_ocr(task_id: str, pdf_bytes: bytes, pages, language: str, dpi: int):
 
 @router.post("/ocr", dependencies=[Depends(require_auth)])
 async def ocr_pages(request: OcrRequest, background_tasks: BackgroundTasks):
-    """Run PaddleOCR on scanned PDF pages.
+    """Run the configured OCR backend on scanned PDF pages.
 
     Returns rich JSON with per-word text, 4-point bounding boxes (in PDF
     points), and confidence scores.  Also includes the PDF with an invisible
     text layer (base64-encoded) so Ctrl+F search works in viewers.
 
-    Uses ``use_angle_cls=True`` to handle rotated receipts/scans.
-
-    For small documents (≤5 pages), processes synchronously.
-    For larger documents, runs as a background task — returns a ``task_id``
+    Runs as a background task — returns a ``task_id``
     for polling via ``GET /tasks/{task_id}``.
     """
     pdf_bytes = await download_service.download_pdf(request.source_url)
+    backend = settings.ocr_backend
 
     # Check cache (OCR is expensive)
     src_hash = cache_service.content_hash(pdf_bytes)
@@ -218,6 +224,7 @@ async def ocr_pages(request: OcrRequest, background_tasks: BackgroundTasks):
         "pages": sorted(request.pages) if request.pages else None,
         "language": request.language,
         "dpi": request.dpi,
+        **cache_profile(backend),
     }
     cached = cache_service.get_cached(src_hash, "ocr", cache_params)
     if cached and isinstance(cached, dict):
@@ -231,6 +238,7 @@ async def ocr_pages(request: OcrRequest, background_tasks: BackgroundTasks):
     page_count = len(request.pages) if request.pages else 0
     if page_count == 0:
         import fitz
+
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
         page_count = len(doc)
 
@@ -240,7 +248,13 @@ async def ocr_pages(request: OcrRequest, background_tasks: BackgroundTasks):
     # The client polls via GET /tasks/{task_id} with OCR_TIMEOUT_MS.
     task = task_service.create_task("ocr")
     background_tasks.add_task(
-        _run_ocr, task.id, pdf_bytes, request.pages, request.language, request.dpi,
+        _run_ocr,
+        task.id,
+        pdf_bytes,
+        request.pages,
+        request.language,
+        request.dpi,
+        backend,
     )
 
     return TaskAcceptedResponse(

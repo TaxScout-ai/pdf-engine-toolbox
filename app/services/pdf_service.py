@@ -2371,6 +2371,7 @@ def ocr_pages(
     language: str = "en",
     dpi: int = 300,
     force_ocr: bool = False,
+    backend: str = "paddle",
 ) -> dict:
     """Run PaddleOCR on scanned pages and return rich results.
 
@@ -2403,7 +2404,13 @@ def ocr_pages(
             "pdf_bytes": b"..."   # PDF with invisible text layer
         }
     """
-    paddle = _get_paddle_ocr(language)
+    if backend == "rapid":
+        if force_ocr:
+            raise ValueError("RapidOCR pilot is not enabled for identifier redaction")
+        from app.services.rapid_ocr import ocr_pages as rapid_ocr_pages
+        return rapid_ocr_pages(pdf_bytes, pages, language, dpi)
+    if backend != "paddle":
+        raise ValueError("Unknown OCR backend")
 
     doc = _open_pdf(pdf_bytes)
     target_pages = pages if pages is not None else list(range(len(doc)))
@@ -2459,7 +2466,7 @@ def ocr_pages(
 
         # Run PaddleOCR PP-OCRv5 (detection + orientation + recognition)
         try:
-            ocr_output = paddle.predict(input=img_array)
+            ocr_output = _get_paddle_ocr(language).predict(input=img_array)
         except Exception as e:
             log.warning("ocr_failed", page=page_idx, error=str(e))
             all_page_results.append({

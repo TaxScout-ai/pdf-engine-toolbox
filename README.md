@@ -83,8 +83,8 @@ build identity and link to the repository's default branch.
 
 ## RapidOCR evaluation pilot (TAX-6490)
 
-`OCR_BACKEND=paddle` remains the default. An isolated evaluation instance may
-select `OCR_BACKEND=rapid`, with `WORKERS=1` and `RAPIDOCR_MODEL_DIR` pointing to
+`OCR_BACKEND=rapid` is the code default since TAX-6713; a deployment may pin
+`OCR_BACKEND=paddle` as the rollback. Rapid needs `WORKERS=1` and `RAPIDOCR_MODEL_DIR` pointing to
 a read-only directory containing the three models listed in
 `app/services/rapid_ocr.py::MODEL_HASHES`. The ordinary `/text/ocr` endpoint and
 task polling contract select one backend; there is no automatic Paddle retry.
@@ -101,14 +101,47 @@ versioned upstream locations; the service verifies their SHA-256 before loading:
 - https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.9.2/onnx/PP-OCRv4/cls/ch_ppocr_mobile_v2.0_cls_mobile.onnx
 
 Missing, altered or mismatched weights/packages fail the task; runtime does
-not download substitutes. Package installation adds disk usage but model
-instances load lazily, once per process. The pilot skips Paddle startup
-warmup. One document runs at a time, rendering one page at a time, with a
-30-second wait limit for contending requests. ONNX intra/inter-op pools and
-OpenCV are each configured for two threads; these settings are not a hard
-CPU quota. Rendering caps at 216 DPI and 16 million pixels/page. Use a
-container CPU/memory budget during deployment and size it from measured
-whole-service peak RSS, including concurrent non-OCR operations.
+not download substitutes. Engines load lazily, one per OCR worker thread. The
+Rapid backend skips Paddle startup warmup. Rendering caps at 216 DPI and 16
+million pixels/page. Use a container CPU/memory budget during deployment and
+size it from measured whole-service peak RSS, including concurrent non-OCR
+operations.
+
+## OCR job queue (TAX-6876)
+
+Every `POST /text/ocr` is a persistent job. Its PDF is spilled to
+`OCR_QUEUE_DIR/inputs/` (default `/data/ocr-queue`, which must sit on the
+persistent `/data` volume) and its state lives in `OCR_QUEUE_DIR/jobs.sqlite3`.
+On startup, jobs that were `pending` or `processing` are re-queued in their
+original order; RapidOCR jobs resume from the first page not yet recorded.
+Completed and failed results stay readable for `OCR_RESULT_TTL_SECONDS`
+(default 3600).
+
+`GET /tasks/{id}` keeps its contract (`pending` / `processing` / `completed` /
+`failed`, `result` or `error`; unknown ids answer HTTP 200 with
+`{"success": false, "error": {"code": "TASK_NOT_FOUND", ...}}`). Unfinished OCR
+jobs also report `queue_position` (unfinished jobs submitted earlier) and
+`eta_seconds` (estimate from measured page time).
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `OCR_WORKERS` | CPUs available (affinity and cgroup quota) | concurrent OCR inferences; one RapidOCR engine with its own ONNX Runtime sessions per worker thread |
+| `OCR_INTRA_OP_THREADS` | CPUs // `OCR_WORKERS`, at least 1 | ONNX Runtime intra-op threads per session and OpenCV threads; inter-op is 1 |
+| `OCR_MAX_ACTIVE_JOBS` | max(2, `OCR_WORKERS`) | documents interleaved page by page; later documents wait FIFO |
+| `OCR_QUEUE_MAX_JOBS` | 500 | unfinished jobs accepted before 429 |
+| `OCR_RESULT_TTL_SECONDS` | 3600 | how long finished results stay readable |
+
+A RapidOCR document is split into one unit per page, so one large scan uses
+every idle worker and page results are reassembled in page order with
+unchanged visual-PDF-point coordinates. Idle workers take pages from active
+documents round-robin, so a short document submitted behind a long scan
+finishes first. Nothing answers "busy": the only refusal is HTTP 429 with a
+`Retry-After` header (seconds) and error code `OCR_QUEUE_FULL` when
+`OCR_QUEUE_MAX_JOBS` unfinished jobs are queued. **Callers must retry a 429
+after `Retry-After` seconds.**
+
+`WORKERS` (uvicorn processes) must stay 1 on both backends: the queue is
+scheduled and recovered by one process. Scale with `OCR_WORKERS` instead.
 
 Native digital text keeps the existing skip behavior without loading models.
 Rapid scan results include `provenance`, per-page `text_source`, and per-word
@@ -120,13 +153,15 @@ rotation normalization and hard-coded Paddle source label must be adapted
 before accepting these results into the production pipeline (TAX-6471 also
 tracks unsafe sign/decimal/wrong-field matching).
 
-Identifier redaction calls retain the default Paddle backend, regardless of
-`OCR_BACKEND`; explicit Rapid + `force_ocr` is rejected. Table recognition also
-retains its existing implementation. Invoking those features in the same
-process can load Paddle in addition to Rapid, so a Rapid-only memory estimate
-must not be treated as a whole mixed-workload budget. Use the isolated pilot
-for OCR evaluation; rollback the ordinary OCR path by selecting `paddle` and
-restarting. Backend-specific cache keys prevent reusing Rapid results as
+Identifier redaction follows `OCR_BACKEND`: with `rapid` it reads page images
+through the same OCR workers (same words-and-boxes contract) and never imports
+Paddle. Table recognition (`/text/tables`) and orientation
+(`/transform/orientation`) keep their Paddle models, which load lazily on the
+first such request; every Paddle inference in the process is serialized by one
+lock (TAX-6255). Invoking those endpoints loads Paddle in addition to Rapid,
+so a Rapid-only memory estimate is not a whole mixed-workload budget.
+Rollback both OCR and redaction by selecting `OCR_BACKEND=paddle` and
+restarting; Paddle OCR jobs run through the same queue, one unit per document. Backend-specific cache keys prevent reusing Rapid results as
 Paddle results after rollback. Existing cached Paddle entries are invalidated
 once by the new versioned key.
 

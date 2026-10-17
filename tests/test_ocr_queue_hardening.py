@@ -245,7 +245,8 @@ def test_inputs_results_and_checkpoints_are_sealed_and_private(
     raw = spilled.read_bytes()
     assert b"%PDF" not in raw and b"SECRET-TITLE" not in raw
     blobs = queue.store._execute("SELECT result FROM ocr_job_units")
-    assert blobs and all(b"p0" not in bytes(r["result"]) for r in blobs)
+    # Plaintext markers long enough not to occur in ciphertext by chance.
+    assert blobs and all(b'"full_text"' not in bytes(r["result"]) for r in blobs)
     for folder in (root, root / "inputs", root / "results"):
         assert mode(folder) == 0o700
     assert mode(spilled) == 0o600
@@ -261,7 +262,7 @@ def test_inputs_results_and_checkpoints_are_sealed_and_private(
     [result] = queue_files("results")
     assert mode(result) == 0o600
     raw = result.read_bytes()
-    assert b"p0" not in raw and b"pdf_base64" not in raw
+    assert b'"full_text"' not in raw and b"pdf_base64" not in raw
 
 
 def test_a_tampered_input_fails_its_job(client, auth_headers, documents, monkeypatch):
@@ -624,7 +625,8 @@ def test_ocr_results_never_reach_the_plaintext_cache_and_still_dedupe(
     cache = Path(settings.cache_dir)
     leaked = [
         path for path in (cache.rglob("*") if cache.exists() else [])
-        if path.is_file() and (b"p0" in path.read_bytes() or b"pdf_base64" in path.read_bytes())
+        if path.is_file()
+        and (b'"full_text"' in path.read_bytes() or b"pdf_base64" in path.read_bytes())
     ]
     assert leaked == []
     again = submit(client, auth_headers, "https://example.com/a.pdf").json()
@@ -961,3 +963,135 @@ def test_rapid_provenance_is_no_longer_experimental(monkeypatch):
     provenance = rapid_ocr.ocr_pages(scanned(1))["provenance"]
     assert provenance["experimental"] is False
     assert provenance["profile"] == rapid_ocr.PROFILE
+
+
+# held-out corpus round: confusions, digit budget, inverted print ----------
+
+
+def _segmented_cases():
+    """Identifier print that OCR did not read, in layouts that defeat runs."""
+
+    def groups(parts, size, gap, leaders=False):
+        def draw(p):
+            x, cut, digits = 72, 0, "123456789"
+            for n, length in enumerate(parts):
+                chunk = digits[cut:cut + length]
+                cut += length
+                p.insert_text((x, 200), chunk, fontsize=size)
+                width = fitz.get_text_length(chunk, fontsize=size)
+                if leaders and n < len(parts) - 1:
+                    p.insert_text((x + width + 2, 200),
+                                  "." * max(1, int((gap - 4) / (size * 0.28))), fontsize=size)
+                x += width + gap
+        return draw
+
+    def comb(size, factor):
+        def draw(p):
+            x = 72
+            for d in "123456789":
+                p.draw_rect(fitz.Rect(x - size * 0.4, 200 - size * 1.1, x + size,
+                                      200 + size * 0.4), width=0.6)
+                p.insert_text((x, 200), d, fontsize=size)
+                x += size * factor
+        return draw
+
+    def w9(p, size=10):
+        x = 72
+        for part in ("123", "45", "6789"):
+            width = fitz.get_text_length(part, fontsize=size)
+            p.draw_rect(fitz.Rect(x - 4, 200 - size * 1.2, x + width + 4, 200 + size * 0.5),
+                        width=0.8)
+            p.insert_text((x, 200), part, fontsize=size)
+            x += width + 26
+
+    def inverted(fill):
+        def draw(p):
+            p.draw_rect(fitz.Rect(60, 180, 260, 210), color=fill, fill=fill)
+            p.insert_text((72, 200), "123-45-6789", fontsize=12, color=(1, 1, 1))
+        return draw
+
+    cases = {}
+    for size in (8, 10):
+        for gap in (12, 20, 30):
+            cases[f"3|2|4 {size}pt gap {gap}pt"] = groups((3, 2, 4), size, gap)
+            cases[f"leaders {size}pt gap {gap}pt"] = groups((3, 2, 4), size, gap, True)
+        cases[f"3|2|3|1 {size}pt"] = groups((3, 2, 3, 1), size, 20)
+    for size in (6, 8, 10, 12, 14):
+        for factor in (3, 4):
+            cases[f"comb {size}pt x{factor}"] = comb(size, factor)
+    cases["w9 boxes"] = w9
+    cases["split across lines"] = lambda p: (p.insert_text((72, 200), "123-45-", fontsize=10),
+                                             p.insert_text((72, 260), "6789", fontsize=10))
+    cases["ein 180pt gap"] = lambda p: (p.insert_text((72, 200), "12-", fontsize=10),
+                                        p.insert_text((252, 200), "3456789", fontsize=10))
+    cases["white on black"] = inverted((0, 0, 0))
+    cases["white on 30% gray"] = inverted((0.7, 0.7, 0.7))
+    return cases
+
+
+@pytest.mark.parametrize("name", sorted(_segmented_cases()))
+def test_unread_segmented_or_inverted_identifiers_refuse(name):
+    page = _image_only_pdf(_segmented_cases()[name])
+    assert ir.text_like_marks(page, 0, 216)["text_like"], name
+
+
+def _explicit_ocr(scan_words, replace):
+    """An OCR stand-in returning the source words, some texts replaced."""
+    calls = []
+
+    def ocr(pdf_bytes, pages):
+        calls.append(1)
+        words = []
+        for text, rect in scan_words:
+            if len(calls) == 1 and text in replace:
+                text = replace[text]
+            elif len(calls) > 1 and text in replace:
+                text = "XXXXXXX"
+            words.append(ir.Word(text, rect))
+        return {0: words}
+
+    return ocr
+
+
+@pytest.mark.parametrize("reading", ["I23-45-678S", "l23 45  67B9", "123-4S-6789"])
+def test_a_confusion_garbled_ssn_is_redacted(reading):
+    scan, words = _scan_with(lambda p: p.insert_text((72, 160), "123-45-6789", fontsize=11))
+    result = ir.redact_identifiers(scan, ocr=_explicit_ocr(words, {"123-45-6789": reading}))
+    assert len(result["redactions"]) == 1
+    assert result["redactions"][0]["source"] == "ocr"
+
+
+def test_a_near_identifier_digit_run_refuses():
+    scan, words = _scan_with(lambda p: p.insert_text((72, 160), "123-45-6789", fontsize=11))
+    with pytest.raises(ir.RedactionIncompleteError, match="misread identifier"):
+        ir.redact_identifiers(scan, ocr=_explicit_ocr(words, {"123-45-6789": "123-45-678"}))
+
+
+def test_lone_four_digit_numbers_on_a_read_form_do_not_refuse(monkeypatch):
+    """ZIP+4, years, form and OMB numbers: read, not identifiers, not suspect."""
+    def draw(p):
+        p.insert_text((72, 100), "Form 1099-INT Rev. 04-2025 OMB No. 1545-0112", fontsize=10)
+        p.insert_text((72, 130), "Austin, TX 78701-1234 (512) 555-0100", fontsize=10)
+        p.insert_text((72, 160), "Tax year 2025 Account A-0417 Box 1 4,182.55", fontsize=10)
+
+    scan, words = _scan_with(draw)
+    lines = {}
+    for text, rect in words:
+        lines.setdefault(round(rect.y1), []).append((text, rect))
+    monkeypatch.setattr(rapid_ocr, "_get_engine", lambda: _engine([
+        (" ".join(t for t, _ in ws), ws[0][1] | ws[-1][1], [(t, r, 0.95) for t, r in ws])
+        for ws in lines.values()
+    ]))
+    assert ir.redact_identifiers(scan)["redactions"] == []
+
+
+def test_a_rotated_read_identifier_is_redacted_whole(monkeypatch):
+    scan, words = _scan_with(
+        lambda p: p.insert_text((300, 400), "123-45-6789", fontsize=11, rotate=90))
+    [(text, rect)] = words
+    assert rect.height > 3 * rect.width
+    result = ir.redact_identifiers(scan, ocr=_explicit_ocr(words, {text: text}))
+    assert len(result["redactions"]) == 1
+    with fitz.open(stream=result["pdf_bytes"], filetype="pdf") as doc:
+        pix = doc[0].get_pixmap(dpi=72, clip=rect, colorspace=fitz.csGRAY)
+    assert max(pix.samples) < 60  # the whole rotated number is blacked out

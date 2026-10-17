@@ -97,8 +97,11 @@ _NOT_IDENTIFIER = re.compile(
     r"|\(\d{3}\)\s?\d{3}[-.]\d{4}(?!\d)"             # (555) 123-4567
     r"|(?<!\d)\d{3}[-.]\d{3}[-.]\d{4}(?!\d)"          # 555-123-4567
 )
-# A digit run: digits joined by at most two separator characters at a time.
-_DIGIT_RUN = re.compile(r"\d(?:[-\u2010-\u2015./_:\u00b7\u2022 ]{0,2}\d)*")
+# A digit run: digits joined by at most two separator characters at a time,
+# or by a dot/dash leader ("123 ....... 45").
+_DIGIT_RUN = re.compile(
+    r"\d(?:(?:[-\u2010-\u2015./_:\u00b7\u2022 ]{0,2}|[-.\u2026\u00b7_ ]{3,16})\d)*"
+)
 # A run of this many digits that is not an identifier may be a misread one.
 _SUSPECT_DIGITS = 7
 
@@ -107,18 +110,33 @@ def normalize_confusions(text: str) -> str:
     """Map OCR letter/digit confusions to digits inside numeric-looking tokens.
 
     Character-for-character, so positions are kept. A token (between spaces)
-    is normalized when it holds at least one digit and digits plus confusable
-    letters make up at least half of its letters and digits: "I23-45-678S"
-    becomes "123-45-6785"; "ID", "SSN" and "Box" stay words.
+    is numeric when it holds a digit and digits plus confusable letters make up
+    at least half of its letters and digits ("I23-45-678S" -> "123-45-6785"),
+    or when it is a single confusable letter next to a numeric token (a comb
+    field read box by box as "B 0 Z 9"). "ID", "SSN" and "Box" stay words.
     """
-    out = []
-    for token in re.split(r"(\s+)", text):
+    parts = re.split(r"(\s+)", text)
+    tokens = list(range(0, len(parts), 2))  # even indexes are tokens
+
+    def numeric(token: str) -> bool:
         alnum = [c for c in token if c.isalnum() or c == "|"]
-        numeric = sum(c.isdigit() or c in _CONFUSABLE for c in alnum)
-        if any(c.isdigit() for c in token) and alnum and numeric * 2 >= len(alnum):
-            token = token.translate(_CONFUSIONS)
-        out.append(token)
-    return "".join(out)
+        count = sum(c.isdigit() or c in _CONFUSABLE for c in alnum)
+        return any(c.isdigit() for c in token) and bool(alnum) and count * 2 >= len(alnum)
+
+    is_numeric = {i: numeric(parts[i]) for i in tokens}
+    changed = True
+    while changed:
+        changed = False
+        for n, i in enumerate(tokens):
+            if is_numeric[i] or len(parts[i]) != 1 or parts[i] not in _CONFUSABLE:
+                continue
+            neighbours = [tokens[m] for m in (n - 1, n + 1) if 0 <= m < len(tokens)]
+            if any(is_numeric[j] for j in neighbours):
+                is_numeric[i] = changed = True
+    for i in tokens:
+        if is_numeric[i]:
+            parts[i] = parts[i].translate(_CONFUSIONS)
+    return "".join(parts)
 
 
 def _digit_runs(text: str) -> Iterable[tuple[int, int, str]]:
@@ -138,13 +156,36 @@ def _run_kind(text: str, start: int, end: int) -> str:
     return "ssn" if _SSN_LABEL.search(label) else "ein" if _EIN_LABEL.search(label) else "tin"
 
 
+# Group shapes of an identifier read with its separators, or with the SSN's
+# second separator lost, or as one block. (5,4) is left out: it is ZIP+4, and
+# the (4,4) of form and reference numbers sits next to it.
+_ID_GROUPS = ((3, 2, 4), (2, 7), (3, 6), (9,))
+
+
 def suspect_runs(text: str) -> list[str]:
-    """Digit runs of _SUSPECT_DIGITS+ digits that are not identifier-shaped."""
+    """Digit runs that may be a misread identifier: one or two digits dropped
+    or added (7-11 digits, not 9) in an identifier's group shape.
+
+    "123-45-678" (3,2,3) or "12-345678" (2,6) or an unseparated 8 or 10 digit
+    block qualify, as do 5+ groups of one or two digits (a comb field read box
+    by box); "OMB No. 1545-0029" (4,4), "2025-0417" or a 12-digit account
+    number do not.
+    """
     text = normalize_confusions(text)
-    return [
-        digits for _, _, digits in _digit_runs(text)
-        if len(digits) >= _SUSPECT_DIGITS and len(digits) != 9
-    ]
+    suspects = []
+    for start, end, digits in _digit_runs(text):
+        if not _SUSPECT_DIGITS <= len(digits) <= 11 or len(digits) == 9:
+            continue
+        groups = tuple(len(g) for g in re.findall(r"\d+", text[start:end]))
+        if len(groups) >= 5 and max(groups) <= 2:
+            suspects.append(digits)  # a comb field read digit by digit
+            continue
+        if any(
+            len(groups) == len(shape) and sum(abs(a - b) for a, b in zip(groups, shape)) <= 2
+            for shape in _ID_GROUPS
+        ):
+            suspects.append(digits)
+    return suspects
 
 
 def _matches(line: str, ocr: bool = False) -> Iterable[tuple[int, int, str, str]]:
@@ -275,9 +316,12 @@ def find_identifiers(
     page image (OCR lines).
     """
     found: list[Found] = []
+    ocr = source == "ocr"
     groups = _lines([w for w in words if w.kind == "word"])
     # A recognized line is searched on its own, never joined to its words.
     groups += [[w] for w in words if w.kind == "line"]
+    if ocr:
+        groups = _join_digit_lines(groups)
     for line in groups:
         text = ""
         spans: list[tuple[int, int, Word]] = []
@@ -287,17 +331,54 @@ def find_identifiers(
             start = len(text)
             text += w.text
             spans.append((start, len(text), w))
-        ocr = source == "ocr"
         for start, end, kind, digits in _matches(text, ocr):
             cut = _prefix_end(normalize_confusions(text) if ocr else text, start, end)
             rects = []
             for s, e, w in spans:
                 lo, hi = max(start, s), min(cut, e)
-                if lo < hi:
-                    rects.append(_part_rect(w, lo - s, hi - s, page, source))
+                if lo >= hi:
+                    continue
+                if ocr and w.rect.height > 1.5 * w.rect.width and len(w.text) >= 4:
+                    # Rotated print: which end holds the last four is unknown,
+                    # so the whole box goes, last four included.
+                    rects.append(fitz.Rect(w.rect) + (-2, -2, 2, 2))
+                    continue
+                rect = _part_rect(w, lo - s, hi - s, page, source)
+                if ocr:
+                    # OCR boxes are estimates: widen toward the hidden side, and
+                    # at the far end only when the word ends there too.
+                    pad = max(1.0, 0.15 * rect.height)
+                    rect = fitz.Rect(rect.x0 - pad, rect.y0,
+                                     rect.x1 + (pad if hi - s >= len(w.text) else 0), rect.y1)
+                rects.append(rect)
             if rects:
                 found.append(Found(page_index, kind, digits[-4:], source, tuple(rects)))
     return found
+
+
+def _join_digit_lines(groups: list[list[Word]]) -> list[list[Word]]:
+    """Join a line that ends in a digit group to the next line, when that one
+    starts with digits right below it: an SSN wrapped as "123-45-" / "6789".
+
+    Lines are kept as well; the joined copy is an extra search line.
+    """
+    numeric_end = re.compile(r"[\dIlOoSsBZGq|][-\u2010-\u2015./ ]*$")
+    numeric_start = re.compile(r"^[\dIlOoSsBZGq|]")
+    joined = []
+    for upper in groups:
+        if not upper or not numeric_end.search(normalize_confusions(upper[-1].text)):
+            continue
+        last = upper[-1].rect
+        for lower in groups:
+            if lower is upper or not lower or not numeric_start.search(lower[0].text):
+                continue
+            first = lower[0].rect
+            gap = first.y0 - last.y1
+            if (-0.2 * last.height <= gap <= 1.5 * last.height
+                    and first.x0 <= last.x1 + 2 * last.height
+                    and first.x1 >= upper[0].rect.x0 - 2 * last.height):
+                joined.append(upper + lower)
+    return groups + joined
 
 
 def text_layer_words(page: fitz.Page) -> list[Word]:
@@ -491,10 +572,11 @@ def _digit_budget(unread) -> int:
     """Digit-equivalents in digit-sized unread marks, upright or rotated.
 
     A mark is digit-sized when its height across the line is 10-60 px (a digit
-    of about 5-28 pt at 216 DPI; dust specks stay under 10 px) and it is printed, not noise: at its darkest it
-    differs from the background by at least _DIGIT_MIN_CONTRAST levels (gray
-    237 on white; sensor noise stays below). A mark holds about
-    length / (0.6 x height) digits. The larger of the upright and the rotated reading counts.
+    of about 5-28 pt at 216 DPI; dust specks stay under 10 px) and it is
+    printed, not noise: at its darkest it differs from the background by at
+    least _DIGIT_MIN_CONTRAST levels (gray 237 on white; sensor noise stays
+    below). A mark holds about length / (0.6 x height) digits. The larger of
+    the upright and the rotated reading counts.
     """
     def digits(c, along):
         across = 1 - along

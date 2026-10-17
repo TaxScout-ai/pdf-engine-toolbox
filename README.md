@@ -113,9 +113,36 @@ Every `POST /text/ocr` is a persistent job. Its PDF is spilled to
 `OCR_QUEUE_DIR/inputs/` (default `/data/ocr-queue`, which must sit on the
 persistent `/data` volume) and its state lives in `OCR_QUEUE_DIR/jobs.sqlite3`.
 On startup, jobs that were `pending` or `processing` are re-queued in their
-original order; RapidOCR jobs resume from the first page not yet recorded.
+original order; RapidOCR jobs resume from the first page not yet recorded, and
+a job whose every page was recorded before the restart is finished at once.
 Completed and failed results stay readable for `OCR_RESULT_TTL_SECONDS`
-(default 3600).
+(default 3600); after that a read answers `TASK_NOT_FOUND`.
+
+### Client data at rest
+
+The queue holds client documents (with SSNs) and their OCR text, so:
+
+- Inputs (`inputs/<id>.bin`), results (`results/<id>.bin`) and per-page
+  checkpoints (rows in `jobs.sqlite3`) are sealed with AES-256-GCM. Each is
+  bound to its job id, so a file swapped between jobs or altered on disk fails
+  authentication, and that job fails instead of reading it.
+- The key is `OCR_QUEUE_KEY`: 32 bytes in URL-safe base64, or any passphrase
+  (HKDF-SHA256). Without it, the key is HKDF-derived from `PDF_ENGINE_SECRET`.
+  Changing the key makes jobs queued under the old key fail with an
+  authentication error, so rotate only with an empty queue.
+- `OCR_QUEUE_DIR` and its subdirectories are mode 0700. Files and the SQLite
+  ledger (including `-wal`/`-shm`) are mode 0600.
+- An input is deleted as soon as its job finishes. Every
+  `OCR_SWEEP_INTERVAL_SECONDS` (default 300) a sweeper:
+  - deletes expired jobs and their results;
+  - deletes files no ledger row refers to, and temporaries older than ten
+    minutes;
+  - deletes page-checkpoint rows of finished jobs;
+  - restarts any OCR worker thread that died.
+
+A failure after a page was read fails that job with the reason; the worker
+carries on. Examples: the disk filling up while checkpointing, assembling or
+writing the result, or a ledger write that is rolled back.
 
 `GET /tasks/{id}` keeps its contract (`pending` / `processing` / `completed` /
 `failed`, `result` or `error`; unknown ids answer HTTP 200 with
@@ -130,6 +157,9 @@ jobs also report `queue_position` (unfinished jobs submitted earlier) and
 | `OCR_MAX_ACTIVE_JOBS` | max(2, `OCR_WORKERS`) | documents interleaved page by page; later documents wait FIFO |
 | `OCR_QUEUE_MAX_JOBS` | 500 | unfinished jobs accepted before 429 |
 | `OCR_RESULT_TTL_SECONDS` | 3600 | how long finished results stay readable |
+| `OCR_QUEUE_KEY` | derived from `PDF_ENGINE_SECRET` | key for queue data at rest |
+| `OCR_SWEEP_INTERVAL_SECONDS` | 300 | retention sweep and worker supervision |
+| `OCR_SYNC_TIMEOUT_SECONDS` | 1200 | synchronous OCR (identifier redaction) fails closed after this |
 
 A RapidOCR document is split into one unit per page, so one large scan uses
 every idle worker and page results are reassembled in page order with
@@ -159,7 +189,10 @@ tracks unsafe sign/decimal/wrong-field matching).
 
 Identifier redaction follows `OCR_BACKEND`: with `rapid` it reads page images
 through the same OCR workers (same words-and-boxes contract) and never imports
-Paddle. Table recognition (`/text/tables`) and orientation
+Paddle. It fails closed in two cases, and the document is refused rather than
+returned with an identifier possibly left readable:
+- a page OCR could not read (status `failed` or `empty`);
+- an OCR run that exceeds `OCR_SYNC_TIMEOUT_SECONDS`. Table recognition (`/text/tables`) and orientation
 (`/transform/orientation`) keep their Paddle models, which load lazily on the
 first such request; every Paddle inference in the process is serialized by one
 lock (TAX-6255). Invoking those endpoints loads Paddle in addition to Rapid,

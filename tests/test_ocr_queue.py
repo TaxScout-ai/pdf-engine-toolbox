@@ -279,7 +279,11 @@ def test_full_queue_answers_429_with_retry_after(client, auth_headers, documents
 
     assert first.status_code == second.status_code == 200
     assert refused.status_code == 429
-    assert int(refused.headers["Retry-After"]) >= 1
+    # RFC 9110 delay-seconds: a bare non-negative integer (the app parses it).
+    retry_after = refused.headers["Retry-After"]
+    assert retry_after.isdigit(), retry_after
+    assert 5 <= int(retry_after) <= 300
+    assert retry_after in refused.json()["error"]["message"]
     assert refused.json()["success"] is False
     assert refused.json()["error"]["code"] == "OCR_QUEUE_FULL"
     gate.set()

@@ -140,6 +140,10 @@ finishes first. Nothing answers "busy": the only refusal is HTTP 429 with a
 `OCR_QUEUE_MAX_JOBS` unfinished jobs are queued. **Callers must retry a 429
 after `Retry-After` seconds.**
 
+`GET /health` lists `capabilities` (additive). `ocr-queue:persistent` is always
+present on this version; `identifier-redaction:rapid-ocr` is present only when
+`OCR_BACKEND=rapid`, i.e. when identifier redaction really reads with RapidOCR.
+
 `WORKERS` (uvicorn processes) must stay 1 on both backends: the queue is
 scheduled and recovered by one process. Scale with `OCR_WORKERS` instead.
 

@@ -75,7 +75,7 @@ class QueueFullError(Exception):
         self.retry_after = retry_after
 
 
-class _Stopped(Exception):
+class _StoppedError(Exception):
     pass
 
 
@@ -318,7 +318,7 @@ class OcrQueue:
             self._cond.notify_all()
         for job in waiting:
             if not job.persistent:
-                job.error = _Stopped("OCR queue stopped")
+                job.error = _StoppedError("OCR queue stopped")
                 job.event.set()
         for thread in self._threads:
             thread.join(timeout=0.2)

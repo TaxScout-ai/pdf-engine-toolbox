@@ -80,6 +80,7 @@ _INITIAL_PAGE_SECONDS = 4.0
 # A temporary file older than this is a leftover of an interrupted write.
 _STALE_TMP_SECONDS = 600
 _MAGIC = b"OQ1\x00"
+_DEFAULT_SECRET = "change-me"
 
 _worker = threading.local()
 
@@ -111,6 +112,11 @@ def queue_key() -> bytes:
     ``PDF_ENGINE_SECRET``, so it is still secret and stable across restarts.
     """
     raw = settings.ocr_queue_key
+    if not raw and settings.pdf_engine_secret == _DEFAULT_SECRET:
+        raise RuntimeError(
+            "OCR_QUEUE_KEY is not set and PDF_ENGINE_SECRET is the default; refusing to "
+            "store client documents under a publicly known key. Set OCR_QUEUE_KEY."
+        )
     if raw:
         try:
             key = base64.urlsafe_b64decode(raw + "=" * (-len(raw) % 4))
@@ -210,7 +216,8 @@ class _Store:
                 error TEXT,
                 created_at REAL NOT NULL,
                 started_at REAL,
-                completed_at REAL
+                completed_at REAL,
+                cache_key TEXT
             );
             CREATE INDEX IF NOT EXISTS ocr_jobs_status ON ocr_jobs (status, seq);
             CREATE TABLE IF NOT EXISTS ocr_job_units (
@@ -220,6 +227,12 @@ class _Store:
                 PRIMARY KEY (job_id, unit)
             );
             """
+        )
+        columns = {row[1] for row in self._db.execute("PRAGMA table_info(ocr_jobs)")}
+        if "cache_key" not in columns:  # ledger written by an earlier build
+            self._db.execute("ALTER TABLE ocr_jobs ADD COLUMN cache_key TEXT")
+        self._db.execute(
+            "CREATE INDEX IF NOT EXISTS ocr_jobs_cache ON ocr_jobs (cache_key, status)"
         )
         self.restrict_permissions()
 
@@ -265,11 +278,13 @@ class _Store:
         with self._lock:
             cursor = self._db.execute(
                 "INSERT INTO ocr_jobs (id, operation, backend, status, params, page_count,"
-                " input_path, error, created_at, completed_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                " input_path, error, created_at, completed_at, cache_key)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     job.id, job.operation, job.backend, status, json.dumps(job.params),
                     job.page_count, job.source if status != FAILED else None, error,
                     job.created_at, now if status == FAILED else None,
+                    job.params.get("cache_key"),
                 ),
             )
             return cursor.lastrowid
@@ -323,6 +338,15 @@ class _Store:
         for row in rows:
             _unlink(row["input_path"])
 
+    def cached(self, cache_key: str, ttl: int) -> tuple[str, str] | None:
+        """(job id, result path) of the newest unexpired result for this request."""
+        rows = self._execute(
+            "SELECT id, result_path FROM ocr_jobs WHERE cache_key = ? AND status = ?"
+            " AND completed_at >= ? ORDER BY completed_at DESC LIMIT 1",
+            (cache_key, COMPLETED, time.time() - ttl),
+        )
+        return (rows[0]["id"], rows[0]["result_path"]) if rows else None
+
     def get(self, job_id: str) -> dict | None:
         rows = self._execute("SELECT * FROM ocr_jobs WHERE id = ?", (job_id,))
         return dict(rows[0]) if rows else None
@@ -364,11 +388,15 @@ class _Store:
                         _unlink(path)
                         removed["tmp"] += 1
                 elif str(path) not in referenced:
+                    try:
+                        recent = now - path.stat().st_mtime <= _STALE_TMP_SECONDS
+                    except FileNotFoundError:
+                        continue  # finished and deleted since the listing
                     # Re-check: a submit may have written the file just now.
-                    if not self._execute(
+                    if not recent and not self._execute(
                         "SELECT 1 FROM ocr_jobs WHERE input_path = ? OR result_path = ?",
                         (str(path), str(path)),
-                    ) and now - path.stat().st_mtime > _STALE_TMP_SECONDS:
+                    ):
                         _unlink(path)
                         removed["files"] += 1
         with self._lock:
@@ -548,12 +576,28 @@ class OcrQueue:
             with self._cond:
                 self._reserved -= 1
 
+    def cached_result(self, cache_hash: str, cache_params: dict) -> dict | None:
+        """A finished result for identical bytes and parameters, within the TTL.
+
+        OCR results are deduplicated here, from the sealed ledger, instead of
+        the plaintext file cache (cache_service): they carry client text and
+        the searchable PDF, and this keeps one copy under one retention rule.
+        """
+        hit = self.store.cached(cache_key(cache_hash, cache_params), self.ttl)
+        if hit is None:
+            return None
+        try:
+            return self.store.read_result(*hit)
+        except Exception as exc:  # unreadable: run the request again
+            log.warning("ocr_cached_result_unreadable", task_id=hit[0], error=str(exc))
+            return None
+
     def _submit(self, pdf_bytes, pages, language, dpi, backend, cache_hash, cache_params):
         job_id = str(uuid.uuid4())
         data = _as_pdf_bytes(pdf_bytes)
         params = {
             "pages": pages, "language": language, "requested_dpi": dpi, "dpi": dpi,
-            "cache_hash": cache_hash, "cache_params": cache_params,
+            "cache_key": cache_key(cache_hash, cache_params) if cache_hash else None,
         }
         error, targets, page_count = None, [_WHOLE_DOCUMENT], len(pages or [])
         try:
@@ -670,6 +714,10 @@ class OcrQueue:
                 data["result"] = self.store.read_result(row["id"], row["result_path"])
             except FileNotFoundError:
                 return None
+            except Exception as exc:  # rotated key, corrupt or truncated file
+                log.error("ocr_result_unreadable", task_id=row["id"], error=str(exc))
+                data["status"] = FAILED
+                data["error"] = f"OCR result unreadable: {exc}"
         if row["status"] == FAILED and row["error"]:
             data["error"] = row["error"]
         if row["status"] in (PENDING, PROCESSING):
@@ -855,9 +903,7 @@ class OcrQueue:
         log.error("task_failed", task_id=job.id, error=reason)
 
     def _ocr_response(self, job: _Job, result: dict) -> dict:
-        from app.services import cache_service
-
-        data = {
+        return {
             "pages": result["pages"],
             "total_words": result["total_words"],
             "avg_confidence": result["avg_confidence"],
@@ -865,11 +911,6 @@ class OcrQueue:
             "provenance": result.get("provenance"),
             "coverage": result.get("coverage"),
         }
-        if job.params.get("cache_hash"):
-            cache_service.put_cached(
-                job.params["cache_hash"], "ocr", data, job.params.get("cache_params")
-            )
-        return data
 
     # ----------------------------------------------------------------- tests
 
@@ -881,6 +922,14 @@ class OcrQueue:
                 return data
             time.sleep(0.01)
         raise TimeoutError(f"OCR task {task_id} did not finish in {timeout}s")
+
+
+def cache_key(cache_hash: str, cache_params: dict | None) -> str:
+    """Opaque dedupe key: content hash plus every parameter that shapes a result."""
+    import hashlib
+
+    material = json.dumps({"hash": cache_hash, "params": cache_params}, sort_keys=True)
+    return hashlib.sha256(material.encode()).hexdigest()
 
 
 def _as_pdf_bytes(data: bytes) -> bytes:

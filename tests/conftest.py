@@ -33,6 +33,8 @@ def isolate_ocr_queue(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "ocr_workers", 4)
     monkeypatch.setattr(settings, "ocr_intra_op_threads", 1)
     monkeypatch.setattr(settings, "ocr_max_active_jobs", 0)
+    # The queue refuses the default secret without a dedicated key.
+    monkeypatch.setattr(settings, "ocr_queue_key", "test-only ocr queue key")
     yield
     ocr_queue.shutdown()
 

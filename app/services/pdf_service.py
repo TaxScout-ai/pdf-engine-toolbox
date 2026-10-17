@@ -2503,10 +2503,13 @@ def ocr_pages(
             ocr_output = _paddle_predict(_get_paddle_ocr(language), input=img_array)
         except Exception as e:
             log.warning("ocr_failed", page=page_idx, error=str(e))
+            # Additive status (TAX-6876): zero words here is not a reading of
+            # the page, so identifier redaction must refuse it.
             all_page_results.append({
                 "page_index": page_idx,
                 "words": [],
                 "full_text": "",
+                "status": "failed",
             })
             continue
 
@@ -2571,11 +2574,15 @@ def ocr_pages(
                     render_mode=3,  # Invisible text
                 )
 
-        all_page_results.append({
+        page_result = {
             "page_index": page_idx,
             "words": page_words,
             "full_text": " ".join(page_texts),
-        })
+        }
+        if not page_words:
+            # Read, but nothing recognized: not proof the page is blank.
+            page_result["status"] = "empty"
+        all_page_results.append(page_result)
 
     avg_confidence = round(confidence_sum / total_words, 4) if total_words > 0 else 0.0
 

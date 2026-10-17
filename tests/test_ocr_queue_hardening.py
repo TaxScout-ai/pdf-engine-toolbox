@@ -290,6 +290,7 @@ def test_queue_key_comes_from_ocr_queue_key_or_the_engine_secret(monkeypatch):
     monkeypatch.setattr(settings, "ocr_queue_key", "a passphrase")
     from_passphrase = ocr_queue.queue_key()
     monkeypatch.setattr(settings, "ocr_queue_key", "")
+    monkeypatch.setattr(settings, "pdf_engine_secret", "a-real-secret")
     derived = ocr_queue.queue_key()
     monkeypatch.setattr(settings, "pdf_engine_secret", "another-secret")
     assert len({from_passphrase, derived, ocr_queue.queue_key()}) == 3
@@ -335,25 +336,94 @@ def _image_only_pdf(draw) -> bytes:
         return doc.tobytes()
 
 
-def test_redaction_accepts_a_blank_scan_back(monkeypatch):
+def _noisy_scan(sigma: float, specks: int = 0, seed: int = 0) -> bytes:
+    """A blank scan back: off-white paper, Gaussian sensor noise, dust specks."""
+    import cv2
+    import numpy as np
+
+    rng = np.random.default_rng(seed)
+    page = np.clip(rng.normal(250, sigma, (2200, 1700)), 0, 255).astype(np.uint8)
+    for _ in range(specks):
+        center = (int(rng.integers(0, 1700)), int(rng.integers(0, 2200)))
+        cv2.circle(page, center, int(rng.integers(1, 4)), int(rng.integers(60, 200)), -1)
+    with fitz.open() as doc:
+        out = doc.new_page(width=612, height=792)
+        out.insert_image(out.rect, stream=cv2.imencode(".png", page)[1].tobytes())
+        return doc.tobytes()
+
+
+@pytest.mark.parametrize("fixture", ["blank", "light noise", "50 dust specks"])
+def test_redaction_accepts_a_blank_scan_back(monkeypatch, fixture):
     monkeypatch.setattr(rapid_ocr, "_get_engine", lambda: _empty_engine)
-    blank = _image_only_pdf(lambda page: None)
-    result = ir.redact_identifiers(blank)
+    page = {
+        "blank": lambda: _image_only_pdf(lambda page: None),
+        "light noise": lambda: _noisy_scan(sigma=4),
+        "50 dust specks": lambda: _noisy_scan(sigma=4, specks=50),
+    }[fixture]()
+    result = ir.redact_identifiers(page)
     assert result["ocr_pages"] == [0]
     assert result["redactions"] == []
-    assert ir.ink_fraction(blank, 0, 216) == 0
+    assert ir.text_like_marks(page, 0, 216)["text_like"] is False
 
 
-def test_redaction_refuses_a_faint_ssn_ocr_missed(monkeypatch):
+@pytest.mark.parametrize("gray", [0, 150, 200, 215, 225, 235])
+@pytest.mark.parametrize("size", [4, 6, 8, 10])
+def test_redaction_refuses_any_printed_ssn_ocr_missed(monkeypatch, size, gray):
     monkeypatch.setattr(rapid_ocr, "_get_engine", lambda: _empty_engine)
-    faint = _image_only_pdf(
-        lambda page: page.insert_text((72, 120), "SSN 123-45-6789", fontsize=10,
-                                      color=(0.8, 0.8, 0.8))
+    level = gray / 255
+    page = _image_only_pdf(
+        lambda p: p.insert_text((72, 120), "123-45-6789", fontsize=size,
+                                color=(level, level, level))
     )
     with pytest.raises(ir.RedactionIncompleteError,
-                       match=r"page\(s\) \[0\] show ink but OCR read no text"):
-        ir.redact_identifiers(faint)
-    assert ir.ink_fraction(faint, 0, 216) > ir._BLANK_MAX_INK_FRACTION
+                       match=r"page\(s\) \[0\] show text-like marks but OCR read no text"):
+        ir.redact_identifiers(page)
+
+
+def test_dusty_and_noisy_scan_false_refusal_profile():
+    """Documents where a blank back is refused (fails closed, never leaks).
+
+    Sparse dust passes; heavy dust can put two specks side by side, and heavy
+    sensor noise (sigma 8 on 255) forms aligned clusters: both refuse.
+    """
+    profile = {
+        (sigma, specks): ir.text_like_marks(_noisy_scan(sigma, specks), 0, 216)["text_like"]
+        for sigma, specks in [(4, 0), (4, 50), (4, 200), (8, 0)]
+    }
+    assert profile[(4, 0)] is False and profile[(4, 50)] is False
+    assert profile[(8, 0)] is True
+
+
+def test_paddle_rollback_redaction_refuses_a_failed_page(monkeypatch):
+    from app.services import pdf_service
+
+    class Crashing:
+        def predict(self, input):  # noqa: A002 - mirrors PaddleOCR
+            raise RuntimeError("std::exception")
+
+    monkeypatch.setattr(settings, "ocr_backend", "paddle")
+    monkeypatch.setattr(pdf_service, "_get_paddle_ocr", lambda lang="en": Crashing())
+    page = _image_only_pdf(lambda p: p.insert_text((72, 120), "SSN 123-45-6789"))
+    assert pdf_service.ocr_pages(page, force_ocr=True)["pages"][0]["status"] == "failed"
+    with pytest.raises(ir.RedactionIncompleteError, match=r"OCR failed on page\(s\) \[0\]"):
+        ir.redact_identifiers(page)
+
+
+def test_paddle_rollback_redaction_refuses_an_unread_page_with_print(monkeypatch):
+    from types import SimpleNamespace
+
+    from app.services import pdf_service
+
+    class Blind:
+        def predict(self, input):  # noqa: A002
+            return [SimpleNamespace(json={"res": {"rec_texts": [], "rec_scores": [],
+                                                  "dt_polys": []}})]
+
+    monkeypatch.setattr(settings, "ocr_backend", "paddle")
+    monkeypatch.setattr(pdf_service, "_get_paddle_ocr", lambda lang="en": Blind())
+    page = _image_only_pdf(lambda p: p.insert_text((72, 120), "SSN 123-45-6789"))
+    with pytest.raises(ir.RedactionIncompleteError, match="text-like marks"):
+        ir.redact_identifiers(page)
 
 
 def test_redaction_refuses_a_page_ocr_failed_on(monkeypatch):
@@ -440,3 +510,85 @@ def test_synchronous_ocr_fails_closed_after_its_budget(monkeypatch):
     monkeypatch.setattr(rapid_ocr, "_get_engine", lambda: FakeEngine(delay=0))
     result = rapid_ocr.ocr_pages(scanned(1))
     assert result["pages"][0]["full_text"] == "p0"
+
+
+# re-verify round ----------------------------------------------------------
+
+
+def test_an_unreadable_result_is_a_failed_task_not_a_500(
+    client, auth_headers, documents, monkeypatch
+):
+    monkeypatch.setattr(rapid_ocr, "_get_engine", lambda: FakeEngine(delay=0))
+    documents["https://example.com/a.pdf"] = scanned(1, "a")
+    task_id = submit(client, auth_headers, "https://example.com/a.pdf").json()["task_id"]
+    assert poll(client, auth_headers, task_id, timeout=10)["data"]["status"] == "completed"
+
+    ocr_queue.shutdown()
+    monkeypatch.setattr(settings, "ocr_queue_key", "rotated")
+    ocr_queue.get_queue()
+    response = get_task(client, auth_headers, task_id)
+    assert response.status_code == 200
+    body = response.json()
+    assert body["success"] is True
+    assert body["data"]["status"] == "failed"
+    assert "OCR result unreadable" in body["data"]["error"]
+
+    [result] = queue_files("results")
+    result.write_bytes(b"truncated")
+    response = get_task(client, auth_headers, task_id)
+    assert response.status_code == 200
+    assert response.json()["data"]["status"] == "failed"
+
+
+def test_default_secret_without_a_queue_key_refuses_to_start(monkeypatch):
+    from app.main import app, lifespan
+
+    monkeypatch.setattr(settings, "ocr_queue_key", "")
+    monkeypatch.setattr(settings, "pdf_engine_secret", "change-me")
+    monkeypatch.setattr(rapid_ocr, "validate_runtime", lambda: None)
+
+    async def boot():
+        async with lifespan(app):
+            pytest.fail("the engine started with a publicly known queue key")
+
+    with pytest.raises(RuntimeError, match="Set OCR_QUEUE_KEY"):
+        asyncio.run(boot())
+
+
+def test_sweep_survives_a_file_vanishing_mid_listing(monkeypatch):
+    queue = ocr_queue.get_queue()
+    ghost = Path(settings.ocr_queue_dir) / "inputs" / "ghost.bin"
+    ghost.write_bytes(b"x")
+    real_iterdir = Path.iterdir
+
+    def listing_then_vanish(self):
+        entries = list(real_iterdir(self))
+        if ghost in entries:
+            ghost.unlink()  # finished and deleted between iterdir and stat
+        return iter(entries)
+
+    monkeypatch.setattr(Path, "iterdir", listing_then_vanish)
+    removed = queue.sweep()
+    assert removed["files"] == 0
+    assert queue.worker_restarts == 0
+
+
+def test_ocr_results_never_reach_the_plaintext_cache_and_still_dedupe(
+    client, auth_headers, documents, monkeypatch
+):
+    engine = FakeEngine(delay=0)
+    monkeypatch.setattr(rapid_ocr, "_get_engine", lambda: engine)
+    documents["https://example.com/a.pdf"] = scanned(1, "a")
+    first = submit(client, auth_headers, "https://example.com/a.pdf").json()["task_id"]
+    assert poll(client, auth_headers, first, timeout=10)["data"]["status"] == "completed"
+
+    cache = Path(settings.cache_dir)
+    leaked = [
+        path for path in (cache.rglob("*") if cache.exists() else [])
+        if path.is_file() and (b"p0" in path.read_bytes() or b"pdf_base64" in path.read_bytes())
+    ]
+    assert leaked == []
+    again = submit(client, auth_headers, "https://example.com/a.pdf").json()
+    assert again["success"] is True
+    assert again["data"]["pages"][0]["full_text"] == "p0"  # served from the sealed ledger
+    assert len(engine.calls) == 1

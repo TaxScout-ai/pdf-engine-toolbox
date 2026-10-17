@@ -127,9 +127,20 @@ The queue holds client documents (with SSNs) and their OCR text, so:
   bound to its job id, so a file swapped between jobs or altered on disk fails
   authentication, and that job fails instead of reading it.
 - The key is `OCR_QUEUE_KEY`: 32 bytes in URL-safe base64, or any passphrase
-  (HKDF-SHA256). Without it, the key is HKDF-derived from `PDF_ENGINE_SECRET`.
-  Changing the key makes jobs queued under the old key fail with an
-  authentication error, so rotate only with an empty queue.
+  (HKDF-SHA256). **Production and staging set a dedicated `OCR_QUEUE_KEY`.**
+  Without it, the key is HKDF-derived from `PDF_ENGINE_SECRET`. The engine
+  refuses to start when neither is set to a non-default value
+  (`PDF_ENGINE_SECRET=change-me` and no `OCR_QUEUE_KEY`).
+- Changing the key makes data sealed under the old key unreadable:
+  - a queued job fails with an authentication error;
+  - a stored result answers `GET /tasks/{id}` with a `failed` task ("OCR
+    result unreadable"), never HTTP 500.
+
+  Rotate only with an empty queue.
+- OCR results are not written to the plaintext file cache (`CACHE_DIR`). A
+  repeated identical request (same bytes and parameters) is answered from the
+  newest unexpired result in the sealed ledger, so there is one copy under one
+  retention rule.
 - `OCR_QUEUE_DIR` and its subdirectories are mode 0700. Files and the SQLite
   ledger (including `-wal`/`-shm`) are mode 0600.
 - An input is deleted as soon as its job finishes. Every
@@ -192,12 +203,21 @@ through the same OCR workers (same words-and-boxes contract) and never imports
 Paddle. It fails closed in two cases, and the document is refused rather than
 returned with an identifier possibly left readable:
 - a page OCR failed on (status `failed`);
-- a page OCR read no text from (status `empty`) while its image shows ink. An
-  `empty` page is accepted only when it is genuinely blank, for example a
-  blank scan back. Blank means that, rendered at the OCR DPI in grayscale, at
-  most 0.01% of its pixels differ from the page's median gray by more than 32
-  levels. Faint print counts as ink at that threshold. Variance alone is not
-  used, because faint print barely moves it;
+- a page OCR read no text from (status `empty`) that shows text-like marks.
+  An `empty` page is accepted only when it shows none, for example a blank
+  scan back. The check:
+  - renders the page at the OCR DPI in grayscale and compares it with its own
+    local background (a 15-pixel maximum filter);
+  - counts pixels more than 12 levels darker than that background as marks;
+  - treats connected marks as glyph-like when their larger side is 5–150 px
+    and they cover at least 6 px;
+  - calls the page text-like when two glyph-like marks sit next to each other
+    on one line, or when one mark is a merged word.
+
+  At 4–10 pt and grays 0–235, a printed SSN refuses. A blank page passes, as
+  do light sensor noise (sigma 4 on 255) and up to about 200 dust specks.
+  Heavier noise (sigma 6 or more) or very dense dust is refused: that fails
+  closed. Both OCR backends tag pages `failed` and `empty`.
 - an OCR run that exceeds `OCR_SYNC_TIMEOUT_SECONDS`. Table recognition (`/text/tables`) and orientation
 (`/transform/orientation`) keep their Paddle models, which load lazily on the
 first such request; every Paddle inference in the process is serialized by one

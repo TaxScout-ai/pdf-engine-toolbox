@@ -267,23 +267,34 @@ def paddle_ocr_words(pdf_bytes: bytes, pages: list[int]) -> dict[int, list[Word]
     return _words(result, pdf_bytes)
 
 
-# A page OCR returned no text for ("empty") is accepted only when its image is
-# genuinely blank — a blank scan back. Measured on the page rendered at the
-# OCR DPI, in grayscale: a pixel is ink when it differs from the page's
-# background (the median gray level) by more than _INK_CONTRAST levels, and
-# the page is blank when ink covers at most _BLANK_MAX_INK_FRACTION of it.
+# A page OCR returned no text for ("empty") is accepted only when it shows no
+# text-like mark — a blank scan back. The test runs on the page rendered at the
+# OCR DPI in grayscale, normalized to its own local background:
 #
-# The contrast step is low enough to count faint print (light-gray toner at
-# ~80% white still differs by ~50 levels) and high enough to ignore scanner
-# noise and paper tone. 0.01% is ~440 pixels on a Letter page at 216 DPI; one
-# 10-point SSN at that resolution inks well over 1 000. Variance is not used
-# on its own: faint print barely moves it, so it would pass faint text as blank.
-_INK_CONTRAST = 32
-_BLANK_MAX_INK_FRACTION = 0.0001
+# 1. Background = 15x15 grayscale dilation (a local maximum filter), so paper
+#    tone, shading and faint gradients are subtracted, not counted.
+# 2. A pixel is a mark when it is more than _MARK_CONTRAST levels darker than
+#    its local background. 12 levels still catches light-gray print (gray 235
+#    on white is 20 levels darker) and stays above the ~4-level sigma of
+#    ordinary scanner noise.
+# 3. Connected marks are glyph-like when their larger side is 5-150 px and they
+#    cover at least 6 px (one 4-point digit at 216 DPI is ~8 px tall). Single
+#    noise pixels and huge blobs (punch holes, edge shadows) are not glyphs.
+# 4. The page is text-like when two glyph-like marks sit on one line next to
+#    each other (centers within half a glyph height vertically, gap at most
+#    1.5 glyph heights), or when one glyph-like mark is a merged word (at least
+#    2.5x wider than tall). Isolated dust specks are neither.
+#
+# Measured on 216-DPI renders of 200-DPI scans: "123-45-6789" at 4, 6, 8 and 10
+# pt in grays 0-235 all count as text; a blank page, sigma-4 noise and up to
+# 200 random dust specks do not. Sigma-8 noise does (a refusal, never a leak).
+_MARK_CONTRAST = 12
+_GLYPH_MIN_SIDE, _GLYPH_MAX_SIDE, _GLYPH_MIN_AREA = 5, 150, 6
 
 
-def ink_fraction(pdf_bytes: bytes, page_index: int, dpi: float) -> float:
-    """Share of the rendered page's pixels that are ink (see above)."""
+def text_like_marks(pdf_bytes: bytes, page_index: int, dpi: float) -> dict:
+    """Glyph-like marks on the rendered page and whether they look like text."""
+    import cv2
     import numpy as np
 
     from app.services import rapid_ocr
@@ -296,17 +307,38 @@ def ink_fraction(pdf_bytes: bytes, page_index: int, dpi: float) -> float:
                 matrix=fitz.Matrix(zoom, zoom), colorspace=fitz.csGRAY, alpha=False
             )
             gray = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width)
-            gray = gray.astype(np.int16)
-    background = int(np.median(gray))
-    return float(np.count_nonzero(np.abs(gray - background) > _INK_CONTRAST)) / gray.size
+            gray = gray.copy()
+    background = cv2.dilate(gray, np.ones((15, 15), np.uint8))
+    marks = ((background.astype(np.int16) - gray) > _MARK_CONTRAST).astype(np.uint8)
+    count, _, stats, _ = cv2.connectedComponentsWithStats(marks, 8)
+    glyphs = sorted(
+        (tuple(int(v) for v in stats[i][:4]) for i in range(1, count)
+         if _GLYPH_MIN_SIDE <= max(stats[i][2], stats[i][3]) <= _GLYPH_MAX_SIDE
+         and stats[i][4] >= _GLYPH_MIN_AREA),
+    )
+    text_like = any(h >= 3 and w >= 2.5 * h for _, _, w, h in glyphs)
+    for index, (x, y, w, h) in enumerate(glyphs):
+        if text_like:
+            break
+        for nx, ny, nw, nh in glyphs[index + 1:]:
+            height = max(h, nh)
+            gap = nx - (x + w)
+            if gap > 1.5 * _GLYPH_MAX_SIDE:
+                break  # sorted by x: every later mark is farther right
+            if gap > 1.5 * height:
+                continue
+            if abs((y + h / 2) - (ny + nh / 2)) < 0.5 * height:
+                text_like = True
+                break
+    return {"glyphs": len(glyphs), "text_like": text_like}
 
 
 def _words(result: dict, pdf_bytes: bytes) -> dict[int, list[Word]]:
     """Words per page; refuses any page OCR could not be trusted to have read.
 
-    A ``failed`` page always refuses. An ``empty`` page refuses unless its image
-    is blank: zero words from a page with ink is not evidence that it shows no
-    identifier. (Paddle results carry no status and are taken as read.)
+    A ``failed`` page always refuses. An ``empty`` page refuses unless it shows
+    no text-like mark: zero words from a page with print is not evidence that
+    it shows no identifier. Both backends tag pages this way.
     """
     failed = sorted(p["page_index"] for p in result["pages"] if p.get("status") == "failed")
     if failed:
@@ -314,15 +346,15 @@ def _words(result: dict, pdf_bytes: bytes) -> dict[int, list[Word]]:
             f"OCR failed on page(s) {failed}; identifiers there cannot be ruled out"
         )
     dpi = (result.get("provenance") or {}).get("render_dpi") or 216
-    inked = sorted(
+    marked = sorted(
         p["page_index"]
         for p in result["pages"]
         if p.get("status") == "empty"
-        and ink_fraction(pdf_bytes, p["page_index"], dpi) > _BLANK_MAX_INK_FRACTION
+        and text_like_marks(pdf_bytes, p["page_index"], dpi)["text_like"]
     )
-    if inked:
+    if marked:
         raise RedactionIncompleteError(
-            f"page(s) {inked} show ink but OCR read no text; "
+            f"page(s) {marked} show text-like marks but OCR read no text; "
             "identifiers there cannot be ruled out"
         )
     out: dict[int, list[Word]] = {}

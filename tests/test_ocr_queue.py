@@ -371,6 +371,7 @@ import fitz, numpy as np
 from app.config import settings
 settings.ocr_queue_dir = {str(tmp_path / 'queue')!r}
 settings.ocr_workers = 2
+settings.ocr_queue_key = "test-only ocr queue key"
 from app.services import identifier_redaction as ir, rapid_ocr, ocr_queue
 poly = np.array([[30, 60], [330, 60], [330, 120], [30, 120]], dtype=float)
 rapid_ocr._get_engine = lambda: (lambda image, **_: SimpleNamespace(

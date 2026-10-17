@@ -192,7 +192,11 @@ async def ocr_pages(request: OcrRequest):
         "dpi": request.dpi,
         **cache_profile(backend),
     }
-    cached = cache_service.get_cached(src_hash, "ocr", cache_params)
+    # Deduplicated from the queue's sealed ledger, never the plaintext file
+    # cache: OCR results carry client text and the searchable PDF.
+    cached = await run_in_threadpool(
+        ocr_queue.get_queue().cached_result, src_hash, cache_params
+    )
     if cached and isinstance(cached, dict):
         return OcrResponse(
             success=True,

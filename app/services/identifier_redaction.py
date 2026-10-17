@@ -267,33 +267,63 @@ def paddle_ocr_words(pdf_bytes: bytes, pages: list[int]) -> dict[int, list[Word]
     return _words(result, pdf_bytes)
 
 
-# A page OCR returned no text for ("empty") is accepted only when it shows no
-# text-like mark — a blank scan back. The test runs on the page rendered at the
-# OCR DPI in grayscale, normalized to its own local background:
+# A page OCR returned no text for ("empty") is accepted only when every test
+# below agrees it is blank — a blank scan back. A false refusal costs a manual
+# review; a false pass leaks an identifier, so any single test refuses.
 #
-# 1. Background = 15x15 grayscale dilation (a local maximum filter), so paper
-#    tone, shading and faint gradients are subtracted, not counted.
-# 2. A pixel is a mark when it is more than _MARK_CONTRAST levels darker than
-#    its local background. 12 levels still catches light-gray print (gray 235
-#    on white is 20 levels darker) and stays above the ~4-level sigma of
-#    ordinary scanner noise.
-# 3. Connected marks are glyph-like when their larger side is 5-150 px and they
-#    cover at least 6 px (one 4-point digit at 216 DPI is ~8 px tall). Single
-#    noise pixels and huge blobs (punch holes, edge shadows) are not glyphs.
-# 4. The page is text-like when two glyph-like marks sit on one line next to
-#    each other (centers within half a glyph height vertically, gap at most
-#    1.5 glyph heights), or when one glyph-like mark is a merged word (at least
-#    2.5x wider than tall). Isolated dust specks are neither.
+# All tests run on the page rendered at the OCR DPI in grayscale, against its
+# own local background (a 15x15 maximum filter), so paper tone and shading are
+# subtracted. A pixel is a mark when it is more than _MARK_CONTRAST levels
+# darker than that background: 12 levels still catches light-gray print (gray
+# 235 on white) and stays above ordinary sensor noise. Connected marks are
+# components; components with a side of at least 5 px and 6 px of area count.
+# A *speck* is a small compact component (both sides <= 10 px, area <= 80) —
+# dust or a noise cluster.
 #
-# Measured on 216-DPI renders of 200-DPI scans: "123-45-6789" at 4, 6, 8 and 10
-# pt in grays 0-235 all count as text; a blank page, sigma-4 noise and up to
-# 200 random dust specks do not. Sigma-8 noise does (a refusal, never a leak).
+# (a) Text layout. Any component that is a merged word or line (at least 2.5x
+#     longer than wide, either orientation, no size cap: blur merges a whole
+#     SSN into one wide blob); or two glyph-sized components (side 5-150 px)
+#     next to each other on one line, horizontally or vertically (rotated
+#     text): centers within half a glyph across the line, gap at most 1.5
+#     glyph sizes along it.
+# (b) Ink. Mark pixels outside specks cover more than _MAX_INK_FRACTION
+#     (0.01%, ~440 px on a Letter page at 216 DPI) of the page.
+# (c) Shape. Any component bigger than a speck is elongated (aspect >= 2.5 in
+#     either orientation) — covered by (a)'s merged-word rule, kept explicit.
+#
+# Measured on 216-DPI renders of 200-DPI scans: "123-45-6789" at 4-10 pt in
+# grays 0-235, blurred (sigma 1-3), and rotated 90/270 degrees all refuse; a
+# blank page, sigma-4 noise and 50 dust specks pass. Denser dust and heavier
+# noise refuse (see tests/test_ocr_queue_hardening.py).
 _MARK_CONTRAST = 12
-_GLYPH_MIN_SIDE, _GLYPH_MAX_SIDE, _GLYPH_MIN_AREA = 5, 150, 6
+_MIN_SIDE, _MIN_AREA = 5, 6
+_GLYPH_MAX_SIDE = 150
+_SPECK_MAX_SIDE, _SPECK_MAX_AREA = 10, 80
+_ELONGATED = 2.5
+_MAX_INK_FRACTION = 0.0001
+
+
+def _aligned_pair(glyphs, along: int) -> bool:
+    """Two glyphs side by side on one line; along=0 horizontal, 1 vertical."""
+    across = 1 - along
+    ordered = sorted(glyphs, key=lambda g: g[along])
+    for index, first in enumerate(ordered):
+        for second in ordered[index + 1:]:
+            gap = second[along] - (first[along] + first[2 + along])
+            if gap > 1.5 * _GLYPH_MAX_SIDE:
+                break  # sorted along the line: every later glyph is farther
+            size = max(first[2 + across], second[2 + across])
+            if gap > 1.5 * size:
+                continue
+            first_center = first[across] + first[2 + across] / 2
+            second_center = second[across] + second[2 + across] / 2
+            if abs(first_center - second_center) < 0.5 * size:
+                return True
+    return False
 
 
 def text_like_marks(pdf_bytes: bytes, page_index: int, dpi: float) -> dict:
-    """Glyph-like marks on the rendered page and whether they look like text."""
+    """Run the blank-page tests; ``text_like`` is True when any of them refuses."""
     import cv2
     import numpy as np
 
@@ -311,26 +341,35 @@ def text_like_marks(pdf_bytes: bytes, page_index: int, dpi: float) -> dict:
     background = cv2.dilate(gray, np.ones((15, 15), np.uint8))
     marks = ((background.astype(np.int16) - gray) > _MARK_CONTRAST).astype(np.uint8)
     count, _, stats, _ = cv2.connectedComponentsWithStats(marks, 8)
-    glyphs = sorted(
-        (tuple(int(v) for v in stats[i][:4]) for i in range(1, count)
-         if _GLYPH_MIN_SIDE <= max(stats[i][2], stats[i][3]) <= _GLYPH_MAX_SIDE
-         and stats[i][4] >= _GLYPH_MIN_AREA),
-    )
-    text_like = any(h >= 3 and w >= 2.5 * h for _, _, w, h in glyphs)
-    for index, (x, y, w, h) in enumerate(glyphs):
-        if text_like:
-            break
-        for nx, ny, nw, nh in glyphs[index + 1:]:
-            height = max(h, nh)
-            gap = nx - (x + w)
-            if gap > 1.5 * _GLYPH_MAX_SIDE:
-                break  # sorted by x: every later mark is farther right
-            if gap > 1.5 * height:
-                continue
-            if abs((y + h / 2) - (ny + nh / 2)) < 0.5 * height:
-                text_like = True
-                break
-    return {"glyphs": len(glyphs), "text_like": text_like}
+    components = [
+        tuple(int(v) for v in stats[i][:5]) for i in range(1, count)
+        if max(stats[i][2], stats[i][3]) >= _MIN_SIDE and stats[i][4] >= _MIN_AREA
+    ]
+
+    def speck(c):
+        return max(c[2], c[3]) <= _SPECK_MAX_SIDE and c[4] <= _SPECK_MAX_AREA
+
+    def elongated(c):
+        w, h = c[2], c[3]
+        return (h >= 3 and w >= _ELONGATED * h) or (w >= 3 and h >= _ELONGATED * w)
+
+    glyphs = [c for c in components if max(c[2], c[3]) <= _GLYPH_MAX_SIDE]
+    reasons = []
+    if any(elongated(c) for c in components):
+        reasons.append("merged_word")
+    if _aligned_pair(glyphs, 0) or _aligned_pair(glyphs, 1):
+        reasons.append("aligned_glyphs")
+    ink = sum(c[4] for c in components if not speck(c)) / marks.size
+    if ink > _MAX_INK_FRACTION:
+        reasons.append("ink")
+    if any(not speck(c) and elongated(c) for c in components):
+        reasons.append("elongated_mark")
+    return {
+        "glyphs": len(glyphs),
+        "ink_fraction": ink,
+        "reasons": reasons,
+        "text_like": bool(reasons),
+    }
 
 
 def _words(result: dict, pdf_bytes: bytes) -> dict[int, list[Word]]:

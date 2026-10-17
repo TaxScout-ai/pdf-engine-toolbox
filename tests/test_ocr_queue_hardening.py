@@ -380,6 +380,44 @@ def test_redaction_refuses_any_printed_ssn_ocr_missed(monkeypatch, size, gray):
         ir.redact_identifiers(page)
 
 
+def _blurred_ssn_pdf(size: int, gray: int, sigma: float) -> bytes:
+    """A soft scan: the printed SSN Gaussian-blurred until glyphs merge."""
+    import cv2
+    import numpy as np
+
+    level = gray / 255
+    with fitz.open() as source:
+        page = source.new_page(width=612, height=792)
+        page.insert_text((72, 120), "123-45-6789", fontsize=size, color=(level, level, level))
+        pix = page.get_pixmap(dpi=200, colorspace=fitz.csGRAY)
+        image = np.frombuffer(pix.samples, np.uint8).reshape(pix.height, pix.width)
+    image = cv2.GaussianBlur(image, (0, 0), sigma)
+    with fitz.open() as doc:
+        out = doc.new_page(width=612, height=792)
+        out.insert_image(out.rect, stream=cv2.imencode(".png", image)[1].tobytes())
+        return doc.tobytes()
+
+
+@pytest.mark.parametrize("sigma", [1, 2, 3])
+@pytest.mark.parametrize("gray", [0, 200])
+@pytest.mark.parametrize("size", [10, 12])
+def test_redaction_refuses_a_blurred_ssn_ocr_missed(monkeypatch, size, gray, sigma):
+    monkeypatch.setattr(rapid_ocr, "_get_engine", lambda: _empty_engine)
+    with pytest.raises(ir.RedactionIncompleteError, match="text-like marks"):
+        ir.redact_identifiers(_blurred_ssn_pdf(size, gray, sigma))
+
+
+@pytest.mark.parametrize("rotate", [90, 270])
+@pytest.mark.parametrize("size", [6, 10])
+def test_redaction_refuses_a_rotated_ssn_ocr_missed(monkeypatch, size, rotate):
+    monkeypatch.setattr(rapid_ocr, "_get_engine", lambda: _empty_engine)
+    page = _image_only_pdf(
+        lambda p: p.insert_text((300, 200), "123-45-6789", fontsize=size, rotate=rotate)
+    )
+    with pytest.raises(ir.RedactionIncompleteError, match="text-like marks"):
+        ir.redact_identifiers(page)
+
+
 def test_dusty_and_noisy_scan_false_refusal_profile():
     """Documents where a blank back is refused (fails closed, never leaks).
 
@@ -391,6 +429,7 @@ def test_dusty_and_noisy_scan_false_refusal_profile():
         for sigma, specks in [(4, 0), (4, 50), (4, 200), (8, 0)]
     }
     assert profile[(4, 0)] is False and profile[(4, 50)] is False
+    assert profile[(4, 200)] is False
     assert profile[(8, 0)] is True
 
 

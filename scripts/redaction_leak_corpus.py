@@ -35,7 +35,6 @@ import re
 import sys
 import tempfile
 import threading
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
@@ -322,8 +321,12 @@ def _garble(text: str, rng: random.Random) -> str:
     return "".join(chars)
 
 
+GARBLE = threading.Event()  # set while the confusion engine is in use
+
+
 def confusion_engine(real_get_engine, seed: int = 6876):
-    """Wraps the real engine: every digit-bearing reading loses 1-2 characters."""
+    """Wraps the real engine: while GARBLE is set, every digit-bearing reading
+    loses 1-2 characters to confusable letters."""
     rng = random.Random(seed)
     lock = threading.Lock()
 
@@ -332,6 +335,8 @@ def confusion_engine(real_get_engine, seed: int = 6876):
 
         def call(image, **kwargs):
             prediction = engine(image, **kwargs)
+            if not GARBLE.is_set():
+                return prediction
             with lock:
                 txts = tuple(_garble(t, rng) for t in (prediction.txts or ()))
                 groups = [
@@ -377,47 +382,53 @@ def _reads_prefix(pdf: bytes, identifiers: list[str]) -> list[str]:
     return [d for d in identifiers if any(d[:5] in x for x in digits)]
 
 
-def run(cases: list[Case], engine: str, workers: int = 4) -> list[dict]:
+def run(cases: list[Case], engine: str, journal: Path | None = None) -> list[dict]:
+    """Redact and judge each case in turn; outcomes are appended to `journal`
+    (JSON lines) as they finish, and cases already in it are skipped, so an
+    interrupted run resumes."""
     from app.services import identifier_redaction as ir
-    from app.services import rapid_ocr
 
-    real = rapid_ocr._get_engine
-    if engine == "confusions":
-        rapid_ocr._get_engine = confusion_engine(real)
-    outcomes: list[dict] = []
-    try:
-        def redact(case: Case) -> dict:
-            try:
-                result = ir.redact_identifiers(case.pdf)
-            except ir.RedactionIncompleteError as exc:
-                return {"case": case.name, "engine": engine, "outcome": "refused",
-                        "reason": str(exc)[:160]}
-            return {"case": case.name, "engine": engine, "outcome": "redacted",
-                    "pdf": result["pdf_bytes"], "redactions": len(result["redactions"])}
-
-        with ThreadPoolExecutor(workers) as pool:
-            outcomes = list(pool.map(redact, cases))
-    finally:
-        rapid_ocr._get_engine = real
-    # Judge with the plain engine only.
-    by_name = {case.name: case for case in cases}
-    for outcome in outcomes:
-        pdf = outcome.pop("pdf", None)
-        if pdf is None:
+    done = {}
+    if journal and journal.exists():
+        for line in journal.read_text().splitlines():
+            record = json.loads(line)
+            done[(record["engine"], record["case"])] = record
+    outcomes = []
+    for case in cases:
+        if (engine, case.name) in done:
+            outcomes.append(done[(engine, case.name)])
             continue
-        case = by_name[outcome["case"]]
-        uncovered = sum(not _covered(pdf, rect) for rect in case.prefix_boxes)
-        legible = _reads_prefix(pdf, case.identifiers) if case.identifiers else []
-        outcome["uncovered_prefix_chars"] = uncovered
-        outcome["legible_identifiers"] = len(legible)
-        outcome["leak"] = bool(case.identifiers) and (uncovered > 0 or bool(legible))
+        if engine == "confusions":
+            GARBLE.set()
+        try:
+            result = ir.redact_identifiers(case.pdf)
+            outcome = {"case": case.name, "engine": engine, "outcome": "redacted",
+                       "redactions": len(result["redactions"])}
+        except ir.RedactionIncompleteError as exc:
+            result = None
+            outcome = {"case": case.name, "engine": engine, "outcome": "refused",
+                       "reason": str(exc)[:160]}
+        finally:
+            GARBLE.clear()
+        if result is not None:
+            # Judged with the plain engine only.
+            pdf = result["pdf_bytes"]
+            uncovered = sum(not _covered(pdf, rect) for rect in case.prefix_boxes)
+            legible = _reads_prefix(pdf, case.identifiers) if case.identifiers else []
+            outcome["uncovered_prefix_chars"] = uncovered
+            outcome["legible_identifiers"] = len(legible)
+            outcome["leak"] = bool(case.identifiers) and (uncovered > 0 or bool(legible))
+        outcomes.append(outcome)
+        if journal:
+            with open(journal, "a") as handle:
+                handle.write(json.dumps(outcome) + "\n")
     return outcomes
 
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--report", type=Path, required=True)
-    parser.add_argument("--workers", type=int, default=4)
+    parser.add_argument("--workers", type=int, default=2)
     parser.add_argument("--only", help="regex over case names")
     args = parser.parse_args(argv)
 
@@ -432,8 +443,12 @@ def main(argv=None) -> int:
     if args.only:
         cases = [c for c in cases if re.search(args.only, c.name)]
         clean = [c for c in clean if re.search(args.only, c.name)]
-    results = run(cases, "rapid", args.workers) + run(cases, "confusions", args.workers)
-    clean_results = run(clean, "rapid", args.workers)
+    from app.services import rapid_ocr
+
+    rapid_ocr._get_engine = confusion_engine(rapid_ocr._get_engine)
+    journal = args.report.with_suffix(".jsonl")
+    results = run(cases, "rapid", journal) + run(cases, "confusions", journal)
+    clean_results = run(clean, "rapid", journal)
     leaks = [r for r in results if r.get("leak")]
     summary = {
         "identifier_pages": len(results),

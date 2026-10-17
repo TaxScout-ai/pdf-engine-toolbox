@@ -88,6 +88,9 @@ _CONFUSIONS = str.maketrans({
     "B": "8", "Z": "2", "G": "6", "q": "9",
 })
 _CONFUSABLE = set("Il|OoDSsBZGq")
+# Letters that stand for digits on their own beside a number ("D" is left out:
+# "ID 12-3456789" must keep its EIN).
+_STANDALONE = set("Il|OoSsBZGq")
 # Number shapes that are not identifiers; masked before digit runs are read.
 _NOT_IDENTIFIER = re.compile(
     r"\$?\d{1,3}(?:,\d{3})+(?:\.\d{2})?(?!\d)"   # 1,234 / 75,250.00
@@ -112,8 +115,9 @@ def normalize_confusions(text: str) -> str:
     Character-for-character, so positions are kept. A token (between spaces)
     is numeric when it holds a digit and digits plus confusable letters make up
     at least half of its letters and digits ("I23-45-678S" -> "123-45-6785"),
-    or when it is a single confusable letter next to a numeric token (a comb
-    field read box by box as "B 0 Z 9"). "ID", "SSN" and "Box" stay words.
+    or when it is one to three confusable letters next to a numeric token (a
+    comb field read box by box as "B 0 Z 9", a group read as "ZG").
+    "ID", "SSN" and "Box" stay words.
     """
     parts = re.split(r"(\s+)", text)
     tokens = list(range(0, len(parts), 2))  # even indexes are tokens
@@ -128,7 +132,8 @@ def normalize_confusions(text: str) -> str:
     while changed:
         changed = False
         for n, i in enumerate(tokens):
-            if is_numeric[i] or len(parts[i]) != 1 or parts[i] not in _CONFUSABLE:
+            token = parts[i]
+            if is_numeric[i] or not 1 <= len(token) <= 3 or not set(token) <= _STANDALONE:
                 continue
             neighbours = [tokens[m] for m in (n - 1, n + 1) if 0 <= m < len(tokens)]
             if any(is_numeric[j] for j in neighbours):

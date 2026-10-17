@@ -1053,7 +1053,10 @@ def _explicit_ocr(scan_words, replace):
     return ocr
 
 
-@pytest.mark.parametrize("reading", ["I23-45-678S", "l23 45  67B9", "123-4S-6789"])
+@pytest.mark.parametrize(
+    "reading",
+    ["I23-45-678S", "l23 45  67B9", "123-4S-6789", "I23 ZS 67B q", "1Z3 .... 45 ……. 6789"],
+)
 def test_a_confusion_garbled_ssn_is_redacted(reading):
     scan, words = _scan_with(lambda p: p.insert_text((72, 160), "123-45-6789", fontsize=11))
     result = ir.redact_identifiers(scan, ocr=_explicit_ocr(words, {"123-45-6789": reading}))

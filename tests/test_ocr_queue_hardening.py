@@ -770,3 +770,194 @@ def test_sealed_data_is_bound_to_its_job(client, auth_headers, documents, monkey
     task_d = get_task(client, auth_headers, d).json()["data"]
     assert task_d["status"] == "failed"
     assert "authentication" in task_d["error"]
+
+
+# submit-path input validation ---------------------------------------------
+
+
+def _zero_page_pdf() -> bytes:
+    return (
+        b"%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n"
+        b"2 0 obj<</Type/Pages/Kids[]/Count 0>>endobj\n"
+        b"trailer<</Root 1 0 R>>\n%%EOF\n"
+    )
+
+
+def _password_pdf() -> bytes:
+    with fitz.open() as doc:
+        doc.new_page()
+        return doc.tobytes(encryption=fitz.PDF_ENCRYPT_AES_256, user_pw="secret",
+                           owner_pw="owner")
+
+
+@pytest.mark.parametrize(
+    "name, data, code",
+    [
+        ("corrupt", b"%PDF-1.7\nthis is not a pdf at all", "INVALID_PDF"),
+        ("password", None, "INVALID_PDF"),
+        ("zero pages", None, "INVALID_PDF"),
+    ],
+)
+def test_unreadable_ocr_input_is_a_422_not_a_500(
+    client, auth_headers, documents, monkeypatch, name, data, code
+):
+    data = {"password": _password_pdf, "zero pages": _zero_page_pdf}.get(name, lambda: data)()
+    documents["https://example.com/bad.pdf"] = data
+    response = submit(client, auth_headers, "https://example.com/bad.pdf")
+    assert response.status_code == 422, response.text
+    body = response.json()
+    assert body["success"] is False
+    assert body["error"]["code"] == code
+    assert body["error"]["message"]
+    inputs = Path(settings.ocr_queue_dir) / "inputs"
+    assert not inputs.exists() or not list(inputs.iterdir())  # nothing was queued
+
+
+def test_a_healthy_pdf_is_still_queued_after_validation(
+    client, auth_headers, documents, monkeypatch
+):
+    monkeypatch.setattr(rapid_ocr, "_get_engine", lambda: FakeEngine(delay=0))
+    documents["https://example.com/ok.pdf"] = scanned(2, "ok")
+    response = submit(client, auth_headers, "https://example.com/ok.pdf")
+    assert response.status_code == 200
+    accepted = response.json()
+    assert accepted["status"] == "pending" and "2 pages" in accepted["message"]
+    task = poll(client, auth_headers, accepted["task_id"], timeout=10)["data"]
+    assert task["status"] == "completed"
+
+
+# (b) + (c): identifier-shaped unread print, low-confidence words, lines ----
+
+
+def _scan_with(draw):
+    """An image-only page plus its source words; corner dots prevent cropping."""
+    with fitz.open() as source:
+        page = source.new_page(width=612, height=792)
+        draw(page)
+        for x, y in [(2, 2), (608, 2), (2, 788), (608, 788)]:
+            page.draw_rect(fitz.Rect(x, y, x + 1, y + 1), color=(0.5, 0.5, 0.5), width=0.3)
+        words = [(w[4], fitz.Rect(w[:4])) for w in page.get_text("words")]
+        png = page.get_pixmap(dpi=200).tobytes("png")
+    with fitz.open() as doc:
+        out = doc.new_page(width=612, height=792)
+        out.insert_image(out.rect, stream=png)
+        return doc.tobytes(), words
+
+
+def _engine(lines):
+    """Fake RapidOCR: lines = [(line text, line rect, [(word, rect, score)])]."""
+    from types import SimpleNamespace
+
+    import numpy as np
+
+    def poly(rect):
+        return np.array([[rect.x0, rect.y0], [rect.x1, rect.y0],
+                         [rect.x1, rect.y1], [rect.x0, rect.y1]], dtype=float) * 3
+
+    def engine(image, **_):
+        if not lines:
+            return SimpleNamespace(txts=None, boxes=None, word_results=[[[], [], []]])
+        return SimpleNamespace(
+            txts=tuple(text for text, _, _ in lines),
+            boxes=np.array([poly(rect) for _, rect, _ in lines]),
+            word_results=[[(w, s, poly(r)) for w, r, s in ws] for _, _, ws in lines],
+        )
+
+    return engine
+
+
+def test_a_low_confidence_ssn_is_redacted(monkeypatch):
+    scan, words = _scan_with(lambda p: p.insert_text((72, 160), "SSN 123-45-6789", fontsize=11))
+    (_, label), (_, ssn) = words
+    line = label | ssn
+    reads = []
+
+    def engine(image, **kwargs):
+        reads.append(1)
+        text = "123-45-6789" if len(reads) == 1 else "XXX-XX-6789"
+        return _engine([(f"SSN {text}", line, [("SSN", label, 0.9), (text, ssn, 0.31)])])(
+            image, **kwargs)
+
+    monkeypatch.setattr(rapid_ocr, "_get_engine", lambda: engine)
+    result = ir.redact_identifiers(scan)
+    assert result["redactions"] == [{"page": 0, "kind": "ssn", "last4": "6789", "source": "ocr"}]
+
+
+def test_low_confidence_words_and_lines_stay_out_of_the_ocr_response(monkeypatch):
+    scan, words = _scan_with(lambda p: p.insert_text((72, 160), "SSN 123-45-6789", fontsize=11))
+    (_, label), (_, ssn) = words
+    monkeypatch.setattr(rapid_ocr, "_get_engine", lambda: _engine(
+        [("SSN 123-45-6789", label | ssn, [("SSN", label, 0.9), ("123-45-6789", ssn, 0.31)])]))
+    page = rapid_ocr.ocr_pages(scan)["pages"][0]
+    assert [w["text"] for w in page["words"]] == ["SSN"]
+    assert page["discarded_words"] == 1
+    assert not any(key.startswith("_") for key in page)
+
+
+def test_an_ssn_read_only_as_a_line_is_redacted(monkeypatch):
+    """RapidOCR read the line but split it into fragments: the line text is searched."""
+    scan, words = _scan_with(lambda p: p.insert_text((72, 160), "SSN 123-45-6789", fontsize=11))
+    (_, label), (_, ssn) = words
+    line = label | ssn
+    reads = []
+
+    def engine(image, **kwargs):
+        reads.append(1)
+        text = "SSN 123-45-6789" if len(reads) == 1 else "SSN XXX-XX-6789"
+        fragment = fitz.Rect(ssn.x0, ssn.y0, ssn.x0 + 6, ssn.y1)
+        return _engine([(text, line, [("S", fragment, 0.9)])])(image, **kwargs)
+
+    monkeypatch.setattr(rapid_ocr, "_get_engine", lambda: engine)
+    result = ir.redact_identifiers(scan)
+    assert result["redactions"] == [{"page": 0, "kind": "ssn", "last4": "6789", "source": "ocr"}]
+
+
+def test_a_logo_and_a_shaded_box_do_not_refuse(monkeypatch):
+    def draw(page):
+        page.insert_text((72, 100), "Form 1099-INT", fontsize=12)
+        page.draw_circle((480, 100), 30, color=(0.1, 0.2, 0.6), fill=(0.1, 0.2, 0.6))
+        page.draw_polyline([(440, 160), (520, 160), (480, 120), (440, 160)],
+                           color=(0.6, 0.1, 0.1), fill=(0.6, 0.1, 0.1))
+        page.draw_rect(fitz.Rect(72, 300, 400, 340), color=(0.85, 0.85, 0.85),
+                       fill=(0.85, 0.85, 0.85))
+
+    scan, words = _scan_with(draw)
+    line = words[0][1] | words[1][1]
+    monkeypatch.setattr(rapid_ocr, "_get_engine", lambda: _engine(
+        [("Form 1099-INT", line, [(w, r, 0.95) for w, r in words])]))
+    result = ir.redact_identifiers(scan)
+    assert result["redactions"] == []
+
+
+def test_unread_nine_digit_print_refuses(monkeypatch):
+    def draw(page):
+        page.insert_text((72, 100), "Form W-2", fontsize=12)
+        page.insert_text((72, 200), "123456789", fontsize=10)
+
+    scan, words = _scan_with(draw)
+    title = [(w, r) for w, r in words if w in ("Form", "W-2")]
+    line = title[0][1] | title[1][1]
+    monkeypatch.setattr(rapid_ocr, "_get_engine", lambda: _engine(
+        [("Form W-2", line, [(w, r, 0.95) for w, r in title])]))
+    with pytest.raises(ir.RedactionIncompleteError, match="contain text OCR did not read"):
+        ir.redact_identifiers(scan)
+
+
+def test_an_unread_three_glyph_mark_does_not_refuse(monkeypatch):
+    def draw(page):
+        page.insert_text((72, 100), "Form W-2", fontsize=12)
+        page.insert_text((300, 400), "A1B", fontsize=10)
+
+    scan, words = _scan_with(draw)
+    title = [(w, r) for w, r in words if w in ("Form", "W-2")]
+    line = title[0][1] | title[1][1]
+    monkeypatch.setattr(rapid_ocr, "_get_engine", lambda: _engine(
+        [("Form W-2", line, [(w, r, 0.95) for w, r in title])]))
+    assert ir.redact_identifiers(scan)["redactions"] == []
+
+
+def test_rapid_provenance_is_no_longer_experimental(monkeypatch):
+    monkeypatch.setattr(rapid_ocr, "_get_engine", lambda: FakeEngine(delay=0))
+    provenance = rapid_ocr.ocr_pages(scanned(1))["provenance"]
+    assert provenance["experimental"] is False
+    assert provenance["profile"] == rapid_ocr.PROFILE

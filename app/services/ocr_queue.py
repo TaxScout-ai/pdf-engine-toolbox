@@ -630,14 +630,16 @@ class OcrQueue:
         return job_id
 
     def run_rapid(self, pdf_bytes: bytes, pages=None, language="en", dpi=300,
-                  force_ocr=False, with_pdf=True, timeout: float | None = None) -> dict:
+                  force_ocr=False, with_pdf=True, timeout: float | None = None,
+                  low_confidence=False) -> dict:
         """OCR in memory through the shared workers and wait for the result.
 
         Fails closed with ``OcrTimeoutError`` after ``timeout`` seconds
         (OCR_SYNC_TIMEOUT_SECONDS): a hung inference must not hang the caller.
         """
         targets, dpi = rapid_ocr.plan(pdf_bytes, pages, language, dpi)
-        params = {"dpi": dpi, "force_ocr": force_ocr, "with_pdf": with_pdf}
+        params = {"dpi": dpi, "force_ocr": force_ocr, "with_pdf": with_pdf,
+                  "low_confidence": low_confidence}
         job = _Job(operation="rapid_ocr", backend="rapid", params=params, source=pdf_bytes,
                    persistent=False, targets=targets, page_count=len(targets))
         if getattr(_worker, "active", False):
@@ -848,6 +850,7 @@ class OcrQueue:
             return rapid_ocr.assemble(
                 self._job_bytes(job), [job.done[unit] for unit in job.targets],
                 job.params["dpi"], with_pdf=job.params.get("with_pdf", True),
+                low_confidence=job.params.get("low_confidence", False),
             )
         return job.done[_WHOLE_DOCUMENT]
 

@@ -134,7 +134,7 @@ def _word(text, score, polygon, pix, page):
     score = float(score)
     if points.shape != (4, 2) or not np.isfinite(points).all() or not math.isfinite(score):
         raise ValueError("RapidOCR returned invalid geometry or confidence")
-    if not text.strip() or score < 0.5:
+    if not text.strip():
         return None
     # Pixel dimensions can round up on fractional PDF page sizes. Scale each
     # axis by its actual render size and clip tiny model overshoots for display.
@@ -143,7 +143,7 @@ def _word(text, score, polygon, pix, page):
     low, high = points.min(axis=0), points.max(axis=0)
     if np.any(high <= low):
         raise ValueError("RapidOCR returned a degenerate word box")
-    return {
+    word = {
         "text": text.strip(),
         "confidence": round(score, 4),
         "bbox": {
@@ -155,6 +155,11 @@ def _word(text, score, polygon, pix, page):
         "polygon": points.tolist(),
         "geometry_kind": "ctc_word_estimate",
     }
+    if score < 0.5:
+        # Below the review threshold: kept out of the response, but identifier
+        # redaction still searches it and counts it as read print.
+        word["low_confidence"] = True
+    return word
 
 
 class _Size:
@@ -294,7 +299,7 @@ def _recognize(page, index, rgb, pix, existing, quality):
         return _page_result(page, index, status="empty", warnings=["no_text_detected"],
                             text_source="rapidocr", text_layer_quality=quality,
                             preprocessing=preprocessing)
-    words, warnings, discarded = [], set(), 0
+    words, low_confidence, warnings, discarded = [], [], set(), 0
     groups = prediction.word_results or []
     if len(groups) != len(texts) or any(not group for group in groups):
         warnings.add("word_geometry_missing")
@@ -310,13 +315,36 @@ def _recognize(page, index, rgb, pix, existing, quality):
                 discarded += 1
                 warnings.add("invalid_word_geometry")
                 continue
-            if word is None:
+            if word is None or word.get("low_confidence"):
                 discarded += 1
                 warnings.add("unusable_word")
+                if word is not None:
+                    low_confidence.append(word)
                 continue
             words.append(word)
     if not words:
         warnings.add("word_geometry_missing")
+    # Recognized lines in visual points, whatever their word geometry: RapidOCR
+    # sometimes reads a line but splits it into a few fragment "words".
+    # Identifier redaction searches these and counts them as read print; they
+    # never reach the OCR response.
+    lines = []
+    for text, polygon in zip(texts, prediction.boxes if prediction.boxes is not None else []):
+        try:
+            points = np.asarray(map_polygon(polygon, inverse), dtype=float)
+            if points.shape != (4, 2) or not np.isfinite(points).all():
+                continue
+            points[:, 0] = np.clip(points[:, 0] / pix.width, 0, 1) * page.rect.width
+            points[:, 1] = np.clip(points[:, 1] / pix.height, 0, 1) * page.rect.height
+            low, high = points.min(axis=0), points.max(axis=0)
+            if text.strip() and np.all(high > low):
+                lines.append({
+                    "text": text.strip(),
+                    "bbox": {"x": float(low[0]), "y": float(low[1]),
+                             "w": float(high[0] - low[0]), "h": float(high[1] - low[1])},
+                })
+        except (ValueError, TypeError):
+            continue
     # A defective searchable line cannot erase otherwise usable word evidence.
     search_layer = []
     if not existing and not preprocessing["rotation_ccw"]:
@@ -338,7 +366,8 @@ def _recognize(page, index, rgb, pix, existing, quality):
                         text_source="rapidocr", text_layer_quality=quality,
                         preprocessing=preprocessing, discarded_words=discarded,
                         status="partial" if warnings else "complete", warnings=sorted(warnings),
-                        _search_layer=search_layer)
+                        _search_layer=search_layer, _low_confidence_words=low_confidence,
+                        _lines=lines)
 
 
 def _write_search_layer(page, result):
@@ -355,9 +384,18 @@ def _write_search_layer(page, result):
             result["status"] = "partial"
 
 
-def assemble(source, results, dpi, with_pdf=True) -> dict:
-    """Combine page results (in request order) into the response document."""
+def assemble(source, results, dpi, with_pdf=True, low_confidence=False) -> dict:
+    """Combine page results (in request order) into the response document.
+
+    ``low_confidence`` keeps each page's ``_low_confidence_words`` (words below
+    the 0.5 review threshold) and ``_lines`` (recognized lines) for identifier
+    redaction; the OCR response the app consumes never carries them.
+    """
     results = [dict(r) for r in results]
+    for result in results:
+        if not low_confidence:
+            result.pop("_low_confidence_words", None)
+            result.pop("_lines", None)
     pdf_bytes = None
     with FITZ_LOCK:
         with open_source(source) as doc:
@@ -383,7 +421,9 @@ def assemble(source, results, dpi, with_pdf=True) -> dict:
         "pdf_bytes": pdf_bytes,
         "provenance": {
             "profile": PROFILE, "packages": PACKAGES, "model_sha256": MODEL_HASHES,
-            "experimental": True, "searchable_output_verified": False,
+            # RapidOCR is the planned production engine (TAX-6876); the field
+            # stays, now false, so readers of the old shape keep working.
+            "experimental": False, "searchable_output_verified": False,
             "coordinate_space": "visual_pdf_points", "render_dpi": dpi,
             "geometry": "ctc_word_estimate", "intra_op_threads": threads, "inter_op_threads": 1,
             "ocr_workers": worker_count(),
@@ -391,7 +431,8 @@ def assemble(source, results, dpi, with_pdf=True) -> dict:
     }
 
 
-def ocr_pages(pdf_bytes, pages=None, language="en", dpi=300, force_ocr=False, with_pdf=True):
+def ocr_pages(pdf_bytes, pages=None, language="en", dpi=300, force_ocr=False, with_pdf=True,
+              low_confidence=False):
     """OCR a document through the shared worker pool and wait for it.
 
     Pages are spread over the OCR workers and share them fairly with queued
@@ -403,7 +444,8 @@ def ocr_pages(pdf_bytes, pages=None, language="en", dpi=300, force_ocr=False, wi
     started = time.monotonic()
     try:
         return ocr_queue.get_queue().run_rapid(
-            pdf_bytes, pages, language, dpi, force_ocr=force_ocr, with_pdf=with_pdf
+            pdf_bytes, pages, language, dpi, force_ocr=force_ocr, with_pdf=with_pdf,
+            low_confidence=low_confidence,
         )
     finally:
         log.info(

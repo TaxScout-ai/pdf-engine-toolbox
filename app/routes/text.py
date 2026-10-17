@@ -167,6 +167,48 @@ def _build_ocr_response(result: dict, elapsed_ms: float) -> OcrResponse:
     )
 
 
+class _UnreadableInputError(Exception):
+    def __init__(self, code: str, reason: str):
+        super().__init__(reason)
+        self.code, self.reason = code, reason
+
+
+def _readable_page_count(data: bytes) -> int:
+    """Page count of an OCR input, or _UnreadableInputError saying why it cannot be read.
+
+    INVALID_PDF: the bytes do not open, are password-protected, or hold no
+    page. UNSUPPORTED_INPUT: not a PDF and not an image that converts to one.
+    """
+    import fitz
+
+    from app.services.rapid_ocr import FITZ_LOCK
+
+    with FITZ_LOCK:
+        try:
+            doc = fitz.open(stream=data, filetype="pdf")
+        except Exception as exc:  # MuPDF raises several types for bad input
+            raise _UnreadableInputError("INVALID_PDF", f"Cannot open the document: {exc}") from exc
+        try:
+            if not doc.is_pdf:
+                try:
+                    converted = fitz.open("pdf", doc.convert_to_pdf())
+                except Exception as exc:
+                    raise _UnreadableInputError(
+                        "UNSUPPORTED_INPUT", f"Not a PDF and cannot be converted to one: {exc}"
+                    ) from exc
+                doc.close()
+                doc = converted
+            if doc.needs_pass:
+                raise _UnreadableInputError(
+                    "INVALID_PDF", "The PDF is password-protected; send it unlocked"
+                )
+            if len(doc) == 0:
+                raise _UnreadableInputError("INVALID_PDF", "The PDF has no pages")
+            return len(doc)
+        finally:
+            doc.close()
+
+
 @router.post("/ocr", dependencies=[Depends(require_auth)])
 async def ocr_pages(request: OcrRequest):
     """Run the configured OCR backend on scanned PDF pages.
@@ -183,6 +225,16 @@ async def ocr_pages(request: OcrRequest):
     """
     pdf_bytes = await download_service.download_pdf(request.source_url)
     backend = settings.ocr_backend
+
+    # Input the engine cannot read is the caller's to fix: answer 422 with the
+    # reason, never a 500 the app would retry as a transient fault.
+    try:
+        document_pages = await run_in_threadpool(_readable_page_count, pdf_bytes)
+    except _UnreadableInputError as exc:
+        return JSONResponse(
+            status_code=422,
+            content={"success": False, "error": {"code": exc.code, "message": exc.reason}},
+        )
 
     # Check cache (OCR is expensive)
     src_hash = cache_service.content_hash(pdf_bytes)
@@ -209,13 +261,7 @@ async def ocr_pages(request: OcrRequest):
             processing_time_ms=0.0,
         )
 
-    # Determine page count
-    page_count = len(request.pages) if request.pages else 0
-    if page_count == 0:
-        import fitz
-
-        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-        page_count = len(doc)
+    page_count = len(request.pages) if request.pages else document_pages
 
     # Always queue OCR — CPU inference can exceed HTTP client timeouts (120s)
     # even for single-page documents on constrained instances. The client

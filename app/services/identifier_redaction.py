@@ -259,7 +259,9 @@ def rapid_ocr_words(pdf_bytes: bytes, pages: list[int]) -> dict[int, list[Word]]
     """RapidOCR words through the shared OCR workers; no search layer is built."""
     from app.services import rapid_ocr
 
-    result = rapid_ocr.ocr_pages(pdf_bytes, pages, force_ocr=True, with_pdf=False)
+    result = rapid_ocr.ocr_pages(
+        pdf_bytes, pages, force_ocr=True, with_pdf=False, low_confidence=True
+    )
     return _words(result, pdf_bytes)
 
 
@@ -307,26 +309,62 @@ _SOLID_BLACK, _SOLID_KERNEL = 40, 9
 _MIN_SIDE, _MIN_AREA = 5, 6
 _GLYPH_MAX_SIDE = 150
 _SPECK_MAX_SIDE, _SPECK_MAX_AREA = 10, 80
-_ELONGATED = 2.5
-_MAX_UNREAD_INK = 0.0001
+_ID_MIN_RUN = 4
+_ID_MIN_DIGITS = 9
 _READ_FRACTION = 0.5
 
 
-def _aligned_pair(glyphs, along: int) -> bool:
-    """Two glyphs side by side on one line; along=0 horizontal, 1 vertical."""
+def _identifier_run(components, along: int) -> bool:
+    """A run of print along one line that could hold an identifier.
+
+    along=0 is a horizontal line, 1 a vertical one (rotated print). Marks that
+    are flat across the line (at most 4 px: dot leaders, dashes, rules) are not
+    print here. Neighbours: centers within half a glyph size across the line,
+    gap at most 1.5 glyph sizes along it. A mark holds about
+    length / (0.6 x size) digits, so a merged blob counts as several. True when
+    a run has _ID_MIN_RUN marks or _ID_MIN_DIGITS digit-equivalents.
+    """
     across = 1 - along
-    ordered = sorted(glyphs, key=lambda g: g[along])
-    for index, first in enumerate(ordered):
-        for second in ordered[index + 1:]:
+    marks = sorted(
+        (c for c in components if 4 < c[2 + across] <= _GLYPH_MAX_SIDE),
+        key=lambda c: c[along],
+    )
+    parent = list(range(len(marks)))
+    count = [1] * len(marks)
+    # Thin bars (under 7 px across) are not merged digits, however long.
+    digits = [
+        max(1, round(c[2 + along] / (0.6 * c[2 + across]))) if c[2 + across] >= 7 else 1
+        for c in marks
+    ]
+    if any(d >= _ID_MIN_DIGITS for d in digits):
+        return True
+
+    def root(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    for index, first in enumerate(marks):
+        for offset in range(index + 1, len(marks)):
+            second = marks[offset]
             gap = second[along] - (first[along] + first[2 + along])
             if gap > 1.5 * _GLYPH_MAX_SIDE:
-                break  # sorted along the line: every later glyph is farther
+                break  # sorted along the line: every later mark is farther
             size = max(first[2 + across], second[2 + across])
             if gap > 1.5 * size:
                 continue
             first_center = first[across] + first[2 + across] / 2
             second_center = second[across] + second[2 + across] / 2
-            if abs(first_center - second_center) < 0.5 * size:
+            if abs(first_center - second_center) >= 0.5 * size:
+                continue
+            a, b = root(index), root(offset)
+            if a == b:
+                continue
+            parent[b] = a
+            count[a] += count[b]
+            digits[a] += digits[b]
+            if count[a] >= _ID_MIN_RUN or digits[a] >= _ID_MIN_DIGITS:
                 return True
     return False
 
@@ -379,6 +417,8 @@ def unread_text(
     kernel = np.ones((_SOLID_KERNEL, _SOLID_KERNEL), np.uint8)
     solid = cv2.morphologyEx((gray <= _SOLID_BLACK).astype(np.uint8), cv2.MORPH_OPEN, kernel)
     marks[cv2.dilate(solid, np.ones((7, 7), np.uint8)) > 0] = 0
+    # Faint print breaks into stroke fragments; a 3x3 closing rejoins them.
+    marks = cv2.morphologyEx(marks, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
 
     read = np.zeros_like(marks)
     for word in words or []:
@@ -416,19 +456,12 @@ def unread_text(
     def speck(c):
         return max(c[2], c[3]) <= _SPECK_MAX_SIDE and c[4] <= _SPECK_MAX_AREA
 
-    def elongated(c):
-        w, h = c[2], c[3]
-        return (h >= 3 and w >= _ELONGATED * h) or (w >= 3 and h >= _ELONGATED * w)
-
-    glyphs = [c for c in unread if max(c[2], c[3]) <= _GLYPH_MAX_SIDE]
     reasons = []
-    if any(not speck(c) and elongated(c) for c in unread):
-        reasons.append("merged_word")
-    if _aligned_pair(glyphs, 0) or _aligned_pair(glyphs, 1):
-        reasons.append("aligned_glyphs")
+    # Identifier-shaped unread print: a run of at least _ID_MIN_RUN marks, or
+    # any run (a merged blob included) long enough for about nine digits.
+    if _identifier_run(unread, 0) or _identifier_run(unread, 1):
+        reasons.append("identifier_shaped")
     ink = sum(c[4] for c in unread if not speck(c)) / marks.size
-    if ink > _MAX_UNREAD_INK:
-        reasons.append("ink")
     return {
         "unread_components": len(unread),
         "unread_ink_fraction": ink,
@@ -472,7 +505,14 @@ def _words(result: dict, pdf_bytes: bytes) -> dict[int, list[Word]]:
                     w["bbox"]["y"] + w["bbox"]["h"],
                 ),
             )
-            for w in page["words"]
+            # Words below the review threshold, and whole recognized lines
+            # (RapidOCR may split a read line into fragments), are searched and
+            # count as read print: an uncertain reading of an SSN is redacted.
+            for w in [
+                *page["words"],
+                *page.get("_low_confidence_words", []),
+                *page.get("_lines", []),
+            ]
         ]
     unread = []
     for index, words in out.items():
@@ -506,7 +546,23 @@ def _scan(doc: fitz.Document, pdf_bytes: bytes, ocr: OcrWords) -> tuple[list[Fou
             ocr_pages.append(i)
     if ocr_pages:
         for i, words in ocr(pdf_bytes, ocr_pages).items():
-            found.extend(find_identifiers(i, words, "ocr", doc[i]))
+            for hit in find_identifiers(i, words, "ocr", doc[i]):
+                # A word and its recognized line can both carry the identifier;
+                # both boxes are redacted, reported once.
+                twin = next(
+                    (f for f in found
+                     if (f.page, f.kind, f.last4, f.source) == (hit.page, hit.kind,
+                                                                 hit.last4, hit.source)
+                     and any(a.intersects(b) for a in f.rects for b in hit.rects)),
+                    None,
+                )
+                if twin is None:
+                    found.append(hit)
+                else:
+                    found[found.index(twin)] = Found(
+                        twin.page, twin.kind, twin.last4, twin.source,
+                        twin.rects + hit.rects,
+                    )
     return found, ocr_pages
 
 

@@ -81,15 +81,17 @@ uvicorn app.main:app --reload
 Development processes outside the container report `development` as their
 build identity and link to the repository's default branch.
 
-## RapidOCR evaluation pilot (TAX-6490)
+## RapidOCR backend (TAX-6490, TAX-6876)
 
 `OCR_BACKEND=rapid` is the code default since TAX-6713; a deployment may pin
 `OCR_BACKEND=paddle` as the rollback. Rapid needs `WORKERS=1` and `RAPIDOCR_MODEL_DIR` pointing to
 a read-only directory containing the three models listed in
 `app/services/rapid_ocr.py::MODEL_HASHES`. The ordinary `/text/ocr` endpoint and
 task polling contract select one backend; there is no automatic Paddle retry.
-The application currently rejects experimental results from production
-verification. This is a standalone pilot, not a production replacement.
+RapidOCR is the planned production engine: responses carry
+`provenance.experimental: false`; earlier builds sent `true`. The field is
+kept so readers of the old shape keep working, and nothing in the engine
+depends on it.
 
 The pinned runtime is RapidOCR 3.9.2 + ONNX Runtime 1.30.0, CPU only, using
 PP-OCRv6 Small detection/recognition and the mobile v2 line classifier. Public
@@ -203,31 +205,38 @@ through the same OCR workers (same words-and-boxes contract) and never imports
 Paddle. It fails closed in two cases, and the document is refused rather than
 returned with an identifier possibly left readable:
 - a page OCR failed on (status `failed`);
-- a page OCR read (any status) that carries print no OCR word covers. Words
-  OCR found elsewhere on a page say nothing about the line it missed. The
-  check:
-  - renders the page at the OCR DPI in grayscale and compares it with its own
-    background (a 31-pixel median filter);
-  - counts pixels more than 6 levels darker as print, after removing solid
-    black areas (redaction boxes, bars);
-  - drops form structure: rules, box grids, empty checkbox frames, and small
-    marks cut by the page edge;
-  - treats a print component as read when half of it lies inside an OCR word
-    box widened by max(4 px, 30% of the box height).
-
-  The page refuses with "page(s) [n] contain text OCR did not read" when what
-  is left unread includes any of:
-  - a merged word or line (at least 2.5x longer than wide, either orientation,
-    no size cap);
-  - two glyphs side by side, horizontally or vertically;
-  - print outside dust specks covering more than 0.01% of the page.
+- a page OCR read (any status) that carries identifier-shaped print that no
+  OCR reading covers. Words OCR found elsewhere on a page say nothing about the
+  line it missed.
+  - **Read print.** Redaction counts as read, and searches for identifiers, all
+    of: regular words; RapidOCR words below the 0.5 review threshold (an
+    uncertain reading of an SSN is still redacted); and whole recognized lines
+    (RapidOCR sometimes reads a line but splits it into fragment words). These
+    extras stay inside redaction; the `/text/ocr` response is unchanged.
+  - **Print.** The page is rendered at the OCR DPI in grayscale and compared
+    with its own background (a 31-pixel median filter). Pixels more than 6
+    levels darker count as print, after removing solid black areas
+    (redaction boxes, bars). A 3x3 closing then rejoins faint strokes. Rules,
+    box grids, empty checkbox frames and small marks cut by the page edge are
+    form structure, not print.
+  - **Coverage.** A print component counts as read when half of it lies inside
+    a read box widened by max(4 px, 30% of the box height).
+  - **Identifier-shaped.** Unread print refuses only when it could hold an
+    identifier: a run of at least 4 marks side by side on one line,
+    horizontally or vertically, or a run (a merged blob included) about 9
+    digits long at its own glyph height. Marks at most 4 px across the line
+    (dot leaders, dashes) do not join runs. Logos, shaded boxes, edge marks and
+    isolated 1–3-glyph marks do not refuse.
 
   A printed SSN that OCR missed refuses at 4–10 pt in grays 0–246, blurred
   (sigma 1–3), or rotated 90° or 270°. A blank page, sigma-4 noise and up to
-  200 dust specks pass. On scanned blank IRS forms read by RapidOCR most pages
-  refuse: logos, shaded boxes, dot leaders and the low-confidence words that
-  RapidOCR discards all count as unread print. That fails closed; such pages
-  go to manual review. Both OCR backends tag failed pages.
+  400 dust specks pass.
+
+  Measured with RapidOCR on 200-DPI scans of the IRS 2025 blank forms (16
+  PDFs, 31 pages): 18 of 31 pages pass. 12 of the 13 refusals are IRS cover
+  sheets ("Attention" pages), whose flag stripes form runs of print. The 13th
+  is the Massachusetts 1099-HC, whose logo does the same. Both OCR backends tag
+  failed pages.
 - an OCR run that exceeds `OCR_SYNC_TIMEOUT_SECONDS`. Table recognition (`/text/tables`) and orientation
 (`/transform/orientation`) keep their Paddle models, which load lazily on the
 first such request; every Paddle inference in the process is serialized by one

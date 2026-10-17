@@ -186,17 +186,22 @@ async def ocr_pages(request: OcrRequest):
 
     # Check cache (OCR is expensive)
     src_hash = cache_service.content_hash(pdf_bytes)
+    # `pages=[]` (nothing) and an omitted `pages` (everything) are different
+    # requests; an empty request is never cached or served from the cache.
+    cacheable = request.pages != []
     cache_params = {
-        "pages": sorted(request.pages) if request.pages else None,
+        "pages": sorted(request.pages) if request.pages is not None else None,
         "language": request.language,
         "dpi": request.dpi,
         **cache_profile(backend),
     }
     # Deduplicated from the queue's sealed ledger, never the plaintext file
     # cache: OCR results carry client text and the searchable PDF.
-    cached = await run_in_threadpool(
-        ocr_queue.get_queue().cached_result, src_hash, cache_params
-    )
+    cached = None
+    if cacheable:
+        cached = await run_in_threadpool(
+            ocr_queue.get_queue().cached_result, src_hash, cache_params
+        )
     if cached and isinstance(cached, dict):
         return OcrResponse(
             success=True,
@@ -223,7 +228,7 @@ async def ocr_pages(request: OcrRequest):
             request.language,
             request.dpi,
             backend,
-            src_hash,
+            src_hash if cacheable else None,
             cache_params,
         )
     except ocr_queue.QueueFullError as exc:

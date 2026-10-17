@@ -203,21 +203,31 @@ through the same OCR workers (same words-and-boxes contract) and never imports
 Paddle. It fails closed in two cases, and the document is refused rather than
 returned with an identifier possibly left readable:
 - a page OCR failed on (status `failed`);
-- a page OCR read no text from (status `empty`) that shows text-like marks.
-  An `empty` page is accepted only when it shows none, for example a blank
-  scan back. The check:
+- a page OCR read (any status) that carries print no OCR word covers. Words
+  OCR found elsewhere on a page say nothing about the line it missed. The
+  check:
   - renders the page at the OCR DPI in grayscale and compares it with its own
-    local background (a 15-pixel maximum filter);
-  - counts pixels more than 12 levels darker than that background as marks;
-  - treats connected marks as glyph-like when their larger side is 5–150 px
-    and they cover at least 6 px;
-  - calls the page text-like when two glyph-like marks sit next to each other
-    on one line, or when one mark is a merged word.
+    background (a 31-pixel median filter);
+  - counts pixels more than 6 levels darker as print, after removing solid
+    black areas (redaction boxes, bars);
+  - drops form structure: rules, box grids, empty checkbox frames, and small
+    marks cut by the page edge;
+  - treats a print component as read when half of it lies inside an OCR word
+    box widened by max(4 px, 30% of the box height).
 
-  At 4–10 pt and grays 0–235, a printed SSN refuses. A blank page passes, as
-  do light sensor noise (sigma 4 on 255) and up to about 200 dust specks.
-  Heavier noise (sigma 6 or more) or very dense dust is refused: that fails
-  closed. Both OCR backends tag pages `failed` and `empty`.
+  The page refuses with "page(s) [n] contain text OCR did not read" when what
+  is left unread includes any of:
+  - a merged word or line (at least 2.5x longer than wide, either orientation,
+    no size cap);
+  - two glyphs side by side, horizontally or vertically;
+  - print outside dust specks covering more than 0.01% of the page.
+
+  A printed SSN that OCR missed refuses at 4–10 pt in grays 0–246, blurred
+  (sigma 1–3), or rotated 90° or 270°. A blank page, sigma-4 noise and up to
+  200 dust specks pass. On scanned blank IRS forms read by RapidOCR most pages
+  refuse: logos, shaded boxes, dot leaders and the low-confidence words that
+  RapidOCR discards all count as unread print. That fails closed; such pages
+  go to manual review. Both OCR backends tag failed pages.
 - an OCR run that exceeds `OCR_SYNC_TIMEOUT_SECONDS`. Table recognition (`/text/tables`) and orientation
 (`/transform/orientation`) keep their Paddle models, which load lazily on the
 first such request; every Paddle inference in the process is serialized by one

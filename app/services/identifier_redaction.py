@@ -29,6 +29,9 @@ from dataclasses import dataclass
 from typing import Callable, Iterable
 
 import fitz
+import structlog
+
+log = structlog.get_logger()
 
 # 123-45-6789 / 123 45 6789: an SSN or ITIN. ZIP+4 (12345-6789) is 5-4.
 _SSN = re.compile(r"(?<![\d-])(\d{3})([- ])(\d{2})\2(\d{4})(?![\d-])")
@@ -267,40 +270,46 @@ def paddle_ocr_words(pdf_bytes: bytes, pages: list[int]) -> dict[int, list[Word]
     return _words(result, pdf_bytes)
 
 
-# A page OCR returned no text for ("empty") is accepted only when every test
-# below agrees it is blank — a blank scan back. A false refusal costs a manual
-# review; a false pass leaks an identifier, so any single test refuses.
+# Every page OCR read is checked for print that OCR did not turn into words.
+# A false refusal costs a manual review; a false pass leaks an identifier, so
+# any single test below refuses.
 #
-# All tests run on the page rendered at the OCR DPI in grayscale, against its
-# own local background (a 15x15 maximum filter), so paper tone and shading are
-# subtracted. A pixel is a mark when it is more than _MARK_CONTRAST levels
-# darker than that background: 12 levels still catches light-gray print (gray
-# 235 on white) and stays above ordinary sensor noise. Connected marks are
-# components; components with a side of at least 5 px and 6 px of area count.
-# A *speck* is a small compact component (both sides <= 10 px, area <= 80) —
-# dust or a noise cluster.
+# Marks. The page is rendered at the OCR DPI in grayscale and compared with
+# its own background, a 31x31 median filter (robust to print, which never fills
+# half a window, and to paper tone and shading). A pixel is a mark when it is
+# more than _MARK_CONTRAST levels darker. 6 levels catches light-gray print up
+# to gray 246 on white at 4 pt and stays above sigma-4 sensor noise. Solid
+# black areas (redaction boxes, black bars) carry no readable print and are
+# removed first: their interior survives a 9x9 opening, strokes do not.
 #
-# (a) Text layout. Any component that is a merged word or line (at least 2.5x
-#     longer than wide, either orientation, no size cap: blur merges a whole
-#     SSN into one wide blob); or two glyph-sized components (side 5-150 px)
-#     next to each other on one line, horizontally or vertically (rotated
-#     text): centers within half a glyph across the line, gap at most 1.5
-#     glyph sizes along it.
-# (b) Ink. Mark pixels outside specks cover more than _MAX_INK_FRACTION
-#     (0.01%, ~440 px on a Letter page at 216 DPI) of the page.
-# (c) Shape. Any component bigger than a speck is elongated (aspect >= 2.5 in
-#     either orientation) — covered by (a)'s merged-word rule, kept explicit.
+# Components. Connected marks with a side of at least 5 px and 6 px of area. A
+# *speck* (both sides <= 10 px, area <= 80) is dust or a noise cluster. *Line
+# art* — rules (thinner than 4 px, longer than 30 px) and box grids (longer
+# than 150 px, under 15% filled) — is form structure, not print.
 #
-# Measured on 216-DPI renders of 200-DPI scans: "123-45-6789" at 4-10 pt in
-# grays 0-235, blurred (sigma 1-3), and rotated 90/270 degrees all refuse; a
-# blank page, sigma-4 noise and 50 dust specks pass. Denser dust and heavier
-# noise refuse (see tests/test_ocr_queue_hardening.py).
-_MARK_CONTRAST = 12
+# Coverage. A component is read when at least half of its pixels fall inside
+# OCR word boxes widened by max(4 px, 30% of the box height). Of the components
+# that are not read and not line art, the page refuses when:
+# (a) one is a merged word or line: at least 2.5x longer than wide, either
+#     orientation, no size cap (blur merges a whole SSN into one blob);
+# (b) two glyph-sized ones (side 5-150 px) sit next to each other on one line,
+#     horizontally or vertically (rotated print): centers within half a glyph
+#     across the line, gap at most 1.5 glyph sizes along it;
+# (c) together, outside specks, they cover more than 0.01% of the page (~440
+#     px on Letter at 216 DPI).
+#
+# Measured on 216-DPI renders of 200-DPI scans: "123-45-6789" at 4-10 pt and
+# grays 0-246, blurred (sigma 1-3) or rotated 90/270 degrees, refuses when OCR
+# missed it; a blank page, sigma-4 noise and up to 200 dust specks pass.
+_MARK_CONTRAST = 6
+_BACKGROUND_WINDOW = 31
+_SOLID_BLACK, _SOLID_KERNEL = 40, 9
 _MIN_SIDE, _MIN_AREA = 5, 6
 _GLYPH_MAX_SIDE = 150
 _SPECK_MAX_SIDE, _SPECK_MAX_AREA = 10, 80
 _ELONGATED = 2.5
-_MAX_INK_FRACTION = 0.0001
+_MAX_UNREAD_INK = 0.0001
+_READ_FRACTION = 0.5
 
 
 def _aligned_pair(glyphs, along: int) -> bool:
@@ -322,8 +331,33 @@ def _aligned_pair(glyphs, along: int) -> bool:
     return False
 
 
-def text_like_marks(pdf_bytes: bytes, page_index: int, dpi: float) -> dict:
-    """Run the blank-page tests; ``text_like`` is True when any of them refuses."""
+def _is_box_outline(component) -> bool:
+    """An empty rectangular frame: nearly all its pixels lie on its bounding box.
+
+    A checkbox or field frame qualifies; a glyph does not — even "0" or "O"
+    touches its box only at four points, and a filled square is not hollow.
+    """
+    import numpy as np
+
+    h, w = component.shape
+    if min(w, h) < 12 or not 0.7 <= w / h <= 1.43 and min(w, h) < 24:
+        return False
+    border = np.zeros_like(component)
+    band = max(2, round(min(w, h) * 0.12))
+    border[:band, :] = border[-band:, :] = border[:, :band] = border[:, -band:] = True
+    pixels = component.sum()
+    on_border = (component & border).sum()
+    hollow = pixels < 0.6 * w * h
+    return bool(hollow and on_border >= 0.9 * pixels)
+
+
+def unread_text(
+    pdf_bytes: bytes, page_index: int, dpi: float, words: list[Word] | None = None
+) -> dict:
+    """Print on the page that OCR word boxes do not cover; see the notes above.
+
+    ``text_like`` is True when the page must be refused.
+    """
     import cv2
     import numpy as np
 
@@ -333,18 +367,51 @@ def text_like_marks(pdf_bytes: bytes, page_index: int, dpi: float) -> dict:
     zoom = dpi / 72
     with rapid_ocr.FITZ_LOCK:
         with _open_pdf(pdf_bytes) as doc:
-            pix = doc[page_index].get_pixmap(
+            page = doc[page_index]
+            pix = page.get_pixmap(
                 matrix=fitz.Matrix(zoom, zoom), colorspace=fitz.csGRAY, alpha=False
             )
             gray = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width)
             gray = gray.copy()
-    background = cv2.dilate(gray, np.ones((15, 15), np.uint8))
+            sx, sy = pix.width / page.rect.width, pix.height / page.rect.height
+    background = cv2.medianBlur(gray, _BACKGROUND_WINDOW)
     marks = ((background.astype(np.int16) - gray) > _MARK_CONTRAST).astype(np.uint8)
-    count, _, stats, _ = cv2.connectedComponentsWithStats(marks, 8)
-    components = [
-        tuple(int(v) for v in stats[i][:5]) for i in range(1, count)
-        if max(stats[i][2], stats[i][3]) >= _MIN_SIDE and stats[i][4] >= _MIN_AREA
-    ]
+    kernel = np.ones((_SOLID_KERNEL, _SOLID_KERNEL), np.uint8)
+    solid = cv2.morphologyEx((gray <= _SOLID_BLACK).astype(np.uint8), cv2.MORPH_OPEN, kernel)
+    marks[cv2.dilate(solid, np.ones((7, 7), np.uint8)) > 0] = 0
+
+    read = np.zeros_like(marks)
+    for word in words or []:
+        height = word.rect.height * sy
+        margin = max(4.0, 0.3 * height)
+        x0 = int(max(0, word.rect.x0 * sx - margin))
+        y0 = int(max(0, word.rect.y0 * sy - margin))
+        x1 = int(min(read.shape[1], word.rect.x1 * sx + margin + 1))
+        y1 = int(min(read.shape[0], word.rect.y1 * sy + margin + 1))
+        read[y0:y1, x0:x1] = 1
+
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(marks, 8)
+    height_px, width_px = marks.shape
+    if count > 1:
+        inside = np.bincount(labels[read > 0].ravel(), minlength=count)
+    else:
+        inside = np.zeros(1, dtype=np.int64)
+    unread = []
+    for i in range(1, count):
+        x, y, w, h, area = (int(v) for v in stats[i][:5])
+        if max(w, h) < _MIN_SIDE or area < _MIN_AREA:
+            continue
+        if min(w, h) <= 4 and max(w, h) >= 8 * min(w, h):
+            continue  # a rule
+        if max(w, h) > _GLYPH_MAX_SIDE and area < 0.15 * w * h:
+            continue  # a box grid
+        if _is_box_outline(labels[y:y + h, x:x + w] == i):
+            continue  # a checkbox or field frame
+        if max(w, h) <= 15 and (x == 0 or y == 0 or x + w >= width_px or y + h >= height_px):
+            continue  # a small mark cut by the page edge: a scan border artifact
+        if inside[i] >= _READ_FRACTION * area:
+            continue
+        unread.append((x, y, w, h, area))
 
     def speck(c):
         return max(c[2], c[3]) <= _SPECK_MAX_SIDE and c[4] <= _SPECK_MAX_AREA
@@ -353,31 +420,39 @@ def text_like_marks(pdf_bytes: bytes, page_index: int, dpi: float) -> dict:
         w, h = c[2], c[3]
         return (h >= 3 and w >= _ELONGATED * h) or (w >= 3 and h >= _ELONGATED * w)
 
-    glyphs = [c for c in components if max(c[2], c[3]) <= _GLYPH_MAX_SIDE]
+    glyphs = [c for c in unread if max(c[2], c[3]) <= _GLYPH_MAX_SIDE]
     reasons = []
-    if any(elongated(c) for c in components):
+    if any(not speck(c) and elongated(c) for c in unread):
         reasons.append("merged_word")
     if _aligned_pair(glyphs, 0) or _aligned_pair(glyphs, 1):
         reasons.append("aligned_glyphs")
-    ink = sum(c[4] for c in components if not speck(c)) / marks.size
-    if ink > _MAX_INK_FRACTION:
+    ink = sum(c[4] for c in unread if not speck(c)) / marks.size
+    if ink > _MAX_UNREAD_INK:
         reasons.append("ink")
-    if any(not speck(c) and elongated(c) for c in components):
-        reasons.append("elongated_mark")
     return {
-        "glyphs": len(glyphs),
-        "ink_fraction": ink,
+        "unread_components": len(unread),
+        "unread_ink_fraction": ink,
+        "regions": [
+            [round(c[0] / sx, 1), round(c[1] / sy, 1), round(c[2] / sx, 1), round(c[3] / sy, 1)]
+            for c in unread if not speck(c)
+        ][:20],
         "reasons": reasons,
         "text_like": bool(reasons),
     }
 
 
+def text_like_marks(pdf_bytes: bytes, page_index: int, dpi: float) -> dict:
+    """The unread-print test for a page OCR read no word from."""
+    return unread_text(pdf_bytes, page_index, dpi, [])
+
+
 def _words(result: dict, pdf_bytes: bytes) -> dict[int, list[Word]]:
     """Words per page; refuses any page OCR could not be trusted to have read.
 
-    A ``failed`` page always refuses. An ``empty`` page refuses unless it shows
-    no text-like mark: zero words from a page with print is not evidence that
-    it shows no identifier. Both backends tag pages this way.
+    A ``failed`` page always refuses. Every other page refuses when it shows
+    print that no OCR word covers (``unread_text``): words OCR found elsewhere
+    on the page are no evidence about the line it missed. Both backends tag
+    failed pages.
     """
     failed = sorted(p["page_index"] for p in result["pages"] if p.get("status") == "failed")
     if failed:
@@ -385,17 +460,6 @@ def _words(result: dict, pdf_bytes: bytes) -> dict[int, list[Word]]:
             f"OCR failed on page(s) {failed}; identifiers there cannot be ruled out"
         )
     dpi = (result.get("provenance") or {}).get("render_dpi") or 216
-    marked = sorted(
-        p["page_index"]
-        for p in result["pages"]
-        if p.get("status") == "empty"
-        and text_like_marks(pdf_bytes, p["page_index"], dpi)["text_like"]
-    )
-    if marked:
-        raise RedactionIncompleteError(
-            f"page(s) {marked} show text-like marks but OCR read no text; "
-            "identifiers there cannot be ruled out"
-        )
     out: dict[int, list[Word]] = {}
     for page in result["pages"]:
         out[page["page_index"]] = [
@@ -410,6 +474,18 @@ def _words(result: dict, pdf_bytes: bytes) -> dict[int, list[Word]]:
             )
             for w in page["words"]
         ]
+    unread = []
+    for index, words in out.items():
+        check = unread_text(pdf_bytes, index, dpi, words)
+        if check["text_like"]:
+            log.warning("redaction_unread_text", page_index=index, reasons=check["reasons"],
+                        regions=check["regions"])
+            unread.append(index)
+    if unread:
+        raise RedactionIncompleteError(
+            f"page(s) {sorted(unread)} contain text OCR did not read; "
+            "identifiers there cannot be ruled out"
+        )
     return out
 
 

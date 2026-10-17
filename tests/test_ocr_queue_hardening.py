@@ -366,7 +366,7 @@ def test_redaction_accepts_a_blank_scan_back(monkeypatch, fixture):
     assert ir.text_like_marks(page, 0, 216)["text_like"] is False
 
 
-@pytest.mark.parametrize("gray", [0, 150, 200, 215, 225, 235])
+@pytest.mark.parametrize("gray", [0, 150, 200, 215, 225, 235, 240, 244, 246])
 @pytest.mark.parametrize("size", [4, 6, 8, 10])
 def test_redaction_refuses_any_printed_ssn_ocr_missed(monkeypatch, size, gray):
     monkeypatch.setattr(rapid_ocr, "_get_engine", lambda: _empty_engine)
@@ -376,7 +376,7 @@ def test_redaction_refuses_any_printed_ssn_ocr_missed(monkeypatch, size, gray):
                                 color=(level, level, level))
     )
     with pytest.raises(ir.RedactionIncompleteError,
-                       match=r"page\(s\) \[0\] show text-like marks but OCR read no text"):
+                       match=r"page\(s\) \[0\] contain text OCR did not read"):
         ir.redact_identifiers(page)
 
 
@@ -403,7 +403,7 @@ def _blurred_ssn_pdf(size: int, gray: int, sigma: float) -> bytes:
 @pytest.mark.parametrize("size", [10, 12])
 def test_redaction_refuses_a_blurred_ssn_ocr_missed(monkeypatch, size, gray, sigma):
     monkeypatch.setattr(rapid_ocr, "_get_engine", lambda: _empty_engine)
-    with pytest.raises(ir.RedactionIncompleteError, match="text-like marks"):
+    with pytest.raises(ir.RedactionIncompleteError, match="contain text OCR did not read"):
         ir.redact_identifiers(_blurred_ssn_pdf(size, gray, sigma))
 
 
@@ -414,7 +414,7 @@ def test_redaction_refuses_a_rotated_ssn_ocr_missed(monkeypatch, size, rotate):
     page = _image_only_pdf(
         lambda p: p.insert_text((300, 200), "123-45-6789", fontsize=size, rotate=rotate)
     )
-    with pytest.raises(ir.RedactionIncompleteError, match="text-like marks"):
+    with pytest.raises(ir.RedactionIncompleteError, match="contain text OCR did not read"):
         ir.redact_identifiers(page)
 
 
@@ -461,7 +461,7 @@ def test_paddle_rollback_redaction_refuses_an_unread_page_with_print(monkeypatch
     monkeypatch.setattr(settings, "ocr_backend", "paddle")
     monkeypatch.setattr(pdf_service, "_get_paddle_ocr", lambda lang="en": Blind())
     page = _image_only_pdf(lambda p: p.insert_text((72, 120), "SSN 123-45-6789"))
-    with pytest.raises(ir.RedactionIncompleteError, match="text-like marks"):
+    with pytest.raises(ir.RedactionIncompleteError, match="contain text OCR did not read"):
         ir.redact_identifiers(page)
 
 
@@ -631,3 +631,142 @@ def test_ocr_results_never_reach_the_plaintext_cache_and_still_dedupe(
     assert again["success"] is True
     assert again["data"]["pages"][0]["full_text"] == "p0"  # served from the sealed ledger
     assert len(engine.calls) == 1
+
+
+# adversarial round --------------------------------------------------------
+
+
+def _w2_scan_with_words():
+    """An image-only W-2 page and its words in visual points (from the source)."""
+    lines = [
+        ((72, 100), "Form W-2 Wage and Tax Statement"),
+        ((72, 160), "Employee SSN 123-45-6789"),
+        ((72, 220), "Wages 75250.00"),
+    ]
+    with fitz.open() as source:
+        page = source.new_page(width=612, height=792)
+        for origin, text in lines:
+            page.insert_text(origin, text, fontsize=11)
+        # Corner dots stop scan preparation from cropping the margins, so the
+        # fake engine's pixel boxes line up with the full render.
+        for x, y in [(2, 2), (608, 2), (2, 788), (608, 788)]:
+            page.draw_rect(fitz.Rect(x, y, x + 1, y + 1), color=(0.5, 0.5, 0.5), width=0.3)
+        words = [(w[4], fitz.Rect(w[:4])) for w in page.get_text("words")]
+        png = page.get_pixmap(dpi=200).tobytes("png")
+    with fitz.open() as doc:
+        out = doc.new_page(width=612, height=792)
+        out.insert_image(out.rect, stream=png)
+        return doc.tobytes(), words
+
+
+def _engine_reading(words, keep=lambda text: True, redacted=False):
+    """A RapidOCR stand-in that reads the given words (216 DPI = 3 px/pt)."""
+    from types import SimpleNamespace
+
+    import numpy as np
+
+    def engine(image, **_):
+        texts, groups, boxes = [], [], []
+        for text, rect in words:
+            if not keep(text):
+                continue
+            if redacted and text == "123-45-6789":
+                text = "XXX-XX-6789"
+            polygon = np.array([[rect.x0, rect.y0], [rect.x1, rect.y0],
+                                [rect.x1, rect.y1], [rect.x0, rect.y1]], dtype=float) * 3
+            texts.append(text)
+            groups.append([(text, 0.95, polygon)])
+            boxes.append(polygon)
+        return SimpleNamespace(txts=tuple(texts) or None,
+                               boxes=np.array(boxes) if boxes else None,
+                               word_results=groups or [[[], [], []]])
+
+    return engine
+
+
+def test_a_partly_read_page_with_an_unread_ssn_refuses(monkeypatch):
+    """OCR reads the title but misses the SSN line: the page is not 'empty'."""
+    scan, words = _w2_scan_with_words()
+    title = {"Form", "W-2", "Wage", "and", "Tax", "Statement"}
+    engine = _engine_reading(words, keep=lambda text: text in title)
+    monkeypatch.setattr(rapid_ocr, "_get_engine", lambda: engine)
+    with pytest.raises(ir.RedactionIncompleteError,
+                       match=r"page\(s\) \[0\] contain text OCR did not read"):
+        ir.redact_identifiers(scan)
+
+
+def test_a_fully_read_w2_page_is_redacted(monkeypatch):
+    scan, words = _w2_scan_with_words()
+    calls = []
+
+    def engine(image, **kwargs):
+        calls.append(1)
+        # The re-read of the redacted page sees the box, not the digits.
+        return _engine_reading(words, redacted=len(calls) > 1)(image, **kwargs)
+
+    monkeypatch.setattr(rapid_ocr, "_get_engine", lambda: engine)
+    result = ir.redact_identifiers(scan)
+    assert result["redactions"] == [{"page": 0, "kind": "ssn", "last4": "6789", "source": "ocr"}]
+    assert len(calls) == 2
+
+
+def test_an_empty_page_request_is_not_cached_for_the_full_document(
+    client, auth_headers, documents, monkeypatch
+):
+    monkeypatch.setattr(rapid_ocr, "_get_engine", lambda: FakeEngine(delay=0))
+    documents["https://example.com/a.pdf"] = scanned(2, "a")
+    body = json.dumps({"source_url": "https://example.com/a.pdf", "pages": []})
+    empty = client.post("/text/ocr", content=body, headers=auth_headers("POST", "/text/ocr", body))
+    assert poll(client, auth_headers, empty.json()["task_id"], timeout=10)["data"][
+        "result"]["pages"] == []
+
+    full = submit(client, auth_headers, "https://example.com/a.pdf").json()
+    if "task_id" in full:
+        full = poll(client, auth_headers, full["task_id"], timeout=10)["data"]["result"]
+    else:
+        full = full["data"]
+    assert [p["full_text"] for p in full["pages"]] == ["p0", "p1"]
+
+
+def test_sealed_data_is_bound_to_its_job(client, auth_headers, documents, monkeypatch):
+    """Associated data: job A's blobs are not readable as job B's."""
+    monkeypatch.setattr(settings, "ocr_max_active_jobs", 1)
+    gate = threading.Event()
+    monkeypatch.setattr(rapid_ocr, "_get_engine", lambda: FakeEngine(delay=0, gate=gate))
+    queue = ocr_queue.get_queue()
+    for name in ("a", "b", "c", "d"):
+        documents[f"https://example.com/{name}.pdf"] = scanned(1, name)
+    a = submit(client, auth_headers, "https://example.com/a.pdf").json()["task_id"]
+    b = submit(client, auth_headers, "https://example.com/b.pdf").json()["task_id"]
+    inputs = Path(settings.ocr_queue_dir) / "inputs"
+
+    # Input: B, still queued, gets A's sealed input.
+    (inputs / f"{b}.bin").write_bytes((inputs / f"{a}.bin").read_bytes())
+    # Unit checkpoints: A's page 0 copied to B's page 0 and to A's page 1.
+    store = queue.store
+    store.save_unit(a, 0, {"full_text": "A"})
+    blob = store._execute("SELECT result FROM ocr_job_units WHERE job_id = ?", (a,))[0][0]
+    store._execute("INSERT INTO ocr_job_units (job_id, unit, result) VALUES (?, 0, ?)", (b, blob))
+    with pytest.raises(RuntimeError, match="authentication"):
+        store.units(b)
+    store._execute("INSERT INTO ocr_job_units (job_id, unit, result) VALUES (?, 1, ?)", (a, blob))
+    with pytest.raises(RuntimeError, match="authentication"):
+        store.units(a)
+    store._execute("DELETE FROM ocr_job_units WHERE job_id = ? AND unit = 1", (a,))
+    store._execute("DELETE FROM ocr_job_units WHERE job_id = ?", (b,))
+
+    gate.set()
+    assert poll(client, auth_headers, a, timeout=10)["data"]["status"] == "completed"
+    task_b = poll(client, auth_headers, b, timeout=10)["data"]
+    assert task_b["status"] == "failed" and "authentication" in task_b["error"]
+
+    # Result: D shows C's sealed result.
+    c = submit(client, auth_headers, "https://example.com/c.pdf").json()["task_id"]
+    d = submit(client, auth_headers, "https://example.com/d.pdf").json()["task_id"]
+    for task_id in (c, d):
+        assert poll(client, auth_headers, task_id, timeout=10)["data"]["status"] == "completed"
+    results = Path(settings.ocr_queue_dir) / "results"
+    (results / f"{d}.bin").write_bytes((results / f"{c}.bin").read_bytes())
+    task_d = get_task(client, auth_headers, d).json()["data"]
+    assert task_d["status"] == "failed"
+    assert "authentication" in task_d["error"]

@@ -3,7 +3,9 @@
 import base64
 import time
 
-from fastapi import APIRouter, BackgroundTasks, Depends, Response
+from fastapi import APIRouter, Depends, Response
+from fastapi.responses import JSONResponse
+from starlette.concurrency import run_in_threadpool
 
 from app.config import settings
 from app.dependencies import require_auth
@@ -31,7 +33,7 @@ from app.models.responses import (
     TextSearchData,
     TextSearchResponse,
 )
-from app.services import cache_service, download_service, pdf_service, task_service
+from app.services import cache_service, download_service, ocr_queue, pdf_service
 from app.services.rapid_ocr import cache_profile
 
 router = APIRouter(prefix="/text")
@@ -109,7 +111,9 @@ async def extract_tables(request: ExtractTablesRequest):
     start = time.monotonic()
 
     pdf_bytes = await download_service.download_pdf(request.source_url)
-    tables = pdf_service.extract_tables(
+    # Off the event loop: PP-Structure inference can wait on the Paddle lock.
+    tables = await run_in_threadpool(
+        pdf_service.extract_tables,
         pdf_bytes,
         request.pages,
         strategy=request.strategy,
@@ -163,57 +167,19 @@ def _build_ocr_response(result: dict, elapsed_ms: float) -> OcrResponse:
     )
 
 
-def _run_ocr(
-    task_id: str, pdf_bytes: bytes, pages, language: str, dpi: int, backend: str = "paddle"
-):
-    """Background worker for OCR processing.
-
-    IMPORTANT: Must be a regular ``def`` (not ``async def``) so Starlette
-    runs it via ``run_in_threadpool()`` instead of ``await``-ing it on the
-    event loop.  PaddleOCR inference is CPU-bound and blocks for minutes;
-    an ``async def`` wrapper would freeze the event loop and prevent
-    ``complete_task()`` from executing.
-    """
-    task_service.set_processing(task_id)
-    try:
-        result = pdf_service.ocr_pages(pdf_bytes, pages, language, dpi, backend=backend)
-        pdf_b64 = base64.b64encode(result["pdf_bytes"]).decode("ascii")
-
-        # Build the full result the client expects (pages + pdf_base64)
-        ocr_data = {
-            "pages": result["pages"],
-            "total_words": result["total_words"],
-            "avg_confidence": result["avg_confidence"],
-            "pdf_base64": pdf_b64,
-            "provenance": result.get("provenance"),
-            "coverage": result.get("coverage"),
-        }
-
-        # Cache for future identical requests
-        src_hash = cache_service.content_hash(pdf_bytes)
-        cache_params = {
-            "pages": sorted(pages) if pages else None,
-            "language": language,
-            "dpi": dpi,
-            **cache_profile(backend),
-        }
-        cache_service.put_cached(src_hash, "ocr", ocr_data, cache_params)
-
-        task_service.complete_task(task_id, ocr_data)
-    except Exception as e:
-        task_service.fail_task(task_id, str(e))
-
-
 @router.post("/ocr", dependencies=[Depends(require_auth)])
-async def ocr_pages(request: OcrRequest, background_tasks: BackgroundTasks):
+async def ocr_pages(request: OcrRequest):
     """Run the configured OCR backend on scanned PDF pages.
 
     Returns rich JSON with per-word text, 4-point bounding boxes (in PDF
     points), and confidence scores.  Also includes the PDF with an invisible
     text layer (base64-encoded) so Ctrl+F search works in viewers.
 
-    Runs as a background task — returns a ``task_id``
-    for polling via ``GET /tasks/{task_id}``.
+    Queued as a persistent job — returns a ``task_id`` for polling via
+    ``GET /tasks/{task_id}``. The job survives an engine restart. When the
+    queue already holds ``OCR_QUEUE_MAX_JOBS`` unfinished jobs the request is
+    refused with HTTP 429 and a ``Retry-After`` header (seconds); the caller
+    must retry after that delay. Nothing else refuses a request as busy.
     """
     pdf_bytes = await download_service.download_pdf(request.source_url)
     backend = settings.ocr_backend
@@ -242,24 +208,36 @@ async def ocr_pages(request: OcrRequest, background_tasks: BackgroundTasks):
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
         page_count = len(doc)
 
-    # Always use background tasks for OCR — CPU inference with PP-OCRv5
-    # server_det at 300 DPI can exceed HTTP client timeouts (120s) even for
-    # single-page documents on constrained instances (t3a.medium / 2 vCPU).
-    # The client polls via GET /tasks/{task_id} with OCR_TIMEOUT_MS.
-    task = task_service.create_task("ocr")
-    background_tasks.add_task(
-        _run_ocr,
-        task.id,
-        pdf_bytes,
-        request.pages,
-        request.language,
-        request.dpi,
-        backend,
-    )
+    # Always queue OCR — CPU inference can exceed HTTP client timeouts (120s)
+    # even for single-page documents on constrained instances. The client
+    # polls via GET /tasks/{task_id} with OCR_TIMEOUT_MS.
+    try:
+        task_id = await run_in_threadpool(
+            ocr_queue.get_queue().submit_ocr,
+            pdf_bytes,
+            request.pages,
+            request.language,
+            request.dpi,
+            backend,
+            src_hash,
+            cache_params,
+        )
+    except ocr_queue.QueueFullError as exc:
+        return JSONResponse(
+            status_code=429,
+            headers={"Retry-After": str(exc.retry_after)},
+            content={
+                "success": False,
+                "error": {
+                    "code": "OCR_QUEUE_FULL",
+                    "message": f"OCR queue is full; retry after {exc.retry_after} seconds",
+                },
+            },
+        )
 
     return TaskAcceptedResponse(
         success=True,
-        task_id=task.id,
+        task_id=task_id,
         status="pending",
-        message=f"OCR started for {page_count} pages. Poll GET /tasks/{task.id} for status.",
+        message=f"OCR started for {page_count} pages. Poll GET /tasks/{task_id} for status.",
     )

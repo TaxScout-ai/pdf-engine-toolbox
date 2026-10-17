@@ -42,16 +42,37 @@ class Settings(BaseSettings):
     # (TAX-4858). 0 restores the unbounded PaddleOCR default.
     ocr_det_limit_side_len: int = 1280
 
-    # Primary review OCR. Explicit OCR_BACKEND=paddle restores the legacy endpoint.
-    # Identifier redaction and table extraction retain their separate Paddle paths.
+    # Primary OCR for /text/ocr and identifier redaction. OCR_BACKEND=paddle is
+    # the rollback path for both. Table extraction and orientation keep Paddle
+    # models, which load lazily on first use of those endpoints.
     ocr_backend: Literal["paddle", "rapid"] = "rapid"
     rapidocr_model_dir: str = "/opt/rapidocr/models"
 
+    # OCR job queue (TAX-6876). Every /text/ocr request is a persistent job:
+    # its bytes are spilled under OCR_QUEUE_DIR and its state is kept in a
+    # SQLite file there, so a restart resumes queued and in-flight work.
+    # Keep this on the persistent /data volume.
+    ocr_queue_dir: str = "/data/ocr-queue"
+    # Concurrent OCR inferences. 0 = one per available CPU (cgroup quota aware).
+    ocr_workers: int = 0
+    # ONNX Runtime intra-op threads per worker session (and OpenCV threads).
+    # 0 = available CPUs // OCR_WORKERS, at least 1, so workers x threads ~ cores.
+    ocr_intra_op_threads: int = 0
+    # Documents interleaved page by page at once; later ones wait FIFO.
+    # 0 = max(2, OCR_WORKERS).
+    ocr_max_active_jobs: int = 0
+    # Unfinished OCR jobs accepted before /text/ocr answers 429 + Retry-After.
+    ocr_queue_max_jobs: int = 500
+    # Completed and failed OCR results stay readable this long.
+    ocr_result_ttl_seconds: int = 3600
+
     @model_validator(mode="after")
-    def rapid_single_worker(self):
-        if self.ocr_backend == "rapid" and self.workers != 1:
+    def single_process(self):
+        # The OCR queue schedules and recovers jobs inside one process; two
+        # uvicorn processes would both resume the same jobs after a restart.
+        if self.workers != 1:
             raise ValueError(
-                "RapidOCR requires WORKERS=1 (bounded inference and in-memory tasks)"
+                "The OCR job queue requires WORKERS=1; use OCR_WORKERS for parallel OCR"
             )
         return self
 

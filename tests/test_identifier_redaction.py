@@ -154,7 +154,10 @@ def test_fails_closed_when_an_identifier_survives(monkeypatch):
 
 
 @pytest.mark.skipif(importlib.util.find_spec("paddleocr") is None, reason="PaddleOCR not installed")
-def test_real_paddle_ocr_reads_no_identifier_on_the_redacted_scan():
+def test_real_paddle_ocr_reads_no_identifier_on_the_redacted_scan(monkeypatch):
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "ocr_backend", "paddle")  # the rollback path
     scan, _ = _scanned_w2()
     result = ir.redact_identifiers(scan)
     after = ir.paddle_ocr_words(result["pdf_bytes"], [0])[0]
@@ -164,6 +167,31 @@ def test_real_paddle_ocr_reads_no_identifier_on_the_redacted_scan():
         assert re.sub(r"\D", "", identifier) not in digits, joined
     assert "75250" in joined
     # The last four digits stay readable for the model.
+    assert "5678" in digits and "4567" in digits
+
+
+def _rapid_models_provisioned() -> bool:
+    from app.services import rapid_ocr
+
+    try:
+        rapid_ocr.validate_runtime()
+    except Exception:
+        return False
+    return True
+
+
+@pytest.mark.skipif(not _rapid_models_provisioned(), reason="RapidOCR models not provisioned")
+def test_real_rapid_ocr_reads_no_identifier_on_the_redacted_scan():
+    """The default backend: Rapid word boxes drive the redaction and its check."""
+    scan, _ = _scanned_w2()
+    result = ir.redact_identifiers(scan)
+    assert {r["source"] for r in result["redactions"]} == {"ocr"}
+    after = ir.rapid_ocr_words(result["pdf_bytes"], [0])[0]
+    joined = " ".join(w.text for w in after)
+    digits = re.sub(r"\D", "", joined)
+    for identifier in IDENTIFIERS:
+        assert re.sub(r"\D", "", identifier) not in digits, joined
+    assert "75250" in joined
     assert "5678" in digits and "4567" in digits
 
 

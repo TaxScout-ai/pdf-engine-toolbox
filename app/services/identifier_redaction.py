@@ -12,7 +12,9 @@ document's own text layer or OCR by those last four digits.
 Where the numbers are found:
   * a page with a usable text layer — its words (digital PDFs and PDFs that
     already carry an OCR text layer);
-  * a page without one (a scan or a photo) — PaddleOCR words.
+  * a page without one (a scan or a photo) — OCR words from the configured
+    backend: RapidOCR by default, Paddle under the OCR_BACKEND=paddle
+    rollback. The default path never imports or loads Paddle (TAX-6876).
 
 Before anything is returned the result is checked: every page's text layer
 is searched again, and every page that needed OCR is OCRed again. If an
@@ -241,10 +243,29 @@ OcrWords = Callable[[bytes, list[int]], dict[int, list[Word]]]
 """(pdf bytes, page indices) → words per page, boxes in unrotated page points."""
 
 
+def ocr_words(pdf_bytes: bytes, pages: list[int]) -> dict[int, list[Word]]:
+    """Words of the page images, read by the backend OCR_BACKEND selects."""
+    from app.config import settings
+
+    if settings.ocr_backend == "paddle":
+        return paddle_ocr_words(pdf_bytes, pages)
+    return rapid_ocr_words(pdf_bytes, pages)
+
+
+def rapid_ocr_words(pdf_bytes: bytes, pages: list[int]) -> dict[int, list[Word]]:
+    """RapidOCR words through the shared OCR workers; no search layer is built."""
+    from app.services import rapid_ocr
+
+    return _words(rapid_ocr.ocr_pages(pdf_bytes, pages, force_ocr=True, with_pdf=False))
+
+
 def paddle_ocr_words(pdf_bytes: bytes, pages: list[int]) -> dict[int, list[Word]]:
     from app.services import pdf_service
 
-    result = pdf_service.ocr_pages(pdf_bytes, pages, force_ocr=True)
+    return _words(pdf_service.ocr_pages(pdf_bytes, pages, force_ocr=True, backend="paddle"))
+
+
+def _words(result: dict) -> dict[int, list[Word]]:
     out: dict[int, list[Word]] = {}
     for page in result["pages"]:
         out[page["page_index"]] = [
@@ -286,7 +307,7 @@ def _scan(doc: fitz.Document, pdf_bytes: bytes, ocr: OcrWords) -> tuple[list[Fou
 def redact_identifiers(
     data: bytes,
     media_type: str = "application/pdf",
-    ocr: OcrWords = paddle_ocr_words,
+    ocr: OcrWords = ocr_words,
 ) -> dict:
     """Redact every identifier and prove none is left.
 

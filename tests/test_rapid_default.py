@@ -12,9 +12,11 @@ def test_default_and_explicit_rollback(monkeypatch):
     monkeypatch.delenv("OCR_BACKEND", raising=False)
     monkeypatch.delenv("WORKERS", raising=False)
     assert Settings(_env_file=None).ocr_backend == "rapid"
-    assert Settings(ocr_backend="paddle", workers=2, _env_file=None).ocr_backend == "paddle"
-    with pytest.raises(ValueError, match="WORKERS=1"):
-        Settings(workers=2, _env_file=None)
+    assert Settings(ocr_backend="paddle", _env_file=None).ocr_backend == "paddle"
+    # One process owns the OCR job queue on either backend (TAX-6876).
+    for backend in ("rapid", "paddle"):
+        with pytest.raises(ValueError, match="WORKERS=1"):
+            Settings(ocr_backend=backend, workers=2, _env_file=None)
 
 
 def test_download_verifies_and_reuses_weights(tmp_path, monkeypatch):

@@ -5,6 +5,7 @@ import datetime
 import io
 import math
 import re
+import threading
 
 import cv2
 import fitz  # PyMuPDF
@@ -470,6 +471,33 @@ def deskew_pages(pdf_bytes: bytes, pages: list[int] | None = None) -> bytes:
     return doc.tobytes(garbage=4, deflate=True)
 
 
+# One Paddle inference at a time, process-wide (TAX-6255, TAX-6876).
+#
+# Paddle predictors are not thread-safe, and every model below is a cached
+# singleton. On 2026-10-10 two OCR tasks reached ``.predict()`` on the same
+# predictor from two threads and production died with SIGSEGV.
+#
+# The lock is held per inference call (one page or one batch), never across a
+# whole document, so concurrent callers interleave pages. It also covers model
+# construction, which otherwise races on the caches and could load a model
+# while another one is inferring. Reentrant so that a getter may be called
+# with the lock already held. RapidOCR does not take this lock: its workers
+# own separate ONNX Runtime sessions (app/services/ocr_queue.py).
+_PADDLE_LOCK = threading.RLock()
+
+
+def _paddle_predict(predictor, *args, **kwargs) -> list:
+    """Run ``predictor.predict`` under the process-wide Paddle lock.
+
+    PaddleX models (and ``predict_iter`` pipelines) return a lazy generator
+    that only runs inference as it is consumed, so the result is drained into
+    a list before the lock is released. Callers must go through this helper
+    rather than calling ``.predict()`` themselves.
+    """
+    with _PADDLE_LOCK:
+        return list(predictor.predict(*args, **kwargs))
+
+
 _doc_orientation_model = None
 
 
@@ -477,15 +505,17 @@ def _get_doc_orientation_model():
     """Return the cached PaddleX cardinal document-orientation classifier."""
     global _doc_orientation_model
     if _doc_orientation_model is None:
-        try:
-            from paddlex import create_model
-        except ImportError as exc:
-            raise PdfCorruptError(
-                "Document orientation detection requires paddlex"
-            ) from exc
-        _doc_orientation_model = create_model(
-            model_name="PP-LCNet_x1_0_doc_ori"
-        )
+        with _PADDLE_LOCK:
+            if _doc_orientation_model is None:
+                try:
+                    from paddlex import create_model
+                except ImportError as exc:
+                    raise PdfCorruptError(
+                        "Document orientation detection requires paddlex"
+                    ) from exc
+                _doc_orientation_model = create_model(
+                    model_name="PP-LCNet_x1_0_doc_ori"
+                )
     return _doc_orientation_model
 
 
@@ -533,7 +563,9 @@ def detect_page_orientations(
         }
 
     model = _get_doc_orientation_model()
-    predictions = list(model.predict(images, batch_size=min(8, len(images))))
+    predictions = _paddle_predict(
+        model, images, batch_size=min(8, len(images))
+    )
     rotations: list[dict] = []
     for page_idx, prediction in zip(candidate_pages, predictions, strict=True):
         payload = prediction.json if hasattr(prediction, "json") else prediction
@@ -1537,24 +1569,26 @@ def _get_pp_structure(lang: str = "en"):
     (faint lines, skewed rows, merged cells).
     """
     if lang not in _pp_structure_instances:
-        try:
-            from paddleocr import PPStructureV3
-        except ImportError:
-            raise PdfCorruptError(
-                "Table OCR requires paddleocr>=3.0 with PPStructureV3 support. "
-                "pip install paddlepaddle paddleocr"
-            )
-        _pp_structure_instances[lang] = PPStructureV3(
-            device="cpu",
-            use_doc_orientation_classify=False,
-            use_doc_unwarping=False,
-            use_textline_orientation=False,
-            use_seal_recognition=False,
-            use_formula_recognition=False,
-            use_chart_recognition=False,
-            use_table_recognition=True,
-            lang=lang,
-        )
+        with _PADDLE_LOCK:
+            if lang not in _pp_structure_instances:
+                try:
+                    from paddleocr import PPStructureV3
+                except ImportError:
+                    raise PdfCorruptError(
+                        "Table OCR requires paddleocr>=3.0 with PPStructureV3 "
+                        "support. pip install paddlepaddle paddleocr"
+                    )
+                _pp_structure_instances[lang] = PPStructureV3(
+                    device="cpu",
+                    use_doc_orientation_classify=False,
+                    use_doc_unwarping=False,
+                    use_textline_orientation=False,
+                    use_seal_recognition=False,
+                    use_formula_recognition=False,
+                    use_chart_recognition=False,
+                    use_table_recognition=True,
+                    lang=lang,
+                )
     return _pp_structure_instances[lang]
 
 
@@ -1654,7 +1688,7 @@ def _extract_tables_ppstructure(
     )
 
     try:
-        output = engine.predict(input=img_array)
+        output = _paddle_predict(engine, input=img_array)
     except Exception as e:
         log.warning("ppstructure_failed", page=page_idx, error=str(e))
         return []
@@ -2338,22 +2372,24 @@ def _get_paddle_ocr(lang: str = "en"):
     forms and receipts with small text and complex layouts.
     """
     if lang not in _paddle_ocr_instances:
-        try:
-            from paddleocr import PaddleOCR
-        except ImportError:
-            raise PdfCorruptError(
-                "OCR requires paddleocr>=3.0 and paddlepaddle>=3.0 packages. "
-                "pip install paddlepaddle paddleocr"
-            )
-        _paddle_ocr_instances[lang] = PaddleOCR(
-            ocr_version="PP-OCRv5",
-            lang=lang,
-            device="cpu",
-            use_doc_orientation_classify=False,
-            use_doc_unwarping=False,
-            use_textline_orientation=True,
-            **_det_limit_kwargs(),
-        )
+        with _PADDLE_LOCK:
+            if lang not in _paddle_ocr_instances:
+                try:
+                    from paddleocr import PaddleOCR
+                except ImportError:
+                    raise PdfCorruptError(
+                        "OCR requires paddleocr>=3.0 and paddlepaddle>=3.0 "
+                        "packages. pip install paddlepaddle paddleocr"
+                    )
+                _paddle_ocr_instances[lang] = PaddleOCR(
+                    ocr_version="PP-OCRv5",
+                    lang=lang,
+                    device="cpu",
+                    use_doc_orientation_classify=False,
+                    use_doc_unwarping=False,
+                    use_textline_orientation=True,
+                    **_det_limit_kwargs(),
+                )
     return _paddle_ocr_instances[lang]
 
 
@@ -2405,10 +2441,8 @@ def ocr_pages(
         }
     """
     if backend == "rapid":
-        if force_ocr:
-            raise ValueError("RapidOCR pilot is not enabled for identifier redaction")
         from app.services.rapid_ocr import ocr_pages as rapid_ocr_pages
-        return rapid_ocr_pages(pdf_bytes, pages, language, dpi)
+        return rapid_ocr_pages(pdf_bytes, pages, language, dpi, force_ocr=force_ocr)
     if backend != "paddle":
         raise ValueError("Unknown OCR backend")
 
@@ -2466,7 +2500,7 @@ def ocr_pages(
 
         # Run PaddleOCR PP-OCRv5 (detection + orientation + recognition)
         try:
-            ocr_output = _get_paddle_ocr(language).predict(input=img_array)
+            ocr_output = _paddle_predict(_get_paddle_ocr(language), input=img_array)
         except Exception as e:
             log.warning("ocr_failed", page=page_idx, error=str(e))
             all_page_results.append({

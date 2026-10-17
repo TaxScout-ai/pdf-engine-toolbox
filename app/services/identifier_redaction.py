@@ -308,7 +308,9 @@ def _part_rect(word: Word, lo: int, hi: int, page: fitz.Page | None, source: str
     x1 = word.rect.x0 + unit * sum(weights[:hi])
     # Outward on the redacted side only: the kept last four digits stay whole.
     left = x0 - unit * 0.3
-    right = x1 + unit * 0.3 if hi >= len(word.text) else x1 - unit * 0.1
+    # Proportional widths are estimates: when the cut is inside the word, run a
+    # little into the first kept digit rather than leave a hidden one showing.
+    right = x1 + unit * 0.3 if hi >= len(word.text) else x1 + unit * 0.25
     return fitz.Rect(left, word.rect.y0, right, word.rect.y1)
 
 

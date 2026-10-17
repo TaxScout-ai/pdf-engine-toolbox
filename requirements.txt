@@ -25,6 +25,8 @@ paddlex[ocr]
 # Primary review OCR; pinned weights are built into the image and hash-checked.
 rapidocr==3.9.2
 onnxruntime==1.30.0
+# OCR queue encryption at rest (TAX-6876); already in the image via PaddleX.
+cryptography==50.0.2
 # Testing
 pytest==9.0.2
 pytest-asyncio==1.3.0

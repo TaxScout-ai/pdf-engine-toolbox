@@ -197,6 +197,9 @@ class HealthResponse(BaseModel):
     license: str
     project_license: str
     source_code_url: str
+    # Additive (TAX-6876): features callers may gate on. See
+    # app/routes/health.py::capabilities for the vocabulary.
+    capabilities: list[str] = []
 
 
 class ThirdPartySource(BaseModel):

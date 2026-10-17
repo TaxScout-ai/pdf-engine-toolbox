@@ -92,11 +92,17 @@ async def lifespan(app: FastAPI):
         from app.services.rapid_ocr import validate_runtime
         validate_runtime()
 
+    # Resume OCR jobs that were queued or running before the restart.
+    from app.services import ocr_queue
+    ocr_queue.get_queue()
+
     # Pre-warm PaddleOCR only when explicitly selected for rollback.
     # Only warm up the core OCR pipeline (_get_paddle_ocr) — NOT PPStructureV3
     # (_get_pp_structure), which loads PP-Chart2Table (~1.5 GB transformer) and
     # would OOM a t3a.medium (4 GB RAM) when combined with the rest of the stack.
     # PPStructure models load lazily on first classify/table request.
+    # With RapidOCR selected no Paddle model loads until a table or
+    # orientation request arrives.
     try:
         def _warmup():
             if settings.ocr_backend == "rapid":
@@ -113,6 +119,8 @@ async def lifespan(app: FastAPI):
 
     yield
     log.info("pdf_engine_shutting_down")
+    # Unfinished jobs stay in the ledger and resume on the next start.
+    ocr_queue.shutdown()
 
 
 app = FastAPI(

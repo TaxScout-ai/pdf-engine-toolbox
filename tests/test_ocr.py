@@ -15,6 +15,7 @@ import fitz
 import numpy as np
 import pytest
 from app.config import settings
+from app.services import ocr_queue
 
 
 @pytest.fixture(autouse=True)
@@ -66,6 +67,13 @@ def _mock_paddle_empty_result():
     return [result_obj]
 
 
+def _drain(response):
+    """Let the queued job finish while the test's mocks are still in place."""
+    task_id = response.json().get("task_id")
+    if task_id:
+        ocr_queue.get_queue().wait(task_id)
+
+
 def _completed_task_result(client, auth_headers, accepted: dict) -> dict:
     """Read the completed background result using the signed task endpoint."""
     assert accepted["status"] == "pending"
@@ -101,6 +109,7 @@ def test_ocr_returns_rich_json(client, auth_headers):
         return_value=mock_paddle,
     ):
         response = client.post("/text/ocr", content=body, headers=headers)
+        _drain(response)
 
     assert response.status_code == 200
     data = response.json()
@@ -164,6 +173,7 @@ def test_ocr_skips_pages_with_text(client, auth_headers):
         return_value=mock_paddle,
     ):
         response = client.post("/text/ocr", content=body, headers=headers)
+        _drain(response)
 
     assert response.status_code == 200
     data = response.json()
@@ -208,6 +218,7 @@ def test_ocr_large_doc_becomes_background_task(client, auth_headers):
         return_value=mock_paddle,
     ):
         response = client.post("/text/ocr", content=body, headers=headers)
+        _drain(response)
 
     assert response.status_code == 200
     data = response.json()
@@ -239,6 +250,7 @@ def test_ocr_default_language_is_en(client, auth_headers):
         return_value=mock_paddle,
     ) as mock_get_paddle:
         response = client.post("/text/ocr", content=body, headers=headers)
+        _drain(response)
 
     assert response.status_code == 200
     # Verify PaddleOCR was initialised with 'en'

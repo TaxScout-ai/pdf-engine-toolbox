@@ -106,3 +106,27 @@ def test_pymupdf_source_manifest_matches_runtime_requirement():
     assert len(pymupdf["sha256"]) == 64
     assert components["MuPDF"]["version"] == pymupdf["version"]
     assert len(components["MuPDF"]["sha256"]) == 64
+
+
+def test_health_lists_capabilities_for_the_rapid_backend(client, monkeypatch):
+    """TAX-6876/6877: the app enforces Rapid redaction only on this signal."""
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "ocr_backend", "rapid")
+    data = client.get("/health").json()
+    assert data["capabilities"] == ["ocr-queue:persistent", "identifier-redaction:rapid-ocr"]
+    # Additive only: every earlier field is still there.
+    assert {
+        "status", "version", "build_commit", "pymupdf_version", "license",
+        "project_license", "source_code_url",
+    } <= set(data)
+
+
+def test_paddle_rollback_does_not_claim_rapid_redaction(client, monkeypatch):
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "ocr_backend", "paddle")
+    data = client.get("/health").json()
+    assert data["status"] == "ok"
+    assert data["capabilities"] == ["ocr-queue:persistent"]
+    assert "identifier-redaction:rapid-ocr" not in data["capabilities"]

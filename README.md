@@ -81,15 +81,17 @@ uvicorn app.main:app --reload
 Development processes outside the container report `development` as their
 build identity and link to the repository's default branch.
 
-## RapidOCR evaluation pilot (TAX-6490)
+## RapidOCR backend (TAX-6490, TAX-6876)
 
-`OCR_BACKEND=paddle` remains the default. An isolated evaluation instance may
-select `OCR_BACKEND=rapid`, with `WORKERS=1` and `RAPIDOCR_MODEL_DIR` pointing to
+`OCR_BACKEND=rapid` is the code default since TAX-6713; a deployment may pin
+`OCR_BACKEND=paddle` as the rollback. Rapid needs `WORKERS=1` and `RAPIDOCR_MODEL_DIR` pointing to
 a read-only directory containing the three models listed in
 `app/services/rapid_ocr.py::MODEL_HASHES`. The ordinary `/text/ocr` endpoint and
 task polling contract select one backend; there is no automatic Paddle retry.
-The application currently rejects experimental results from production
-verification. This is a standalone pilot, not a production replacement.
+RapidOCR is the planned production engine: responses carry
+`provenance.experimental: false`; earlier builds sent `true`. The field is
+kept so readers of the old shape keep working, and nothing in the engine
+depends on it.
 
 The pinned runtime is RapidOCR 3.9.2 + ONNX Runtime 1.30.0, CPU only, using
 PP-OCRv6 Small detection/recognition and the mobile v2 line classifier. Public
@@ -101,14 +103,92 @@ versioned upstream locations; the service verifies their SHA-256 before loading:
 - https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.9.2/onnx/PP-OCRv4/cls/ch_ppocr_mobile_v2.0_cls_mobile.onnx
 
 Missing, altered or mismatched weights/packages fail the task; runtime does
-not download substitutes. Package installation adds disk usage but model
-instances load lazily, once per process. The pilot skips Paddle startup
-warmup. One document runs at a time, rendering one page at a time, with a
-30-second wait limit for contending requests. ONNX intra/inter-op pools and
-OpenCV are each configured for two threads; these settings are not a hard
-CPU quota. Rendering caps at 216 DPI and 16 million pixels/page. Use a
-container CPU/memory budget during deployment and size it from measured
-whole-service peak RSS, including concurrent non-OCR operations.
+not download substitutes. Engines load lazily, one per OCR worker thread. The
+Rapid backend skips Paddle startup warmup. Rendering caps at 216 DPI and 16
+million pixels/page. Use a container CPU/memory budget during deployment and
+size it from measured whole-service peak RSS, including concurrent non-OCR
+operations.
+
+## OCR job queue (TAX-6876)
+
+Every `POST /text/ocr` is a persistent job. Its PDF is spilled to
+`OCR_QUEUE_DIR/inputs/` (default `/data/ocr-queue`, which must sit on the
+persistent `/data` volume) and its state lives in `OCR_QUEUE_DIR/jobs.sqlite3`.
+On startup, jobs that were `pending` or `processing` are re-queued in their
+original order; RapidOCR jobs resume from the first page not yet recorded, and
+a job whose every page was recorded before the restart is finished at once.
+Completed and failed results stay readable for `OCR_RESULT_TTL_SECONDS`
+(default 3600); after that a read answers `TASK_NOT_FOUND`.
+
+### Client data at rest
+
+The queue holds client documents (with SSNs) and their OCR text, so:
+
+- Inputs (`inputs/<id>.bin`), results (`results/<id>.bin`) and per-page
+  checkpoints (rows in `jobs.sqlite3`) are sealed with AES-256-GCM. Each is
+  bound to its job id, so a file swapped between jobs or altered on disk fails
+  authentication, and that job fails instead of reading it.
+- The key is `OCR_QUEUE_KEY`: 32 bytes in URL-safe base64, or any passphrase
+  (HKDF-SHA256). **Production and staging set a dedicated `OCR_QUEUE_KEY`.**
+  Without it, the key is HKDF-derived from `PDF_ENGINE_SECRET`. The engine
+  refuses to start when neither is set to a non-default value
+  (`PDF_ENGINE_SECRET=change-me` and no `OCR_QUEUE_KEY`).
+- Changing the key makes data sealed under the old key unreadable:
+  - a queued job fails with an authentication error;
+  - a stored result answers `GET /tasks/{id}` with a `failed` task ("OCR
+    result unreadable"), never HTTP 500.
+
+  Rotate only with an empty queue.
+- OCR results are not written to the plaintext file cache (`CACHE_DIR`). A
+  repeated identical request (same bytes and parameters) is answered from the
+  newest unexpired result in the sealed ledger, so there is one copy under one
+  retention rule.
+- `OCR_QUEUE_DIR` and its subdirectories are mode 0700. Files and the SQLite
+  ledger (including `-wal`/`-shm`) are mode 0600.
+- An input is deleted as soon as its job finishes. Every
+  `OCR_SWEEP_INTERVAL_SECONDS` (default 300) a sweeper:
+  - deletes expired jobs and their results;
+  - deletes files no ledger row refers to, and temporaries older than ten
+    minutes;
+  - deletes page-checkpoint rows of finished jobs;
+  - restarts any OCR worker thread that died.
+
+A failure after a page was read fails that job with the reason; the worker
+carries on. Examples: the disk filling up while checkpointing, assembling or
+writing the result, or a ledger write that is rolled back.
+
+`GET /tasks/{id}` keeps its contract (`pending` / `processing` / `completed` /
+`failed`, `result` or `error`; unknown ids answer HTTP 200 with
+`{"success": false, "error": {"code": "TASK_NOT_FOUND", ...}}`). Unfinished OCR
+jobs also report `queue_position` (unfinished jobs submitted earlier) and
+`eta_seconds` (estimate from measured page time).
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `OCR_WORKERS` | CPUs available (affinity and cgroup quota) | concurrent OCR inferences; one RapidOCR engine with its own ONNX Runtime sessions per worker thread |
+| `OCR_INTRA_OP_THREADS` | CPUs // `OCR_WORKERS`, at least 1 | ONNX Runtime intra-op threads per session and OpenCV threads; inter-op is 1 |
+| `OCR_MAX_ACTIVE_JOBS` | max(2, `OCR_WORKERS`) | documents interleaved page by page; later documents wait FIFO |
+| `OCR_QUEUE_MAX_JOBS` | 500 | unfinished jobs accepted before 429 |
+| `OCR_RESULT_TTL_SECONDS` | 3600 | how long finished results stay readable |
+| `OCR_QUEUE_KEY` | derived from `PDF_ENGINE_SECRET` | key for queue data at rest |
+| `OCR_SWEEP_INTERVAL_SECONDS` | 300 | retention sweep and worker supervision |
+| `OCR_SYNC_TIMEOUT_SECONDS` | 1200 | synchronous OCR (identifier redaction) fails closed after this |
+
+A RapidOCR document is split into one unit per page, so one large scan uses
+every idle worker and page results are reassembled in page order with
+unchanged visual-PDF-point coordinates. Idle workers take pages from active
+documents round-robin, so a short document submitted behind a long scan
+finishes first. Nothing answers "busy": the only refusal is HTTP 429 with a
+`Retry-After` header (seconds) and error code `OCR_QUEUE_FULL` when
+`OCR_QUEUE_MAX_JOBS` unfinished jobs are queued. **Callers must retry a 429
+after `Retry-After` seconds.**
+
+`GET /health` lists `capabilities` (additive). `ocr-queue:persistent` is always
+present on this version; `identifier-redaction:rapid-ocr` is present only when
+`OCR_BACKEND=rapid`, i.e. when identifier redaction really reads with RapidOCR.
+
+`WORKERS` (uvicorn processes) must stay 1 on both backends: the queue is
+scheduled and recovered by one process. Scale with `OCR_WORKERS` instead.
 
 Native digital text keeps the existing skip behavior without loading models.
 Rapid scan results include `provenance`, per-page `text_source`, and per-word
@@ -120,13 +200,50 @@ rotation normalization and hard-coded Paddle source label must be adapted
 before accepting these results into the production pipeline (TAX-6471 also
 tracks unsafe sign/decimal/wrong-field matching).
 
-Identifier redaction calls retain the default Paddle backend, regardless of
-`OCR_BACKEND`; explicit Rapid + `force_ocr` is rejected. Table recognition also
-retains its existing implementation. Invoking those features in the same
-process can load Paddle in addition to Rapid, so a Rapid-only memory estimate
-must not be treated as a whole mixed-workload budget. Use the isolated pilot
-for OCR evaluation; rollback the ordinary OCR path by selecting `paddle` and
-restarting. Backend-specific cache keys prevent reusing Rapid results as
+Identifier redaction follows `OCR_BACKEND`: with `rapid` it reads page images
+through the same OCR workers (same words-and-boxes contract) and never imports
+Paddle. It fails closed in two cases, and the document is refused rather than
+returned with an identifier possibly left readable:
+- a page OCR failed on (status `failed`);
+- a page OCR read (any status) that carries identifier-shaped print that no
+  OCR reading covers. Words OCR found elsewhere on a page say nothing about the
+  line it missed.
+  - **Read print.** Redaction counts as read, and searches for identifiers, all
+    of: regular words; RapidOCR words below the 0.5 review threshold (an
+    uncertain reading of an SSN is still redacted); and whole recognized lines
+    (RapidOCR sometimes reads a line but splits it into fragment words). These
+    extras stay inside redaction; the `/text/ocr` response is unchanged.
+  - **Print.** The page is rendered at the OCR DPI in grayscale and compared
+    with its own background (a 31-pixel median filter). Pixels more than 6
+    levels darker count as print, after removing solid black areas
+    (redaction boxes, bars). A 3x3 closing then rejoins faint strokes. Rules,
+    box grids, empty checkbox frames and small marks cut by the page edge are
+    form structure, not print.
+  - **Coverage.** A print component counts as read when half of it lies inside
+    a read box widened by max(4 px, 30% of the box height).
+  - **Identifier-shaped.** Unread print refuses only when it could hold an
+    identifier: a run of at least 4 marks side by side on one line,
+    horizontally or vertically, or a run (a merged blob included) about 9
+    digits long at its own glyph height. Marks at most 4 px across the line
+    (dot leaders, dashes) do not join runs. Logos, shaded boxes, edge marks and
+    isolated 1–3-glyph marks do not refuse.
+
+  A printed SSN that OCR missed refuses at 4–10 pt in grays 0–246, blurred
+  (sigma 1–3), or rotated 90° or 270°. A blank page, sigma-4 noise and up to
+  400 dust specks pass.
+
+  Measured with RapidOCR on 200-DPI scans of the IRS 2025 blank forms (16
+  PDFs, 31 pages): 18 of 31 pages pass. 12 of the 13 refusals are IRS cover
+  sheets ("Attention" pages), whose flag stripes form runs of print. The 13th
+  is the Massachusetts 1099-HC, whose logo does the same. Both OCR backends tag
+  failed pages.
+- an OCR run that exceeds `OCR_SYNC_TIMEOUT_SECONDS`. Table recognition (`/text/tables`) and orientation
+(`/transform/orientation`) keep their Paddle models, which load lazily on the
+first such request; every Paddle inference in the process is serialized by one
+lock (TAX-6255). Invoking those endpoints loads Paddle in addition to Rapid,
+so a Rapid-only memory estimate is not a whole mixed-workload budget.
+Rollback both OCR and redaction by selecting `OCR_BACKEND=paddle` and
+restarting; Paddle OCR jobs run through the same queue, one unit per document. Backend-specific cache keys prevent reusing Rapid results as
 Paddle results after rollback. Existing cached Paddle entries are invalidated
 once by the new versioned key.
 

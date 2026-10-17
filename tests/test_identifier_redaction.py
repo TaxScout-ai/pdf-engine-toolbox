@@ -124,15 +124,19 @@ def test_scanned_page_is_redacted_from_ocr_boxes_and_checked_by_ocr():
     ocr = _pixel_reading_ocr(positions["__words__"])
     result = ir.redact_identifiers(scan, ocr=ocr)
     assert result["ocr_pages"] == [0]
-    assert {r["last4"] for r in result["redactions"]} == {"5678", "4567", "6789"}
+    # TAX-6876: on OCR'd pages any nine-digit run is identifier-shaped (an SSN
+    # read without its label or dashes looks the same), so the routing number
+    # loses its first five digits too. Text layers keep it (test above).
+    assert {r["last4"] for r in result["redactions"]} == {"5678", "4567", "6789", "0021"}
     assert all(r["source"] == "ocr" for r in result["redactions"])
     # The same reader now sees no identifier on the outgoing page.
     after = ocr(result["pdf_bytes"], [0])[0]
     seen = " ".join(w.text for w in after)
     assert not any(identifier in seen for identifier in IDENTIFIERS), seen
     assert "912-34" not in seen and "00-123" not in seen
-    assert "021000021" in [w.text for w in after]  # a routing number stays readable
-    assert "75250.00" in [w.text for w in after]
+    assert "021000021" not in seen
+    assert "75250.00" in [w.text for w in after]  # amounts stay readable
+    assert "78701-1234" in seen and "512-555-0100" in seen  # ZIP+4 and phone too
 
 
 def test_a_photo_is_converted_and_redacted():
@@ -140,7 +144,7 @@ def test_a_photo_is_converted_and_redacted():
     png = fitz.open(stream=scan, filetype="pdf")[0].get_pixmap(dpi=72).tobytes("png")
     result = ir.redact_identifiers(png, "image/png", ocr=_pixel_reading_ocr(positions["__words__"]))
     assert fitz.open(stream=result["pdf_bytes"], filetype="pdf").page_count == 1
-    assert {r["last4"] for r in result["redactions"]} == {"5678", "4567", "6789"}
+    assert {r["last4"] for r in result["redactions"]} == {"5678", "4567", "6789", "0021"}
 
 
 def test_fails_closed_when_an_identifier_survives(monkeypatch):

@@ -68,6 +68,8 @@ class RedactionIncompleteError(Exception):
 class Word:
     text: str
     rect: fitz.Rect
+    # "word", or "line" for a whole recognized OCR line (searched on its own).
+    kind: str = "word"
 
 
 @dataclass(frozen=True)
@@ -80,8 +82,84 @@ class Found:
     rects: tuple[fitz.Rect, ...]
 
 
-def _matches(line: str) -> Iterable[tuple[int, int, str, str]]:
-    """(start, end, kind, digits) for every identifier in one line of text."""
+# OCR confusions read as digits inside numeric-looking tokens (TAX-6876).
+_CONFUSIONS = str.maketrans({
+    "I": "1", "l": "1", "|": "1", "O": "0", "o": "0", "D": "0", "S": "5", "s": "5",
+    "B": "8", "Z": "2", "G": "6", "q": "9",
+})
+_CONFUSABLE = set("Il|OoDSsBZGq")
+# Number shapes that are not identifiers; masked before digit runs are read.
+_NOT_IDENTIFIER = re.compile(
+    r"\$?\d{1,3}(?:,\d{3})+(?:\.\d{2})?(?!\d)"   # 1,234 / 75,250.00
+    r"|\$?\d+\.\d{2}(?!\d)"                       # 75250.00
+    r"|(?<!\d)\d{1,2}/\d{1,2}/\d{2,4}(?!\d)"        # dates
+    r"|(?<!\d)\d{5}-\d{4}(?!\d)"                    # ZIP+4
+    r"|\(\d{3}\)\s?\d{3}[-.]\d{4}(?!\d)"             # (555) 123-4567
+    r"|(?<!\d)\d{3}[-.]\d{3}[-.]\d{4}(?!\d)"          # 555-123-4567
+)
+# A digit run: digits joined by at most two separator characters at a time.
+_DIGIT_RUN = re.compile(r"\d(?:[-\u2010-\u2015./_:\u00b7\u2022 ]{0,2}\d)*")
+# A run of this many digits that is not an identifier may be a misread one.
+_SUSPECT_DIGITS = 7
+
+
+def normalize_confusions(text: str) -> str:
+    """Map OCR letter/digit confusions to digits inside numeric-looking tokens.
+
+    Character-for-character, so positions are kept. A token (between spaces)
+    is normalized when it holds at least one digit and digits plus confusable
+    letters make up at least half of its letters and digits: "I23-45-678S"
+    becomes "123-45-6785"; "ID", "SSN" and "Box" stay words.
+    """
+    out = []
+    for token in re.split(r"(\s+)", text):
+        alnum = [c for c in token if c.isalnum() or c == "|"]
+        numeric = sum(c.isdigit() or c in _CONFUSABLE for c in alnum)
+        if any(c.isdigit() for c in token) and alnum and numeric * 2 >= len(alnum):
+            token = token.translate(_CONFUSIONS)
+        out.append(token)
+    return "".join(out)
+
+
+def _digit_runs(text: str) -> Iterable[tuple[int, int, str]]:
+    """(start, end, digits) of digit runs, non-identifier number shapes masked."""
+    masked = _NOT_IDENTIFIER.sub(lambda m: "x" * len(m.group(0)), text)
+    for m in _DIGIT_RUN.finditer(masked):
+        yield m.start(), m.end(), re.sub(r"\D", "", m.group(0))
+
+
+def _run_kind(text: str, start: int, end: int) -> str:
+    groups = [len(g) for g in re.findall(r"\d+", text[start:end])]
+    if groups == [3, 2, 4]:
+        return "ssn"
+    if groups == [2, 7]:
+        return "ein"
+    label = text[max(0, start - 60):start]
+    return "ssn" if _SSN_LABEL.search(label) else "ein" if _EIN_LABEL.search(label) else "tin"
+
+
+def suspect_runs(text: str) -> list[str]:
+    """Digit runs of _SUSPECT_DIGITS+ digits that are not identifier-shaped."""
+    text = normalize_confusions(text)
+    return [
+        digits for _, _, digits in _digit_runs(text)
+        if len(digits) >= _SUSPECT_DIGITS and len(digits) != 9
+    ]
+
+
+def _matches(line: str, ocr: bool = False) -> Iterable[tuple[int, int, str, str]]:
+    """(start, end, kind, digits) for every identifier in one line of text.
+
+    OCR text (``ocr``) is matched after confusion normalization, and any run of
+    exactly nine digits, whatever its separators, is an identifier: a misread
+    "I23-45-678S" or "123 45  6789" is still an SSN.
+    """
+    if ocr:
+        normalized = normalize_confusions(line)
+        for start, end, digits in _digit_runs(normalized):
+            if len(digits) == 9:
+                yield start, end, _run_kind(normalized, start, end), digits
+        return
     for m in _SSN.finditer(line):
         yield m.start(), m.end(), "ssn", m.group(1) + m.group(3) + m.group(4)
     for m in _EIN.finditer(line):
@@ -197,7 +275,10 @@ def find_identifiers(
     page image (OCR lines).
     """
     found: list[Found] = []
-    for line in _lines(words):
+    groups = _lines([w for w in words if w.kind == "word"])
+    # A recognized line is searched on its own, never joined to its words.
+    groups += [[w] for w in words if w.kind == "line"]
+    for line in groups:
         text = ""
         spans: list[tuple[int, int, Word]] = []
         for w in line:
@@ -206,8 +287,9 @@ def find_identifiers(
             start = len(text)
             text += w.text
             spans.append((start, len(text), w))
-        for start, end, kind, digits in _matches(text):
-            cut = _prefix_end(text, start, end)
+        ocr = source == "ocr"
+        for start, end, kind, digits in _matches(text, ocr):
+            cut = _prefix_end(normalize_confusions(text) if ocr else text, start, end)
             rects = []
             for s, e, w in spans:
                 lo, hi = max(start, s), min(cut, e)
@@ -311,6 +393,11 @@ _GLYPH_MAX_SIDE = 150
 _SPECK_MAX_SIDE, _SPECK_MAX_AREA = 10, 80
 _ID_MIN_RUN = 4
 _ID_MIN_DIGITS = 9
+_DIGIT_MIN_SIZE, _DIGIT_MAX_SIZE = 10, 60
+_DIGIT_MIN_CONTRAST = 18
+_DARK_REGION = 200
+_SHAPE_TONE = 0.35
+_SHAPE_RING = 0.25
 _READ_FRACTION = 0.5
 
 
@@ -369,6 +456,61 @@ def _identifier_run(components, along: int) -> bool:
     return False
 
 
+def _part_of_larger_shape(gray, background, labels, i, x, y, w, h) -> bool:
+    """A mark that continues, at the same tone, into unmarked surroundings.
+
+    The 31-px median background absorbs most of a large filled shape (a logo,
+    a shaded box), leaving only its corners as marks. Such a corner has the
+    tone of a good part (_SHAPE_RING) of the pixels around it; print — dark
+    on paper, dark inside a shaded box, light on a dark fill — differs from
+    nearly all of its surroundings.
+    """
+    import cv2
+    import numpy as np
+
+    pad = 3
+    y0, y1 = max(0, y - pad), min(gray.shape[0], y + h + pad)
+    x0, x1 = max(0, x - pad), min(gray.shape[1], x + w + pad)
+    own = (labels[y0:y1, x0:x1] == i).astype(np.uint8)
+    ring = (cv2.dilate(own, np.ones((2 * pad + 1, 2 * pad + 1), np.uint8)) > 0) & (own == 0)
+    region = gray[y0:y1, x0:x1].astype(np.int16)
+    if not ring.any():
+        return False
+    mark = float(np.median(region[own > 0]))
+    base = float(np.median(background[y0:y1, x0:x1][own > 0]))
+    # Print stands out from all its surroundings; a shape's corner continues,
+    # at its own tone, into the unmarked rest of the shape.
+    if abs(mark - base) < 12:
+        return False  # faint print; a shape this light never counts as digits
+    tolerance = max(4.0, _SHAPE_TONE * abs(mark - base))
+    same = np.abs(region[ring] - mark) < tolerance
+    return float(same.mean()) >= _SHAPE_RING
+
+
+def _digit_budget(unread) -> int:
+    """Digit-equivalents in digit-sized unread marks, upright or rotated.
+
+    A mark is digit-sized when its height across the line is 10-60 px (a digit
+    of about 5-28 pt at 216 DPI; dust specks stay under 10 px) and it is printed, not noise: at its darkest it
+    differs from the background by at least _DIGIT_MIN_CONTRAST levels (gray
+    237 on white; sensor noise stays below). A mark holds about
+    length / (0.6 x height) digits. The larger of the upright and the rotated reading counts.
+    """
+    def digits(c, along):
+        across = 1 - along
+        length, size = c[2 + along], c[2 + across]
+        if not _DIGIT_MIN_SIZE <= size <= _DIGIT_MAX_SIZE or c[5] < _DIGIT_MIN_CONTRAST:
+            return 0
+        # A small round filled blob is dust: a single digit is taller than
+        # wide, and merged digits are larger.
+        if (max(c[2], c[3]) <= 14 and 0.75 <= c[2] / c[3] <= 1.33
+                and c[4] >= 0.6 * c[2] * c[3]):
+            return 0
+        return 1 if length <= 0.9 * size else max(1, round(length / (0.6 * size)))
+
+    return max(sum(digits(c, 0) for c in unread), sum(digits(c, 1) for c in unread))
+
+
 def _is_box_outline(component) -> bool:
     """An empty rectangular frame: nearly all its pixels lie on its bounding box.
 
@@ -413,10 +555,17 @@ def unread_text(
             gray = gray.copy()
             sx, sy = pix.width / page.rect.width, pix.height / page.rect.height
     background = cv2.medianBlur(gray, _BACKGROUND_WINDOW)
+    contrast = np.abs(background.astype(np.int16) - gray)
     marks = ((background.astype(np.int16) - gray) > _MARK_CONTRAST).astype(np.uint8)
     kernel = np.ones((_SOLID_KERNEL, _SOLID_KERNEL), np.uint8)
     solid = cv2.morphologyEx((gray <= _SOLID_BLACK).astype(np.uint8), cv2.MORPH_OPEN, kernel)
     marks[cv2.dilate(solid, np.ones((7, 7), np.uint8)) > 0] = 0
+    # Inverted print: inside dark regions (black or gray fills, a redaction box
+    # included) light marks are print too — white on black, white on gray.
+    # The region is eroded so the paper just outside a dark area is not print.
+    dark = cv2.erode((background < _DARK_REGION).astype(np.uint8), np.ones((11, 11), np.uint8))
+    light = (gray.astype(np.int16) - background) > _MARK_CONTRAST
+    marks[(dark > 0) & light] = 1
     # Faint print breaks into stroke fragments; a 3x3 closing rejoins them.
     marks = cv2.morphologyEx(marks, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
 
@@ -451,7 +600,11 @@ def unread_text(
             continue  # a small mark cut by the page edge: a scan border artifact
         if inside[i] >= _READ_FRACTION * area:
             continue
-        unread.append((x, y, w, h, area))
+        own = labels[y:y + h, x:x + w] == i
+        if _part_of_larger_shape(gray, background, labels, i, x, y, w, h):
+            continue  # a corner of a large filled shape (logo, shaded box)
+        peak = int(contrast[y:y + h, x:x + w][own].max())
+        unread.append((x, y, w, h, area, peak))
 
     def speck(c):
         return max(c[2], c[3]) <= _SPECK_MAX_SIDE and c[4] <= _SPECK_MAX_AREA
@@ -461,8 +614,14 @@ def unread_text(
     # any run (a merged blob included) long enough for about nine digits.
     if _identifier_run(unread, 0) or _identifier_run(unread, 1):
         reasons.append("identifier_shaped")
+    # Page budget: digit-sized unread marks anywhere on the page, whatever the
+    # gaps, dot leaders, boxes or line breaks between them.
+    budget = _digit_budget(unread)
+    if budget >= _ID_MIN_DIGITS:
+        reasons.append("digit_budget")
     ink = sum(c[4] for c in unread if not speck(c)) / marks.size
     return {
+        "unread_digits": budget,
         "unread_components": len(unread),
         "unread_ink_fraction": ink,
         "regions": [
@@ -493,26 +652,20 @@ def _words(result: dict, pdf_bytes: bytes) -> dict[int, list[Word]]:
             f"OCR failed on page(s) {failed}; identifiers there cannot be ruled out"
         )
     dpi = (result.get("provenance") or {}).get("render_dpi") or 216
+    def word(w, kind="word"):
+        box = w["bbox"]
+        return Word(w["text"], fitz.Rect(box["x"], box["y"], box["x"] + box["w"],
+                                         box["y"] + box["h"]), kind)
+
     out: dict[int, list[Word]] = {}
     for page in result["pages"]:
+        # Words below the review threshold, and whole recognized lines
+        # (RapidOCR may split a read line into fragments), are searched and
+        # count as read print: an uncertain reading of an SSN is redacted.
         out[page["page_index"]] = [
-            Word(
-                w["text"],
-                fitz.Rect(
-                    w["bbox"]["x"],
-                    w["bbox"]["y"],
-                    w["bbox"]["x"] + w["bbox"]["w"],
-                    w["bbox"]["y"] + w["bbox"]["h"],
-                ),
-            )
-            # Words below the review threshold, and whole recognized lines
-            # (RapidOCR may split a read line into fragments), are searched and
-            # count as read print: an uncertain reading of an SSN is redacted.
-            for w in [
-                *page["words"],
-                *page.get("_low_confidence_words", []),
-                *page.get("_lines", []),
-            ]
+            *(word(w) for w in page["words"]),
+            *(word(w) for w in page.get("_low_confidence_words", [])),
+            *(word(w, "line") for w in page.get("_lines", [])),
         ]
     unread = []
     for index, words in out.items():
@@ -545,7 +698,13 @@ def _scan(doc: fitz.Document, pdf_bytes: bytes, ocr: OcrWords) -> tuple[list[Fou
         if needs_ocr(page):
             ocr_pages.append(i)
     if ocr_pages:
+        suspect: dict[int, list[str]] = {}
         for i, words in ocr(pdf_bytes, ocr_pages).items():
+            for text in [w.text for w in words if w.kind == "line"] or [
+                " ".join(w.text for w in line) for line in _lines(words)
+            ]:
+                if suspect_runs(text):
+                    suspect.setdefault(i, []).extend(suspect_runs(text))
             for hit in find_identifiers(i, words, "ocr", doc[i]):
                 # A word and its recognized line can both carry the identifier;
                 # both boxes are redacted, reported once.
@@ -563,6 +722,13 @@ def _scan(doc: fitz.Document, pdf_bytes: bytes, ocr: OcrWords) -> tuple[list[Fou
                         twin.page, twin.kind, twin.last4, twin.source,
                         twin.rects + hit.rects,
                     )
+        if suspect:
+            # Seven or more digits read in a row that are not an identifier
+            # may be a misread one; the model must not see it either way.
+            raise RedactionIncompleteError(
+                f"page(s) {sorted(suspect)} contain digit runs that may be a misread "
+                "identifier; identifiers there cannot be ruled out"
+            )
     return found, ocr_pages
 
 

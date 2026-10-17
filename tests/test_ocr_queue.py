@@ -341,6 +341,8 @@ def test_identifier_redaction_reads_with_rapid_and_never_touches_paddle(monkeypa
         raise AssertionError("identifier redaction loaded Paddle")
 
     monkeypatch.setattr(pdf_service, "_get_paddle_ocr", no_paddle)
+    # Another test in the session may have loaded the real model already.
+    monkeypatch.setattr(pdf_service, "_paddle_ocr_instances", {})
     calls = []
 
     def engine(image, **_):

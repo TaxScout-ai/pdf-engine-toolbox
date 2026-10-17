@@ -12,6 +12,7 @@ import threading
 import time
 from pathlib import Path
 
+import fitz
 import pytest
 
 from app.config import Settings, settings
@@ -316,18 +317,52 @@ def test_a_queued_job_under_a_changed_key_fails_closed(
 # 5 ------------------------------------------------- redaction fails closed
 
 
-@pytest.mark.parametrize("engine_result", ["raises", "empty"])
-def test_redaction_refuses_a_page_ocr_could_not_read(monkeypatch, engine_result):
+def _empty_engine(image, **_):
     from types import SimpleNamespace
 
-    def engine(image, **_):
-        if engine_result == "raises":
-            raise RuntimeError("inference crashed")
-        return SimpleNamespace(txts=None, boxes=None, word_results=[[[], [], []]])
+    return SimpleNamespace(txts=None, boxes=None, word_results=[[[], [], []]])
 
-    monkeypatch.setattr(rapid_ocr, "_get_engine", lambda: engine)
-    with pytest.raises(ir.RedactionIncompleteError, match=r"could not read page\(s\) \[0\]"):
-        ir.redact_identifiers(scanned(1))
+
+def _image_only_pdf(draw) -> bytes:
+    """A scan: the page is one picture, no text layer to read identifiers from."""
+    with fitz.open() as source:
+        page = source.new_page(width=612, height=792)
+        draw(page)
+        png = page.get_pixmap(dpi=200).tobytes("png")
+    with fitz.open() as doc:
+        page = doc.new_page(width=612, height=792)
+        page.insert_image(page.rect, stream=png)
+        return doc.tobytes()
+
+
+def test_redaction_accepts_a_blank_scan_back(monkeypatch):
+    monkeypatch.setattr(rapid_ocr, "_get_engine", lambda: _empty_engine)
+    blank = _image_only_pdf(lambda page: None)
+    result = ir.redact_identifiers(blank)
+    assert result["ocr_pages"] == [0]
+    assert result["redactions"] == []
+    assert ir.ink_fraction(blank, 0, 216) == 0
+
+
+def test_redaction_refuses_a_faint_ssn_ocr_missed(monkeypatch):
+    monkeypatch.setattr(rapid_ocr, "_get_engine", lambda: _empty_engine)
+    faint = _image_only_pdf(
+        lambda page: page.insert_text((72, 120), "SSN 123-45-6789", fontsize=10,
+                                      color=(0.8, 0.8, 0.8))
+    )
+    with pytest.raises(ir.RedactionIncompleteError,
+                       match=r"page\(s\) \[0\] show ink but OCR read no text"):
+        ir.redact_identifiers(faint)
+    assert ir.ink_fraction(faint, 0, 216) > ir._BLANK_MAX_INK_FRACTION
+
+
+def test_redaction_refuses_a_page_ocr_failed_on(monkeypatch):
+    def crash(image, **_):
+        raise RuntimeError("inference crashed")
+
+    monkeypatch.setattr(rapid_ocr, "_get_engine", lambda: crash)
+    with pytest.raises(ir.RedactionIncompleteError, match=r"OCR failed on page\(s\) \[0\]"):
+        ir.redact_identifiers(_image_only_pdf(lambda page: None))
 
 
 # 6 ---------------------------------------------------------------- WORKERS

@@ -191,7 +191,13 @@ Identifier redaction follows `OCR_BACKEND`: with `rapid` it reads page images
 through the same OCR workers (same words-and-boxes contract) and never imports
 Paddle. It fails closed in two cases, and the document is refused rather than
 returned with an identifier possibly left readable:
-- a page OCR could not read (status `failed` or `empty`);
+- a page OCR failed on (status `failed`);
+- a page OCR read no text from (status `empty`) while its image shows ink. An
+  `empty` page is accepted only when it is genuinely blank, for example a
+  blank scan back. Blank means that, rendered at the OCR DPI in grayscale, at
+  most 0.01% of its pixels differ from the page's median gray by more than 32
+  levels. Faint print counts as ink at that threshold. Variance alone is not
+  used, because faint print barely moves it;
 - an OCR run that exceeds `OCR_SYNC_TIMEOUT_SECONDS`. Table recognition (`/text/tables`) and orientation
 (`/transform/orientation`) keep their Paddle models, which load lazily on the
 first such request; every Paddle inference in the process is serialized by one

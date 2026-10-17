@@ -256,27 +256,74 @@ def rapid_ocr_words(pdf_bytes: bytes, pages: list[int]) -> dict[int, list[Word]]
     """RapidOCR words through the shared OCR workers; no search layer is built."""
     from app.services import rapid_ocr
 
-    return _words(rapid_ocr.ocr_pages(pdf_bytes, pages, force_ocr=True, with_pdf=False))
+    result = rapid_ocr.ocr_pages(pdf_bytes, pages, force_ocr=True, with_pdf=False)
+    return _words(result, pdf_bytes)
 
 
 def paddle_ocr_words(pdf_bytes: bytes, pages: list[int]) -> dict[int, list[Word]]:
     from app.services import pdf_service
 
-    return _words(pdf_service.ocr_pages(pdf_bytes, pages, force_ocr=True, backend="paddle"))
+    result = pdf_service.ocr_pages(pdf_bytes, pages, force_ocr=True, backend="paddle")
+    return _words(result, pdf_bytes)
 
 
-# Page statuses that mean OCR could not read the page. Zero words from such a
-# page is not evidence that it shows no identifier, so redaction refuses.
-_UNREAD_STATUSES = {"failed", "empty"}
+# A page OCR returned no text for ("empty") is accepted only when its image is
+# genuinely blank — a blank scan back. Measured on the page rendered at the
+# OCR DPI, in grayscale: a pixel is ink when it differs from the page's
+# background (the median gray level) by more than _INK_CONTRAST levels, and
+# the page is blank when ink covers at most _BLANK_MAX_INK_FRACTION of it.
+#
+# The contrast step is low enough to count faint print (light-gray toner at
+# ~80% white still differs by ~50 levels) and high enough to ignore scanner
+# noise and paper tone. 0.01% is ~440 pixels on a Letter page at 216 DPI; one
+# 10-point SSN at that resolution inks well over 1 000. Variance is not used
+# on its own: faint print barely moves it, so it would pass faint text as blank.
+_INK_CONTRAST = 32
+_BLANK_MAX_INK_FRACTION = 0.0001
 
 
-def _words(result: dict) -> dict[int, list[Word]]:
-    unread = sorted(
-        page["page_index"] for page in result["pages"] if page.get("status") in _UNREAD_STATUSES
-    )
-    if unread:
+def ink_fraction(pdf_bytes: bytes, page_index: int, dpi: float) -> float:
+    """Share of the rendered page's pixels that are ink (see above)."""
+    import numpy as np
+
+    from app.services import rapid_ocr
+    from app.services.pdf_service import _open_pdf
+
+    zoom = dpi / 72
+    with rapid_ocr.FITZ_LOCK:
+        with _open_pdf(pdf_bytes) as doc:
+            pix = doc[page_index].get_pixmap(
+                matrix=fitz.Matrix(zoom, zoom), colorspace=fitz.csGRAY, alpha=False
+            )
+            gray = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width)
+            gray = gray.astype(np.int16)
+    background = int(np.median(gray))
+    return float(np.count_nonzero(np.abs(gray - background) > _INK_CONTRAST)) / gray.size
+
+
+def _words(result: dict, pdf_bytes: bytes) -> dict[int, list[Word]]:
+    """Words per page; refuses any page OCR could not be trusted to have read.
+
+    A ``failed`` page always refuses. An ``empty`` page refuses unless its image
+    is blank: zero words from a page with ink is not evidence that it shows no
+    identifier. (Paddle results carry no status and are taken as read.)
+    """
+    failed = sorted(p["page_index"] for p in result["pages"] if p.get("status") == "failed")
+    if failed:
         raise RedactionIncompleteError(
-            f"OCR could not read page(s) {unread}; identifiers there cannot be ruled out"
+            f"OCR failed on page(s) {failed}; identifiers there cannot be ruled out"
+        )
+    dpi = (result.get("provenance") or {}).get("render_dpi") or 216
+    inked = sorted(
+        p["page_index"]
+        for p in result["pages"]
+        if p.get("status") == "empty"
+        and ink_fraction(pdf_bytes, p["page_index"], dpi) > _BLANK_MAX_INK_FRACTION
+    )
+    if inked:
+        raise RedactionIncompleteError(
+            f"page(s) {inked} show ink but OCR read no text; "
+            "identifiers there cannot be ruled out"
         )
     out: dict[int, list[Word]] = {}
     for page in result["pages"]:

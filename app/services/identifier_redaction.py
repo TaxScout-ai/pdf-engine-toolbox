@@ -322,12 +322,7 @@ def find_identifiers(
     """
     found: list[Found] = []
     ocr = source == "ocr"
-    groups = _lines([w for w in words if w.kind == "word"])
-    # A recognized line is searched on its own, never joined to its words.
-    groups += [[w] for w in words if w.kind == "line"]
-    if ocr:
-        groups = _join_digit_lines(groups)
-    for line in groups:
+    for line in _search_groups(words, ocr):
         text = ""
         spans: list[tuple[int, int, Word]] = []
         for w in line:
@@ -352,13 +347,23 @@ def find_identifiers(
                 if ocr:
                     # OCR boxes are estimates: widen toward the hidden side, and
                     # at the far end only when the word ends there too.
-                    pad = max(1.0, 0.15 * rect.height)
-                    rect = fitz.Rect(rect.x0 - pad, rect.y0,
-                                     rect.x1 + (pad if hi - s >= len(w.text) else 0), rect.y1)
+                    pad = max(1.5, 0.3 * rect.height)
+                    rise = 0.15 * rect.height
+                    rect = fitz.Rect(rect.x0 - pad, rect.y0 - rise,
+                                     rect.x1 + (pad if hi - s >= len(w.text) else 0),
+                                     rect.y1 + rise)
                 rects.append(rect)
             if rects:
                 found.append(Found(page_index, kind, digits[-4:], source, tuple(rects)))
     return found
+
+
+def _search_groups(words: list[Word], ocr: bool) -> list[list[Word]]:
+    """Reading lines of words, each recognized line on its own (never joined to
+    its words), and for OCR also lines joined across a wrapped digit group."""
+    groups = _lines([w for w in words if w.kind == "word"])
+    groups += [[w] for w in words if w.kind == "line"]
+    return _join_digit_lines(groups) if ocr else groups
 
 
 def _join_digit_lines(groups: list[list[Word]]) -> list[list[Word]]:
@@ -787,9 +792,8 @@ def _scan(doc: fitz.Document, pdf_bytes: bytes, ocr: OcrWords) -> tuple[list[Fou
     if ocr_pages:
         suspect: dict[int, list[str]] = {}
         for i, words in ocr(pdf_bytes, ocr_pages).items():
-            for text in [w.text for w in words if w.kind == "line"] or [
-                " ".join(w.text for w in line) for line in _lines(words)
-            ]:
+            for group in _search_groups(words, True):
+                text = " ".join(w.text for w in group)
                 if suspect_runs(text):
                     suspect.setdefault(i, []).extend(suspect_runs(text))
             for hit in find_identifiers(i, words, "ocr", doc[i]):

@@ -65,6 +65,16 @@ class Settings(BaseSettings):
     ocr_queue_max_jobs: int = 500
     # Completed and failed OCR results stay readable this long.
     ocr_result_ttl_seconds: int = 3600
+    # Key for OCR inputs, results and page checkpoints at rest (AES-256-GCM):
+    # 32 bytes in URL-safe base64, or any passphrase (HKDF-derived). Empty =
+    # derived from PDF_ENGINE_SECRET. Changing it makes queued jobs unreadable
+    # (they fail with an authentication error).
+    ocr_queue_key: str = ""
+    # How often expired jobs, unreferenced files and orphan rows are swept.
+    ocr_sweep_interval_seconds: float = 300
+    # Synchronous OCR (identifier redaction) fails closed after this long.
+    # Matches the app's redaction budget (OCR_TIMEOUT_MS default, 20 min).
+    ocr_sync_timeout_seconds: float = 1200
 
     @model_validator(mode="after")
     def single_process(self):
@@ -72,7 +82,10 @@ class Settings(BaseSettings):
         # uvicorn processes would both resume the same jobs after a restart.
         if self.workers != 1:
             raise ValueError(
-                "The OCR job queue requires WORKERS=1; use OCR_WORKERS for parallel OCR"
+                f"WORKERS={self.workers} is not supported: WORKERS must be 1. The OCR job "
+                "queue is scheduled and recovered by a single uvicorn process; two would "
+                "resume the same jobs after a restart. Set WORKERS=1 and use OCR_WORKERS "
+                "for parallel OCR."
             )
         return self
 

@@ -10,12 +10,21 @@ lost every queued and in-flight task.
 What it does
 ------------
 * **Persistent.** A submitted job's bytes are spilled to
-  ``OCR_QUEUE_DIR/inputs/<id>.pdf``; its state lives in
+  ``OCR_QUEUE_DIR/inputs/<id>.bin``; its state lives in
   ``OCR_QUEUE_DIR/jobs.sqlite3``. Each finished RapidOCR page is recorded, so
   after a restart ``pending`` and ``processing`` jobs are re-queued in their
   original order and resume from the first unfinished page. Results are
-  written to ``OCR_QUEUE_DIR/results/<id>.json`` and kept for
-  ``OCR_RESULT_TTL_SECONDS``.
+  written to ``OCR_QUEUE_DIR/results/<id>.bin`` and kept for
+  ``OCR_RESULT_TTL_SECONDS``; an expired result reads as unknown.
+* **Private at rest.** Inputs, results and checkpointed page results hold
+  client documents and their OCR text (SSNs). Each is sealed with AES-256-GCM
+  bound to its job id (``OCR_QUEUE_KEY``, else a key HKDF-derived from
+  ``PDF_ENGINE_SECRET``). Directories are 0700, files and the ledger 0600.
+  An input is deleted as soon as its job finishes; a sweeper removes expired
+  jobs, files without a ledger row, stale temporaries and orphan page rows.
+* **Self-healing.** A failure after a unit ran (disk full while recording,
+  assembling or writing the result) fails that job with the reason; workers
+  never die, and the sweeper restarts any that do.
 * **Bounded parallelism.** ``OCR_WORKERS`` threads run units. A RapidOCR unit
   is one page, read on the worker's own engine (own ONNX Runtime sessions), so
   at most ``OCR_WORKERS`` inferences run at once and one large scan is spread
@@ -42,6 +51,7 @@ checkpointed per page; they restart from the first page after a restart.
 from __future__ import annotations
 
 import base64
+import errno
 import json
 import math
 import os
@@ -53,6 +63,10 @@ from collections import deque
 from pathlib import Path
 
 import structlog
+from cryptography.exceptions import InvalidTag
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 from app.config import settings
 from app.services import rapid_ocr
@@ -63,6 +77,9 @@ PENDING, PROCESSING, COMPLETED, FAILED = "pending", "processing", "completed", "
 _WHOLE_DOCUMENT = -1
 # Seconds per page assumed before any page has been timed in this process.
 _INITIAL_PAGE_SECONDS = 4.0
+# A temporary file older than this is a leftover of an interrupted write.
+_STALE_TMP_SECONDS = 600
+_MAGIC = b"OQ1\x00"
 
 _worker = threading.local()
 
@@ -75,22 +92,104 @@ class QueueFullError(Exception):
         self.retry_after = retry_after
 
 
+class OcrTimeoutError(TimeoutError):
+    """A synchronous OCR call (identifier redaction) exceeded its budget."""
+
+
 class _StoppedError(Exception):
     pass
+
+
+# ------------------------------------------------------------------ at rest
+
+
+def queue_key() -> bytes:
+    """AES-256 key for files and rows at rest.
+
+    ``OCR_QUEUE_KEY`` may be 32 bytes in URL-safe base64 (used as is) or any
+    passphrase (HKDF-SHA256). Without it the key is derived from
+    ``PDF_ENGINE_SECRET``, so it is still secret and stable across restarts.
+    """
+    raw = settings.ocr_queue_key
+    if raw:
+        try:
+            key = base64.urlsafe_b64decode(raw + "=" * (-len(raw) % 4))
+            if len(key) == 32:
+                return key
+        except (ValueError, TypeError):
+            pass
+        material, info = raw.encode(), b"ocr-queue-key-v1"
+    else:
+        material, info = settings.pdf_engine_secret.encode(), b"ocr-queue-at-rest-v1"
+    return HKDF(
+        algorithm=hashes.SHA256(), length=32, salt=b"pdf-engine-toolbox/ocr-queue", info=info
+    ).derive(material)
+
+
+class _Cipher:
+    def __init__(self, key: bytes):
+        self._aead = AESGCM(key)
+
+    def seal(self, data: bytes, context: str) -> bytes:
+        nonce = os.urandom(12)
+        return _MAGIC + nonce + self._aead.encrypt(nonce, data, context.encode())
+
+    def open(self, blob: bytes, context: str) -> bytes:
+        if not blob.startswith(_MAGIC):
+            raise RuntimeError("OCR queue data is not sealed")
+        nonce, sealed = blob[4:16], blob[16:]
+        try:
+            return self._aead.decrypt(nonce, sealed, context.encode())
+        except InvalidTag as exc:
+            raise RuntimeError("OCR queue data failed authentication") from exc
+
+
+def _private_dir(path: Path):
+    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(path, 0o700)
+
+
+def _write_private(path: Path, data: bytes):
+    tmp = path.with_name(path.name + ".tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "wb") as handle:
+            fd = None
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+    except BaseException:
+        if fd is not None:
+            os.close(fd)
+        _unlink(tmp)
+        raise
+    os.replace(tmp, path)
+
+
+def _unlink(path):
+    if path:
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
 
 
 class _Store:
     """SQLite job ledger. One connection, serialized by a lock."""
 
-    def __init__(self, root: Path):
+    def __init__(self, root: Path, cipher: _Cipher):
         self.root = root
+        self.cipher = cipher
         self.inputs = root / "inputs"
         self.results = root / "results"
-        for path in (self.inputs, self.results):
-            path.mkdir(parents=True, exist_ok=True)
+        for path in (root, self.inputs, self.results):
+            _private_dir(path)
+        self.db_path = root / "jobs.sqlite3"
+        os.close(os.open(self.db_path, os.O_RDWR | os.O_CREAT, 0o600))
         self._lock = threading.Lock()
         self._db = sqlite3.connect(
-            root / "jobs.sqlite3", timeout=10, isolation_level=None, check_same_thread=False
+            self.db_path, timeout=10, isolation_level=None, check_same_thread=False
         )
         self._db.row_factory = sqlite3.Row
         self._db.execute("PRAGMA journal_mode = WAL")
@@ -117,19 +216,49 @@ class _Store:
             CREATE TABLE IF NOT EXISTS ocr_job_units (
                 job_id TEXT NOT NULL,
                 unit INTEGER NOT NULL,
-                result TEXT NOT NULL,
+                result BLOB NOT NULL,
                 PRIMARY KEY (job_id, unit)
             );
             """
         )
+        self.restrict_permissions()
 
-    def close(self):
-        with self._lock:
-            self._db.close()
+    def restrict_permissions(self):
+        for suffix in ("", "-wal", "-shm"):
+            path = Path(f"{self.db_path}{suffix}")
+            if path.exists():
+                os.chmod(path, 0o600)
 
     def _execute(self, sql, args=()):
         with self._lock:
             return self._db.execute(sql, args).fetchall()
+
+    def _transaction(self, statements):
+        with self._lock:
+            try:
+                self._db.execute("BEGIN IMMEDIATE")
+                for sql, args in statements:
+                    self._db.execute(sql, args)
+                self._db.execute("COMMIT")
+            except BaseException:
+                if self._db.in_transaction:
+                    self._db.execute("ROLLBACK")
+                raise
+
+    # Files ----------------------------------------------------------------
+
+    def write_input(self, job_id: str, data: bytes) -> str:
+        path = self.inputs / f"{job_id}.bin"
+        _write_private(path, self.cipher.seal(data, f"input:{job_id}"))
+        return str(path)
+
+    def read_input(self, job_id: str, path: str) -> bytes:
+        return self.cipher.open(Path(path).read_bytes(), f"input:{job_id}")
+
+    def read_result(self, job_id: str, path: str) -> dict:
+        return json.loads(self.cipher.open(Path(path).read_bytes(), f"result:{job_id}"))
+
+    # Rows -----------------------------------------------------------------
 
     def insert(self, job: "_Job", status: str, error: str | None = None) -> int:
         now = time.time()
@@ -139,7 +268,7 @@ class _Store:
                 " input_path, error, created_at, completed_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
                 (
                     job.id, job.operation, job.backend, status, json.dumps(job.params),
-                    job.page_count, str(job.source) if status != FAILED else None, error,
+                    job.page_count, job.source if status != FAILED else None, error,
                     job.created_at, now if status == FAILED else None,
                 ),
             )
@@ -153,39 +282,44 @@ class _Store:
         )
 
     def save_unit(self, job_id: str, unit: int, result: dict):
+        sealed = self.cipher.seal(json.dumps(result).encode(), f"unit:{job_id}:{unit}")
+        # Only while the job is unfinished: a late writer cannot orphan a row.
         self._execute(
-            "INSERT OR REPLACE INTO ocr_job_units (job_id, unit, result) VALUES (?,?,?)",
-            (job_id, unit, json.dumps(result)),
+            "INSERT OR REPLACE INTO ocr_job_units (job_id, unit, result)"
+            " SELECT ?, ?, ? WHERE EXISTS"
+            " (SELECT 1 FROM ocr_jobs WHERE id = ? AND status IN (?, ?))",
+            (job_id, unit, sealed, job_id, PENDING, PROCESSING),
         )
 
     def units(self, job_id: str) -> dict[int, dict]:
         rows = self._execute("SELECT unit, result FROM ocr_job_units WHERE job_id = ?", (job_id,))
-        return {row["unit"]: json.loads(row["result"]) for row in rows}
+        return {
+            row["unit"]: json.loads(self.cipher.open(row["result"], f"unit:{job_id}:{row['unit']}"))
+            for row in rows
+        }
 
     def complete(self, job_id: str, result: dict):
-        path = self.results / f"{job_id}.json"
-        tmp = path.with_suffix(".tmp")
-        with open(tmp, "w") as handle:
-            json.dump(result, handle)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(tmp, path)
-        self._finish(job_id, COMPLETED, result_path=str(path))
+        path = self.results / f"{job_id}.bin"
+        _write_private(path, self.cipher.seal(json.dumps(result).encode(), f"result:{job_id}"))
+        try:
+            self._finish(job_id, COMPLETED, result_path=str(path))
+        except BaseException:
+            _unlink(path)
+            raise
 
     def fail(self, job_id: str, error: str):
         self._finish(job_id, FAILED, error=error)
 
     def _finish(self, job_id, status, result_path=None, error=None):
         rows = self._execute("SELECT input_path FROM ocr_jobs WHERE id = ?", (job_id,))
-        with self._lock:
-            self._db.execute("BEGIN IMMEDIATE")
-            self._db.execute(
+        self._transaction([
+            (
                 "UPDATE ocr_jobs SET status = ?, result_path = ?, error = ?, completed_at = ?,"
                 " input_path = NULL WHERE id = ?",
                 (status, result_path, error, time.time(), job_id),
-            )
-            self._db.execute("DELETE FROM ocr_job_units WHERE job_id = ?", (job_id,))
-            self._db.execute("COMMIT")
+            ),
+            ("DELETE FROM ocr_job_units WHERE job_id = ?", (job_id,)),
+        ])
         for row in rows:
             _unlink(row["input_path"])
 
@@ -211,29 +345,57 @@ class _Store:
             _unlink(row["input_path"])
             self._execute("DELETE FROM ocr_jobs WHERE id = ?", (row["id"],))
 
-
-def _unlink(path):
-    if path:
-        try:
-            os.unlink(path)
-        except FileNotFoundError:
-            pass
+    def sweep(self, ttl: int) -> dict:
+        """Prune expired jobs and remove everything no ledger row refers to."""
+        self.prune(ttl)
+        referenced = set()
+        for row in self._execute("SELECT input_path, result_path FROM ocr_jobs"):
+            referenced.update(p for p in (row["input_path"], row["result_path"]) if p)
+        removed = {"files": 0, "tmp": 0}
+        now = time.time()
+        for folder in (self.inputs, self.results):
+            for path in folder.iterdir():
+                if path.name.endswith(".tmp"):
+                    try:
+                        stale = now - path.stat().st_mtime > _STALE_TMP_SECONDS
+                    except FileNotFoundError:
+                        continue
+                    if stale:
+                        _unlink(path)
+                        removed["tmp"] += 1
+                elif str(path) not in referenced:
+                    # Re-check: a submit may have written the file just now.
+                    if not self._execute(
+                        "SELECT 1 FROM ocr_jobs WHERE input_path = ? OR result_path = ?",
+                        (str(path), str(path)),
+                    ) and now - path.stat().st_mtime > _STALE_TMP_SECONDS:
+                        _unlink(path)
+                        removed["files"] += 1
+        with self._lock:
+            cursor = self._db.execute(
+                "DELETE FROM ocr_job_units WHERE job_id NOT IN"
+                " (SELECT id FROM ocr_jobs WHERE status IN (?, ?))",
+                (PENDING, PROCESSING),
+            )
+            removed["unit_rows"] = cursor.rowcount
+        self.restrict_permissions()
+        return removed
 
 
 class _Job:
     __slots__ = (
         "id", "operation", "backend", "params", "source", "persistent", "targets",
         "units", "done", "inflight", "error", "created_at", "seq", "page_count",
-        "started", "event", "result", "completed_at",
+        "started", "event", "result", "finishing", "data", "terminal",
     )
 
     def __init__(self, *, operation, backend, params, source, persistent, targets,
-                 page_count, job_id=None, created_at=None, done=None):
+                 page_count, job_id=None, created_at=None, done=None, data=None):
         self.id = job_id or str(uuid.uuid4())
         self.operation = operation
         self.backend = backend
         self.params = params
-        self.source = source
+        self.source = source  # spilled path (persistent) or bytes (in memory)
         self.persistent = persistent
         self.targets = targets
         self.done: dict[int, object] = done or {}
@@ -246,7 +408,10 @@ class _Job:
         self.started = False
         self.event = threading.Event()
         self.result = None
-        self.completed_at = None
+        self.finishing = False
+        self.data = data  # decrypted input, held only while the job is active
+        # (status, error) when the ledger could not record the outcome.
+        self.terminal: tuple[str, str] | None = None
 
     def remaining_pages(self) -> int:
         if self.backend == "rapid":
@@ -255,56 +420,71 @@ class _Job:
 
 
 class OcrQueue:
-    def __init__(self, root: Path, workers: int, max_active: int, max_jobs: int, ttl: int):
+    def __init__(self, root: Path, workers: int, max_active: int, max_jobs: int, ttl: int,
+                 key: bytes | None = None, sweep_interval: float = 300.0,
+                 sync_timeout: float = 1200.0):
         self.root = Path(root)
         self.workers = max(1, workers)
         self.max_active = max(1, max_active)
         self.max_jobs = max(1, max_jobs)
         self.ttl = ttl
-        self.store = _Store(self.root)
+        self.sweep_interval = sweep_interval
+        self.sync_timeout = sync_timeout
+        self.store = _Store(self.root, _Cipher(key or queue_key()))
         self._cond = threading.Condition()
         self._pending: deque[_Job] = deque()
         self._active: list[_Job] = []
         self._jobs: dict[str, _Job] = {}  # unfinished persistent jobs
+        self._reserved = 0  # submissions past the limit check, not yet queued
         self._rr = 0
         self._seq = 0
         self._stopped = False
         self._threads: list[threading.Thread] = []
+        self._sweeper: threading.Thread | None = None
         self._page_seconds = _INITIAL_PAGE_SECONDS
         self._running = 0
         self.max_running = 0
+        self.worker_restarts = 0
 
     # ------------------------------------------------------------------ life
 
     def start(self) -> "OcrQueue":
-        self.store.prune(self.ttl)
+        self.store.sweep(self.ttl)
         recovered = 0
         for row in self.store.unfinished():
-            params = json.loads(row["params"])
-            if not row["input_path"] or not Path(row["input_path"]).exists():
-                self.store.fail(row["id"], "OCR input was lost before processing finished")
+            try:
+                params = json.loads(row["params"])
+                if not row["input_path"] or not Path(row["input_path"]).exists():
+                    raise RuntimeError("OCR input was lost before processing finished")
+                done = self.store.units(row["id"]) if row["backend"] == "rapid" else {}
+            except Exception as exc:
+                self.store.fail(row["id"], str(exc))
                 continue
-            done = self.store.units(row["id"]) if row["backend"] == "rapid" else {}
             job = _Job(
                 operation=row["operation"], backend=row["backend"], params=params,
                 source=row["input_path"], persistent=True, targets=params["targets"],
                 page_count=row["page_count"], job_id=row["id"], created_at=row["created_at"],
                 done=done,
             )
+            # A job whose every page was recorded before the restart has no
+            # unit left; the scheduler finishes it like any other.
             with self._cond:
                 self._enqueue(job)
             recovered += 1
         if recovered:
             log.info("ocr_queue_recovered", jobs=recovered)
         for index in range(self.workers):
-            thread = threading.Thread(
-                target=self._work, name=f"ocr-worker-{index}", daemon=True
-            )
-            thread.start()
-            self._threads.append(thread)
+            self._threads.append(self._spawn_worker(index))
+        self._sweeper = threading.Thread(target=self._sweep_loop, name="ocr-sweeper", daemon=True)
+        self._sweeper.start()
         log.info("ocr_queue_started", workers=self.workers, max_active=self.max_active,
                  intra_op_threads=rapid_ocr.intra_op_threads(), root=str(self.root))
         return self
+
+    def _spawn_worker(self, index: int) -> threading.Thread:
+        thread = threading.Thread(target=self._work, name=f"ocr-worker-{index}", daemon=True)
+        thread.start()
+        return thread
 
     def shutdown(self):
         """Stop dispatching. Unfinished jobs stay in the ledger for the next start.
@@ -323,18 +503,54 @@ class OcrQueue:
         for thread in self._threads:
             thread.join(timeout=0.2)
 
+    def supervise(self):
+        """Replace any worker thread that died."""
+        with self._cond:
+            if self._stopped:
+                return
+            for index, thread in enumerate(self._threads):
+                if not thread.is_alive():
+                    log.error("ocr_worker_restarted", worker=index)
+                    self.worker_restarts += 1
+                    self._threads[index] = self._spawn_worker(index)
+
+    def sweep(self) -> dict:
+        removed = self.store.sweep(self.ttl)
+        self.supervise()
+        return removed
+
+    def _sweep_loop(self):
+        while True:
+            with self._cond:
+                self._cond.wait_for(lambda: self._stopped, timeout=self.sweep_interval)
+                if self._stopped:
+                    return
+            try:
+                removed = self.sweep()
+                if any(removed.values()):
+                    log.info("ocr_queue_swept", **removed)
+            except Exception as exc:  # noqa: BLE001 - next sweep retries
+                log.error("ocr_queue_sweep_failed", error=str(exc))
+
     # ---------------------------------------------------------------- submit
 
     def submit_ocr(self, pdf_bytes: bytes, pages, language: str, dpi: int, backend: str,
                    cache_hash: str | None = None, cache_params: dict | None = None) -> str:
         """Persist an /text/ocr request and queue it. Returns the task id."""
-        self.store.prune(self.ttl)
         with self._cond:
-            if len(self._jobs) >= self.max_jobs:
+            if len(self._jobs) + self._reserved >= self.max_jobs:
                 raise QueueFullError(self._retry_after_locked())
+            self._reserved += 1
+        try:
+            return self._submit(pdf_bytes, pages, language, dpi, backend,
+                                cache_hash, cache_params)
+        finally:
+            with self._cond:
+                self._reserved -= 1
+
+    def _submit(self, pdf_bytes, pages, language, dpi, backend, cache_hash, cache_params):
         job_id = str(uuid.uuid4())
-        path = self.store.inputs / f"{job_id}.pdf"
-        _write_durably(path, _as_pdf_bytes(pdf_bytes))
+        data = _as_pdf_bytes(pdf_bytes)
         params = {
             "pages": pages, "language": language, "requested_dpi": dpi, "dpi": dpi,
             "cache_hash": cache_hash, "cache_params": cache_params,
@@ -342,21 +558,27 @@ class OcrQueue:
         error, targets, page_count = None, [_WHOLE_DOCUMENT], len(pages or [])
         try:
             if backend == "rapid":
-                targets, params["dpi"] = rapid_ocr.plan(str(path), pages, language, dpi)
+                targets, params["dpi"] = rapid_ocr.plan(data, pages, language, dpi)
                 page_count = len(targets)
             else:
-                page_count = page_count or _page_count(str(path))
+                page_count = page_count or _page_count(data)
         except Exception as exc:  # the request itself is invalid: fail its task
             error = str(exc)
         params["targets"] = targets
-        job = _Job(operation="ocr", backend=backend, params=params, source=str(path),
-                   persistent=True, targets=targets, page_count=page_count, job_id=job_id)
         if error is not None:
+            job = _Job(operation="ocr", backend=backend, params=params, source=None,
+                       persistent=True, targets=targets, page_count=page_count, job_id=job_id)
             self.store.insert(job, FAILED, error)
-            _unlink(path)
             log.error("task_failed", task_id=job_id, error=error)
             return job_id
-        self.store.insert(job, PENDING)
+        path = self.store.write_input(job_id, data)
+        job = _Job(operation="ocr", backend=backend, params=params, source=path,
+                   persistent=True, targets=targets, page_count=page_count, job_id=job_id)
+        try:
+            self.store.insert(job, PENDING)
+        except BaseException:
+            _unlink(path)
+            raise
         with self._cond:
             self._enqueue(job)
         log.info("task_created", task_id=job_id, operation="ocr", backend=backend,
@@ -364,8 +586,12 @@ class OcrQueue:
         return job_id
 
     def run_rapid(self, pdf_bytes: bytes, pages=None, language="en", dpi=300,
-                  force_ocr=False, with_pdf=True) -> dict:
-        """OCR in memory through the shared workers and wait for the result."""
+                  force_ocr=False, with_pdf=True, timeout: float | None = None) -> dict:
+        """OCR in memory through the shared workers and wait for the result.
+
+        Fails closed with ``OcrTimeoutError`` after ``timeout`` seconds
+        (OCR_SYNC_TIMEOUT_SECONDS): a hung inference must not hang the caller.
+        """
         targets, dpi = rapid_ocr.plan(pdf_bytes, pages, language, dpi)
         params = {"dpi": dpi, "force_ocr": force_ocr, "with_pdf": with_pdf}
         job = _Job(operation="rapid_ocr", backend="rapid", params=params, source=pdf_bytes,
@@ -379,7 +605,20 @@ class OcrQueue:
             if self._stopped:
                 raise RuntimeError("OCR queue stopped")
             self._enqueue(job)
-        job.event.wait()
+        budget = self.sync_timeout if timeout is None else timeout
+        if not job.event.wait(budget):
+            with self._cond:
+                # Stop scheduling its remaining pages; a stuck inference keeps
+                # its worker until it returns, and its result is discarded.
+                job.error = OcrTimeoutError(f"OCR did not finish within {budget:g}s")
+                job.units.clear()
+                if job in self._pending:
+                    self._pending.remove(job)
+                if job in self._active and job.inflight == 0:
+                    self._active.remove(job)
+                self._cond.notify_all()
+            log.error("ocr_sync_timeout", pages=len(targets), timeout_s=budget)
+            raise job.error
         if job.error is not None:
             raise job.error
         return job.result
@@ -399,6 +638,10 @@ class OcrQueue:
         with self._cond:
             job = self._jobs.get(task_id)
             if job is not None:
+                if job.terminal is not None:
+                    status, error = job.terminal
+                    return {"task_id": job.id, "status": status, "operation": job.operation,
+                            "created_at": job.created_at, "error": error}
                 return {
                     "task_id": job.id,
                     "status": PROCESSING if job.started else PENDING,
@@ -412,6 +655,8 @@ class OcrQueue:
         row = self.store.get(task_id)
         if row is None:
             return None
+        if row["completed_at"] and row["completed_at"] < time.time() - self.ttl:
+            return None  # expired: the sweeper deletes it; never served again
         data = {
             "task_id": row["id"],
             "status": row["status"],
@@ -422,8 +667,7 @@ class OcrQueue:
             data["completed_at"] = row["completed_at"]
         if row["status"] == COMPLETED and row["result_path"]:
             try:
-                with open(row["result_path"]) as handle:
-                    data["result"] = json.load(handle)
+                data["result"] = self.store.read_result(row["id"], row["result_path"])
             except FileNotFoundError:
                 return None
         if row["status"] == FAILED and row["error"]:
@@ -453,8 +697,16 @@ class OcrQueue:
     # --------------------------------------------------------------- workers
 
     def _next_unit_locked(self):
+        """Next (job, unit, first) to run; unit None means "finish this job"."""
         while len(self._active) < self.max_active and self._pending:
             self._active.append(self._pending.popleft())
+        # A job with nothing left to run (no pages requested, every page
+        # recorded before a restart, or cancelled) is finished at once.
+        for job in self._active:
+            if not job.units and job.inflight == 0 and not job.finishing:
+                job.finishing = True
+                self._active.remove(job)
+                return job, None, False
         count = len(self._active)
         for offset in range(count):
             index = (self._rr + offset) % count
@@ -480,47 +732,64 @@ class OcrQueue:
                     self._cond.wait()
                 if self._stopped:
                     return
-                self._running += 1
-                self.max_running = max(self.max_running, self._running)
             job, unit, first = picked
+            try:
+                if unit is None:
+                    self._finish(job)
+                else:
+                    self._run_and_record(job, unit, first)
+            except BaseException as exc:  # noqa: BLE001 - a worker never dies
+                log.error("ocr_worker_error", task_id=job.id, error=str(exc))
+                self._fail_job(job, exc)
+
+    def _run_and_record(self, job: _Job, unit: int, first: bool):
+        with self._cond:
+            self._running += 1
+            self.max_running = max(self.max_running, self._running)
+        result, error = None, None
+        started = time.monotonic()
+        try:
             if first and job.persistent:
                 self.store.mark_processing(job.id)
-            started = time.monotonic()
-            result, error = None, None
-            try:
-                result = self._run_unit(job, unit)
-            except BaseException as exc:  # noqa: BLE001 - recorded on the job
-                error = exc
-            elapsed = time.monotonic() - started
-            with self._cond:
-                self._running -= 1
-                if self._stopped:
-                    return
-                job.inflight -= 1
-                if error is not None:
-                    job.error = job.error or error
-                    job.units.clear()
-                else:
-                    job.done[unit] = result
-                    pages = 1 if job.backend == "rapid" else max(job.page_count, 1)
-                    self._page_seconds = 0.8 * self._page_seconds + 0.2 * (elapsed / pages)
-                finished = job.inflight == 0 and not job.units
-                if finished:
-                    self._active.remove(job)
-                self._cond.notify_all()
-            if error is None and job.persistent and job.backend == "rapid":
+            result = self._run_unit(job, unit)
+            # Record before the job can be seen as finished, so a checkpoint
+            # never lands after the job's rows were cleared.
+            if job.persistent and job.backend == "rapid" and not self._stopped:
                 self.store.save_unit(job.id, unit, result)
-            if finished:
-                self._finish(job)
+        except BaseException as exc:  # noqa: BLE001 - recorded on the job
+            error = exc
+        elapsed = time.monotonic() - started
+        with self._cond:
+            self._running -= 1
+            if self._stopped:
+                return
+            job.inflight -= 1
+            if error is not None:
+                job.error = job.error or error
+                job.units.clear()
+            else:
+                job.done[unit] = result
+                pages = 1 if job.backend == "rapid" else max(job.page_count, 1)
+                self._page_seconds = 0.8 * self._page_seconds + 0.2 * (elapsed / pages)
+            # The last unit back hands the job to the scheduler to finish.
+            self._cond.notify_all()
+
+    def _job_bytes(self, job: _Job) -> bytes:
+        if isinstance(job.source, (bytes, bytearray)):
+            return job.source
+        data = job.data
+        if data is None:
+            data = job.data = self.store.read_input(job.id, job.source)
+        return data
 
     def _run_unit(self, job: _Job, unit: int):
+        data = self._job_bytes(job)
         if job.backend == "rapid":
             return rapid_ocr.read_page(
-                job.source, unit, job.params["dpi"], job.params.get("force_ocr", False)
+                data, unit, job.params["dpi"], job.params.get("force_ocr", False)
             )
         from app.services import pdf_service
 
-        data = Path(job.source).read_bytes() if isinstance(job.source, str) else job.source
         return pdf_service.ocr_pages(
             data, job.params["pages"], job.params["language"], job.params["dpi"],
             backend="paddle",
@@ -529,8 +798,8 @@ class OcrQueue:
     def _assemble(self, job: _Job) -> dict:
         if job.backend == "rapid":
             return rapid_ocr.assemble(
-                job.source, [job.done[unit] for unit in job.targets], job.params["dpi"],
-                with_pdf=job.params.get("with_pdf", True),
+                self._job_bytes(job), [job.done[unit] for unit in job.targets],
+                job.params["dpi"], with_pdf=job.params.get("with_pdf", True),
             )
         return job.done[_WHOLE_DOCUMENT]
 
@@ -539,32 +808,51 @@ class OcrQueue:
             if job.error is not None:
                 raise job.error
             result = self._assemble(job)
-            if job.persistent:
-                result = self._ocr_response(job, result)
-        except BaseException as exc:  # noqa: BLE001 - becomes the task's error
-            if job.persistent:
-                with self._cond:
-                    if self._stopped:
-                        return
-                self.store.fail(job.id, str(exc))
-                with self._cond:
-                    self._jobs.pop(job.id, None)
-                log.error("task_failed", task_id=job.id, error=str(exc))
-            else:
-                job.error = exc
+            if not job.persistent:
+                job.result = result
                 job.event.set()
-            return
-        if not job.persistent:
-            job.result = result
-            job.event.set()
-            return
-        with self._cond:
+                return
+            result = self._ocr_response(job, result)
             if self._stopped:
                 return
-        self.store.complete(job.id, result)
+            self.store.complete(job.id, result)
+        except BaseException as exc:  # noqa: BLE001 - becomes the task's error
+            self._fail_job(job, exc)
+            return
+        finally:
+            job.data = None
         with self._cond:
             self._jobs.pop(job.id, None)
         log.info("task_completed", task_id=job.id)
+
+    def _fail_job(self, job: _Job, exc: BaseException):
+        """Record a job as failed; never raises."""
+        reason = str(exc) or type(exc).__name__
+        if isinstance(exc, OSError) and exc.errno is not None:
+            reason = f"{errno.errorcode.get(exc.errno, exc.errno)}: {reason}"
+        job.data = None
+        with self._cond:
+            if job in self._active:
+                self._active.remove(job)
+            job.units.clear()
+            job.finishing = True
+            stopped = self._stopped
+        if not job.persistent:
+            job.error = job.error or exc
+            job.event.set()
+            return
+        if stopped:
+            return
+        try:
+            self.store.fail(job.id, reason)
+        except BaseException as store_exc:  # noqa: BLE001 - keep the outcome in memory
+            log.error("ocr_ledger_write_failed", task_id=job.id, error=str(store_exc))
+            with self._cond:
+                job.terminal = (FAILED, reason)
+            return
+        with self._cond:
+            self._jobs.pop(job.id, None)
+        log.error("task_failed", task_id=job.id, error=reason)
 
     def _ocr_response(self, job: _Job, result: dict) -> dict:
         from app.services import cache_service
@@ -612,21 +900,12 @@ def _as_pdf_bytes(data: bytes) -> bytes:
             return doc.tobytes()
 
 
-def _page_count(path: str) -> int:
+def _page_count(data: bytes) -> int:
     import fitz
 
     with rapid_ocr.FITZ_LOCK:
-        with fitz.open(path, filetype="pdf") as doc:
+        with fitz.open(stream=data, filetype="pdf") as doc:
             return len(doc)
-
-
-def _write_durably(path: Path, data: bytes):
-    tmp = path.with_suffix(".tmp")
-    with open(tmp, "wb") as handle:
-        handle.write(data)
-        handle.flush()
-        os.fsync(handle.fileno())
-    os.replace(tmp, path)
 
 
 # --------------------------------------------------------------- singleton
@@ -645,6 +924,8 @@ def get_queue() -> OcrQueue:
             _queue = OcrQueue(
                 Path(settings.ocr_queue_dir), workers, max_active,
                 settings.ocr_queue_max_jobs, settings.ocr_result_ttl_seconds,
+                sweep_interval=settings.ocr_sweep_interval_seconds,
+                sync_timeout=settings.ocr_sync_timeout_seconds,
             ).start()
         return _queue
 

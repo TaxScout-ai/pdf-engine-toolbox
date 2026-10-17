@@ -265,7 +265,19 @@ def paddle_ocr_words(pdf_bytes: bytes, pages: list[int]) -> dict[int, list[Word]
     return _words(pdf_service.ocr_pages(pdf_bytes, pages, force_ocr=True, backend="paddle"))
 
 
+# Page statuses that mean OCR could not read the page. Zero words from such a
+# page is not evidence that it shows no identifier, so redaction refuses.
+_UNREAD_STATUSES = {"failed", "empty"}
+
+
 def _words(result: dict) -> dict[int, list[Word]]:
+    unread = sorted(
+        page["page_index"] for page in result["pages"] if page.get("status") in _UNREAD_STATUSES
+    )
+    if unread:
+        raise RedactionIncompleteError(
+            f"OCR could not read page(s) {unread}; identifiers there cannot be ruled out"
+        )
     out: dict[int, list[Word]] = {}
     for page in result["pages"]:
         out[page["page_index"]] = [

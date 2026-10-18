@@ -202,42 +202,53 @@ tracks unsafe sign/decimal/wrong-field matching).
 
 Identifier redaction follows `OCR_BACKEND`: with `rapid` it reads page images
 through the same OCR workers (same words-and-boxes contract) and never imports
-Paddle. It fails closed in two cases, and the document is refused rather than
-returned with an identifier possibly left readable:
-- a page OCR failed on (status `failed`);
-- a page OCR read (any status) that carries identifier-shaped print that no
-  OCR reading covers. Words OCR found elsewhere on a page say nothing about the
-  line it missed.
-  - **Read print.** Redaction counts as read, and searches for identifiers, all
-    of: regular words; RapidOCR words below the 0.5 review threshold (an
-    uncertain reading of an SSN is still redacted); and whole recognized lines
-    (RapidOCR sometimes reads a line but splits it into fragment words). These
-    extras stay inside redaction; the `/text/ocr` response is unchanged.
-  - **Print.** The page is rendered at the OCR DPI in grayscale and compared
-    with its own background (a 31-pixel median filter). Pixels more than 6
-    levels darker count as print, after removing solid black areas
-    (redaction boxes, bars). A 3x3 closing then rejoins faint strokes. Rules,
-    box grids, empty checkbox frames and small marks cut by the page edge are
-    form structure, not print.
-  - **Coverage.** A print component counts as read when half of it lies inside
-    a read box widened by max(4 px, 30% of the box height).
-  - **Identifier-shaped.** Unread print refuses only when it could hold an
-    identifier: a run of at least 4 marks side by side on one line,
-    horizontally or vertically, or a run (a merged blob included) about 9
-    digits long at its own glyph height. Marks at most 4 px across the line
-    (dot leaders, dashes) do not join runs. Logos, shaded boxes, edge marks and
-    isolated 1–3-glyph marks do not refuse.
+Paddle.
 
-  A printed SSN that OCR missed refuses at 4–10 pt in grays 0–246, blurred
-  (sigma 1–3), or rotated 90° or 270°. A blank page, sigma-4 noise and up to
-  400 dust specks pass.
+**What is redacted.** Every reading OCR produced is searched: regular words,
+RapidOCR words below the 0.5 review threshold, and whole recognized lines
+(these extras stay inside redaction; the `/text/ocr` response is unchanged).
+Before matching, common OCR confusions inside numeric tokens are read as
+digits (`I l | O o D S s B Z G q`, so "I23-45-678S" is an SSN). Any run of
+exactly nine digits with any separators — spaces, dashes, dot leaders — is an
+identifier, as is a group continued on the line below ("123-45-" / "6789").
+Everything but the last four digits is blacked out. A rotated reading is
+blacked out whole. Amounts, dates, ZIP+4 and phone numbers are not
+identifiers.
 
-  Measured with RapidOCR on 200-DPI scans of the IRS 2025 blank forms (16
-  PDFs, 31 pages): 18 of 31 pages pass. 12 of the 13 refusals are IRS cover
-  sheets ("Attention" pages), whose flag stripes form runs of print. The 13th
-  is the Massachusetts 1099-HC, whose logo does the same. Both OCR backends tag
-  failed pages.
-- an OCR run that exceeds `OCR_SYNC_TIMEOUT_SECONDS`. Table recognition (`/text/tables`) and orientation
+**When a page is refused** (the document goes to manual review instead of
+being returned):
+- OCR failed on a page;
+- a reading is one or two digits off an identifier's shape (7–11 digits in
+  3-2-4, 2-7 or one block), or is a comb field read digit by digit — a
+  misread identifier looks like this;
+- print that no reading covers could hold an identifier: a run of 4+ marks on
+  a line (horizontal or vertical), a run about nine digits long, or digit-sized
+  printed marks anywhere on the page summing to nine or more, whatever the
+  gaps or line breaks between them. White print on black or gray counts as
+  print. Rules, box grids, empty frames, dust and the corners of large filled
+  shapes (logos, shaded boxes) do not;
+- an OCR run that exceeds `OCR_SYNC_TIMEOUT_SECONDS`.
+
+**What is claimed, and how it is measured.** `scripts/redaction_leak_corpus.py`
+is a held-out evaluation corpus. It is never used to tune thresholds. It fills
+IRS 2025 form pages (W-2, 1099-INT/DIV/R/NEC, 1098; `tests/fixtures/irs2025`)
+with synthetic SSNs and EINs in 27 renderings each:
+- 4–12 pt and light gray print;
+- blur sigma 1–3 and 90/270° rotation;
+- 14–30 pt gaps, dot leaders and a 180 pt EIN gap;
+- splits across lines and 3|2|3|1 groups;
+- comb fields and W-9 boxes;
+- white on black or 30% gray, and print inside shaded boxes.
+
+It rasterizes each page at 200 DPI and runs real RapidOCR, plainly and
+through an engine that garbles one or two characters per reading. A leak is a
+returned page on which a hidden digit is still legible: not blacked out at its
+ground-truth position, or re-read by OCR. Results: pending the first full run.
+
+Re-run it with `RAPIDOCR_MODEL_DIR=… python scripts/redaction_leak_corpus.py`.
+Its work files go to `.corpus-work/` (gitignored), never `/tmp`.
+
+Table recognition (`/text/tables`) and orientation
 (`/transform/orientation`) keep their Paddle models, which load lazily on the
 first such request; every Paddle inference in the process is serialized by one
 lock (TAX-6255). Invoking those endpoints loads Paddle in addition to Rapid,

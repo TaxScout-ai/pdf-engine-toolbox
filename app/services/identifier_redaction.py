@@ -172,18 +172,19 @@ def suspect_runs(text: str) -> list[str]:
     or added (7-11 digits, not 9) in an identifier's group shape.
 
     "123-45-678" (3,2,3) or "12-345678" (2,6) or an unseparated 8 or 10 digit
-    block qualify, as do 5+ groups of one or two digits (a comb field read box
-    by box); "OMB No. 1545-0029" (4,4), "2025-0417" or a 12-digit account
-    number do not.
+    block qualify, as do 4+ groups of one or two digits (a comb field read box
+    by box, however many boxes were missed); "OMB No. 1545-0029" (4,4),
+    "2025-0417" or a 12-digit account number do not.
     """
     text = normalize_confusions(text)
     suspects = []
     for start, end, digits in _digit_runs(text):
-        if not _SUSPECT_DIGITS <= len(digits) <= 11 or len(digits) == 9:
-            continue
         groups = tuple(len(g) for g in re.findall(r"\d+", text[start:end]))
-        if len(groups) >= 5 and max(groups) <= 2:
-            suspects.append(digits)  # a comb field read digit by digit
+        if len(groups) >= 4 and max(groups) <= 2 and len(digits) != 9:
+            # A comb field read digit by digit, some boxes missed or misread.
+            suspects.append(digits)
+            continue
+        if not _SUSPECT_DIGITS <= len(digits) <= 11 or len(digits) == 9:
             continue
         if any(
             len(groups) == len(shape) and sum(abs(a - b) for a, b in zip(groups, shape)) <= 2

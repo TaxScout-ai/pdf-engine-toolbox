@@ -23,7 +23,11 @@ This corpus is for evaluation only: thresholds in identifier_redaction.py
 must never be tuned against it.
 
 Usage (needs RAPIDOCR_MODEL_DIR with the pinned models):
-    python scripts/redaction_leak_corpus.py --report /tmp/leak-report.json
+    python scripts/redaction_leak_corpus.py            # writes .corpus-work/report.json
+
+Pages are generated and rasterized in memory, never written to disk. The OCR
+queue ledger, the resumable journal (report.jsonl) and the report live in
+.corpus-work/ (gitignored), never under /tmp.
 """
 
 from __future__ import annotations
@@ -33,7 +37,6 @@ import json
 import random
 import re
 import sys
-import tempfile
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -427,14 +430,17 @@ def run(cases: list[Case], engine: str, journal: Path | None = None) -> list[dic
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--report", type=Path, required=True)
+    parser.add_argument("--work", type=Path, default=ROOT / ".corpus-work",
+                        help="working directory for the queue, journal and report")
     parser.add_argument("--workers", type=int, default=2)
     parser.add_argument("--only", help="regex over case names")
     args = parser.parse_args(argv)
 
     from app.config import settings
 
-    settings.ocr_queue_dir = tempfile.mkdtemp(prefix="leak-corpus-")
+    args.work.mkdir(parents=True, exist_ok=True)
+    args.report = args.work / "report.json"
+    settings.ocr_queue_dir = str(args.work / "queue")
     settings.ocr_workers = args.workers
     settings.ocr_queue_key = settings.ocr_queue_key or "leak-corpus-local"
     settings.ocr_backend = "rapid"

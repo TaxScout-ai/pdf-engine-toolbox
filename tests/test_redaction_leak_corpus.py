@@ -55,7 +55,7 @@ def test_confusion_engine_garbles_digits_into_letters():
 
 
 @pytest.mark.skipif(os.environ.get("RUN_LEAK_CORPUS") != "1", reason="set RUN_LEAK_CORPUS=1")
-def test_the_corpus_has_no_leaks(tmp_path):
+def test_the_corpus_has_no_leaks():
     corpus = _corpus()
-    code = corpus.main(["--report", str(tmp_path / "report.json")])
-    assert code == 0, (tmp_path / "report.json").read_text()[:4000]
+    code = corpus.main([])
+    assert code == 0, (ROOT / ".corpus-work" / "report.json").read_text()[:4000]

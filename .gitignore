@@ -11,3 +11,6 @@ test_output/
 .mypy_cache/
 .paddlex/
 *.so
+
+# Leak-corpus working files (scripts/redaction_leak_corpus.py)
+.corpus-work/

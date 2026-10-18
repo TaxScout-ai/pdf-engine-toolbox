@@ -1100,8 +1100,9 @@ def test_a_rotated_read_identifier_is_redacted_whole(monkeypatch):
     assert max(pix.samples) < 60  # the whole rotated number is blacked out
 
 
-def test_a_comb_field_read_with_boxes_missing_refuses():
-    """Six of nine comb boxes read: too few digits for an identifier, still one."""
+@pytest.mark.parametrize("reading", ["8 5 6 5 0 3 回", "B G G O Z"])
+def test_a_comb_field_read_with_boxes_missing_refuses(reading):
+    """Some comb boxes read (or all misread as letters): still an identifier."""
     scan, words = _scan_with(lambda p: p.insert_text((72, 160), "123-45-6789", fontsize=11))
     with pytest.raises(ir.RedactionIncompleteError, match="misread identifier"):
-        ir.redact_identifiers(scan, ocr=_explicit_ocr(words, {"123-45-6789": "8 5 6 5 0 3 回"}))
+        ir.redact_identifiers(scan, ocr=_explicit_ocr(words, {"123-45-6789": reading}))

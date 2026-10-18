@@ -116,7 +116,8 @@ def normalize_confusions(text: str) -> str:
     is numeric when it holds a digit and digits plus confusable letters make up
     at least half of its letters and digits ("I23-45-678S" -> "123-45-6785"),
     or when it is one to three confusable letters next to a numeric token (a
-    comb field read box by box as "B 0 Z 9", a group read as "ZG").
+    comb field read box by box as "B 0 Z 9", a group read as "ZG"), or one
+    of four or more such tokens in a row ("B G G O Z").
     "ID", "SSN" and "Box" stay words.
     """
     parts = re.split(r"(\s+)", text)
@@ -138,6 +139,20 @@ def normalize_confusions(text: str) -> str:
             neighbours = [tokens[m] for m in (n - 1, n + 1) if 0 <= m < len(tokens)]
             if any(is_numeric[j] for j in neighbours):
                 is_numeric[i] = changed = True
+    # Four or more short confusable tokens in a row with no digit at all: a
+    # comb field whose every box was misread ("B G G O Z").
+    def short(i):
+        return 1 <= len(parts[i]) <= 3 and set(parts[i]) <= _STANDALONE
+
+    streak: list[int] = []
+    for i in [*tokens, None]:
+        if i is not None and short(i):
+            streak.append(i)
+            continue
+        if len(streak) >= 4:
+            for j in streak:
+                is_numeric[j] = True
+        streak = []
     for i in tokens:
         if is_numeric[i]:
             parts[i] = parts[i].translate(_CONFUSIONS)

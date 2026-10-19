@@ -1,4 +1,6 @@
-fastapi==0.129.0
+fastapi==0.149.0
+# Explicit security floor for the existing FastAPI ASGI dependency.
+starlette==1.9.0
 uvicorn[standard]==0.41.0
 PyMuPDF==1.27.1
 pydantic==2.12.5
@@ -12,7 +14,7 @@ openpyxl==3.1.5
 # Image processing
 # RapidOCR requires this distribution; pin the same OpenCV version used before.
 opencv-python==4.13.0.92
-Pillow==12.1.1
+Pillow==12.3.0
 pillow-heif==1.2.1
 # OCR (PaddleOCR 3.x – PP-OCRv5, CPU-only, no CUDA required)
 # PaddleOCR 3.x uses .predict() API with PP-OCRv5 models for best accuracy.

@@ -55,6 +55,7 @@ import errno
 import json
 import math
 import os
+import re
 import sqlite3
 import threading
 import time
@@ -265,11 +266,24 @@ class _Store:
         _write_private(path, self.cipher.seal(data, f"input:{job_id}"))
         return str(path)
 
+    def _read_job_file(self, job_id: str, path: str, directory: Path) -> bytes:
+        # A ledger/source string is not filesystem authority. Only the exact
+        # UUID-named file in this store may be opened, including after recovery.
+        if not re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", job_id):
+            raise ValueError("Invalid OCR queue job ID")
+        expected = directory / f"{job_id}.bin"
+        if Path(path).absolute() != expected.absolute():
+            raise ValueError("OCR queue file does not belong to job")
+        # Do not follow a swapped final symlink between validation and open.
+        fd = os.open(expected, os.O_RDONLY | os.O_NOFOLLOW)
+        with os.fdopen(fd, "rb") as handle:
+            return handle.read()
+
     def read_input(self, job_id: str, path: str) -> bytes:
-        return self.cipher.open(Path(path).read_bytes(), f"input:{job_id}")
+        return self.cipher.open(self._read_job_file(job_id, path, self.inputs), f"input:{job_id}")
 
     def read_result(self, job_id: str, path: str) -> dict:
-        return json.loads(self.cipher.open(Path(path).read_bytes(), f"result:{job_id}"))
+        return json.loads(self.cipher.open(self._read_job_file(job_id, path, self.results), f"result:{job_id}"))
 
     # Rows -----------------------------------------------------------------
 

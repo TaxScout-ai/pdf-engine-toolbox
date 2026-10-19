@@ -1106,3 +1106,29 @@ def test_a_comb_field_read_with_boxes_missing_refuses(reading):
     scan, words = _scan_with(lambda p: p.insert_text((72, 160), "123-45-6789", fontsize=11))
     with pytest.raises(ir.RedactionIncompleteError, match="misread identifier"):
         ir.redact_identifiers(scan, ocr=_explicit_ocr(words, {"123-45-6789": reading}))
+
+
+@pytest.mark.parametrize("kind", ["input", "result"])
+def test_private_queue_read_rejects_foreign_paths_ids_and_symlinks(tmp_path, kind):
+    store = ocr_queue._Store(tmp_path / "store", ocr_queue._Cipher(b"x" * 32))
+    job_id = "11111111-1111-4111-8111-111111111111"
+    directory = store.inputs if kind == "input" else store.results
+    expected = directory / f"{job_id}.bin"
+    payload = b"document" if kind == "input" else b'{"pages":[]}'
+    sealed = store.cipher.seal(payload, f"{kind}:{job_id}")
+    expected.write_bytes(sealed)
+    read = store.read_input if kind == "input" else store.read_result
+    try:
+        assert read(job_id, str(expected)) == (payload if kind == "input" else {"pages": []})
+        foreign = tmp_path / "outside.bin"
+        foreign.write_bytes(sealed)
+        with pytest.raises(ValueError, match="does not belong"):
+            read(job_id, str(foreign))
+        with pytest.raises(ValueError, match="Invalid OCR queue job ID"):
+            read("../outside", str(foreign))
+        expected.unlink()
+        expected.symlink_to(foreign)
+        with pytest.raises(OSError):
+            read(job_id, str(expected))
+    finally:
+        store._db.close()

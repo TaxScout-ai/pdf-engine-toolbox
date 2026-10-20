@@ -19,8 +19,10 @@ def _write_source_tree(root: Path, *, app_value: str = "same") -> None:
         "README.md",
         "pyproject.toml",
         "requirements.txt",
+        "requirements-docling.txt",
         "third-party-sources.json",
         "scripts/download_models.py",
+        "scripts/download_docling_models.py",
         "scripts/verify_source_revision.py",
     ):
         path = root / relative

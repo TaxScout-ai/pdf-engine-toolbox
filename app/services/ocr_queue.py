@@ -875,9 +875,22 @@ class OcrQueue:
 
             return page_orientation.read_page(data, unit)
         if job.operation == "tables":
-            from app.services import table_ocr
+            from app.services import table_pipeline
 
-            return table_ocr.read_page(data, unit, job.params.get("dpi", 300))
+            def claim_fallback():
+                # Spend the request budget only on a page that actually needs
+                # the heavier reader, including under concurrent workers.
+                with self._cond:
+                    used = job.params.get("_fallback_used", 0)
+                    if used >= settings.table_fallback_max_pages:
+                        return False
+                    job.params["_fallback_used"] = used + 1
+                    return True
+
+            return table_pipeline.read_page(data, unit, {
+                **job.params,
+                "claim_fallback": claim_fallback,
+            })
         return rapid_ocr.read_page(
             data, unit, job.params["dpi"], job.params.get("force_ocr", False)
         )

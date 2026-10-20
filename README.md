@@ -81,7 +81,7 @@ uvicorn app.main:app --reload
 Development processes outside the container report `development` as their
 build identity and link to the repository's default branch.
 
-## RapidOCR, the only model runtime (TAX-6490, TAX-6876, TAX-6995)
+## RapidOCR text runtime (TAX-6490, TAX-6876, TAX-6995)
 
 RapidOCR (ONNX Runtime, CPU) serves every model operation: `/text/ocr`,
 identifier redaction, `/transform/orientation` and table recognition on page
@@ -388,3 +388,31 @@ provenance and can still be viewed.
 
 Identifier redaction on scans reads with RapidOCR (TAX-6876); its measured
 leak rate is the held-out corpus above.
+
+
+## Optional table structure fallback (TAX-7070)
+
+`POST /text/tables` returns a document status and per-page outcomes as well as
+successful tables. Each table includes physical cells with row/column spans,
+raw text, page and PDF-point bounds when available. `unsupported` is distinct
+from a blank page and from an inference error. Clients must inspect outcomes;
+a successful HTTP response does not establish complete table coverage.
+
+The default build remains RapidOCR/RapidTable. For a staging evaluation image,
+build the same public source revision with `--build-arg INCLUDE_DOCLING=true`.
+This adds the pinned CPU-only optional requirements and hash-verified model
+artifacts. Set `TABLE_FALLBACK=docling`, `DOCLING_MODEL_DIR=/opt/docling/models`
+and a bounded `TABLE_FALLBACK_MAX_PAGES` (default 4 per request). The default
+`TABLE_FALLBACK=none` never imports Docling or Torch. Explicit `pymupdf` and
+`rapidtable` comparisons do not silently invoke the fallback.
+
+Only unresolved/failed pages use TableFormer. Complete native tables preserve
+geometry warnings without loading a second model. Native text passing the
+quality gate is reused before image OCR. All page work uses the shared OCR
+queue; one process-wide lock bounds the heavy converter. Runtime downloads,
+remote services and external plugins are disabled. Provision artifacts during
+the build; do not depend on first-request downloads.
+
+See [the real financial-table evaluation](docs/benchmarks/TAX-7070-financial-tables.md)
+for coverage, timing, memory and the remaining limitations. The optional profile
+needs a separately measured memory budget; it is not a free accuracy upgrade.

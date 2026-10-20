@@ -112,8 +112,8 @@ async def extract_tables(request: ExtractTablesRequest):
 
     pdf_bytes = await download_service.download_pdf(request.source_url)
     # Off the event loop: image pages wait for the OCR queue's workers.
-    tables = await run_in_threadpool(
-        pdf_service.extract_tables,
+    result = await run_in_threadpool(
+        pdf_service.extract_tables_result,
         pdf_bytes,
         request.pages,
         strategy=request.strategy,
@@ -125,10 +125,7 @@ async def extract_tables(request: ExtractTablesRequest):
 
     return ExtractTablesResponse(
         success=True,
-        data=ExtractTablesData(
-            tables=[ExtractedTable(**t) for t in tables],
-            total_count=len(tables),
-        ),
+        data=ExtractTablesData(**result),
         processing_time_ms=round(elapsed, 2),
     )
 

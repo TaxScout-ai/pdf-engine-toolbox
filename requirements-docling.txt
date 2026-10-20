@@ -1,0 +1,8 @@
+# Optional fallback only. CPU torch wheels must be installed from the CPU index
+# before this file; never resolve CUDA packages into the regular OCR image.
+torch==2.14.1+cpu
+torchvision==0.29.1+cpu
+docling==2.140.0
+docling-core==2.103.1
+docling-ibm-models==4.0.3
+transformers==5.20.2

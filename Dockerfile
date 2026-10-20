@@ -51,7 +51,7 @@ COPY app/services/docling_model_hashes.json /tmp/docling_model_hashes.json
 RUN case "$INCLUDE_DOCLING" in \
       true) pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu \
               torch==2.14.1+cpu torchvision==0.29.1+cpu && \
-            pip install --no-cache-dir -c requirements.txt -r /tmp/requirements-docling.txt && \
+            pip install --no-cache-dir -r requirements.txt -r /tmp/requirements-docling.txt && \
             pip check && python /tmp/download_docling_models.py ;; \
       false) ;; \
       *) exit 1 ;; \

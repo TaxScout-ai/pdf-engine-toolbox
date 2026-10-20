@@ -234,7 +234,7 @@ def build(irs_dir: Path) -> None:
                       "pages_per_variant": len(expected)}, indent=1))
 
 
-def score(label: str, chunk: int) -> None:
+def score(label: str, chunk: int, only: list[str] | None = None) -> None:
     sys.path.insert(0, str(Path.cwd()))
     from app.services import pdf_service
 
@@ -242,6 +242,8 @@ def score(label: str, chunk: int) -> None:
     expected = manifest["pages"]
     report: dict = {"label": label, "variants": {}}
     for variant, filename in manifest["variants"].items():
+        if only and variant not in only:
+            continue
         source = fitz.open(WORK / filename)
         found: dict[int, dict] = {}
         started = time.monotonic()
@@ -287,11 +289,13 @@ def main() -> None:
     s = sub.add_parser("score")
     s.add_argument("--label", default="current")
     s.add_argument("--chunk", type=int, default=16)
+    s.add_argument("--variant", action="append", choices=VARIANTS,
+                   help="score only this variant (repeatable)")
     args = parser.parse_args()
     if args.command == "build":
         build(args.irs_dir)
     else:
-        score(args.label, args.chunk)
+        score(args.label, args.chunk, args.variant)
 
 
 if __name__ == "__main__":

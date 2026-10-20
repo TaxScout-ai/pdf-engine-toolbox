@@ -287,12 +287,22 @@ Measured on `scripts/orientation_corpus.py` (public IRS forms and synthetic
 pages only, each turned 0/90/180/270, clean, scan-like and faint variants;
 1,728 pages; `min_confidence` 0.85 as the app sends it):
 
-ORIENTATION_TABLE
+| Variant (576 pages each) | PaddleX classifier: correct / wrong / missed | RapidOCR lines: correct / wrong / missed |
+| --- | --- | --- |
+| clean | 543 / 0 / 33 | 576 / 0 / 0 |
+| scan | 507 / 0 / 69 | 576 / 0 / 0 |
+| faint | 391 / 0 / 185 | 510 / 0 / 66 |
+| **total (1,728)** | **1,441 / 0 / 287** | **1,662 / 0 / 66** |
+
+Re-run with `python scripts/orientation_corpus.py build --irs-dir <IRS_PDF>`
+then `RAPIDOCR_MODEL_DIR=… python scripts/orientation_corpus.py score`.
 
 A wrong answer counts any correction other than the right one, including any
 correction on an upright page. Cost: about one RapidOCR detection plus a
 batch of up to 64 short line readings per scanned page, on the OCR workers
-(the classifier it replaces was a ~0.05 s CNN pass).
+(the classifier it replaces was a ~0.05 s CNN pass; on the shared, loaded
+build host the new judgement took 1.7-2.7 s per page with 2 workers x 2
+threads).
 
 ## Tables (TAX-6995)
 

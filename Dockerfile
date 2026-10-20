@@ -50,6 +50,10 @@ RUN pip install --no-cache-dir setuptools && \
 COPY scripts/download_models.py /tmp/download_models.py
 COPY app/services/rapid_ocr_models.py /tmp/rapid_ocr_models.py
 RUN python /tmp/download_models.py && rm /tmp/download_models.py /tmp/rapid_ocr_models.py
+# rapid-table creates <site-packages>/rapid_table/models on import (for its
+# runtime downloader, which the engine never uses). Create it here as root so
+# the import works as the non-root runtime user.
+RUN python -c "import rapid_table"
 
 # Copy application code
 COPY app/ ./app/
@@ -72,6 +76,8 @@ RUN useradd -m -r appuser && \
     chown -R appuser:appuser /app/cache /data /tmp/libreoffice /home/appuser
 
 USER appuser
+# Fail the build if a model runtime cannot be imported by the runtime user.
+RUN python -c "import rapid_table, rapidocr, onnxruntime"
 
 # The image carries a verified revision, so refuse to serve without one rather
 # than fall back to advertising the mutable main branch as Corresponding Source.

@@ -1528,17 +1528,31 @@ IMAGE_TABLE_STRATEGIES = ("rapidtable", "ppstructure")
 
 def extract_tables_result(
     pdf_bytes: bytes, pages: list[int] | None = None, strategy: str = "auto",
-    language: str = "en", dpi: int = 300,
+    language: str = "en", dpi: int = 300, timeout: float = 90,
+    deadline: float | None = None,
 ) -> dict:
     """Per-page outcomes and cell evidence; empty is never an error substitute."""
     source_hash = hashlib.sha256(pdf_bytes).hexdigest()
     from app.services import ocr_queue, rapid_ocr
-    with rapid_ocr.FITZ_LOCK, _open_pdf(pdf_bytes) as doc:
-        targets = list(dict.fromkeys(pages)) if pages is not None else list(range(len(doc)))
-        _validate_pages(doc, targets)
-    results = ocr_queue.get_queue().run_pages("tables", pdf_bytes, targets, {
+    deadline = time.monotonic() + timeout if deadline is None else deadline
+    remaining = max(0, deadline - time.monotonic())
+    if not remaining or not rapid_ocr.FITZ_LOCK.acquire(timeout=remaining):
+        raise PdfEngineError("TABLE_REQUEST_TIMEOUT",
+                            "Table preparation timed out. Retry selected pages.", 504)
+    try:
+        with _open_pdf(pdf_bytes) as doc:
+            targets = list(dict.fromkeys(pages)) if pages is not None else list(range(len(doc)))
+            _validate_pages(doc, targets)
+    finally:
+        rapid_ocr.FITZ_LOCK.release()
+    remaining = max(0, deadline - time.monotonic())
+    results = ([{
+        "page_index": page, "tables": [], "source": "table_queue",
+        "status": "failed", "reason": "table_request_timeout",
+    } for page in targets] if not remaining else
+    ocr_queue.get_queue().run_pages("tables", pdf_bytes, targets, {
         "dpi": dpi, "language": language, "strategy": strategy,
-    }) if targets else []
+    }, timeout=remaining)) if targets else []
     by_page = dict(zip(targets, results, strict=True))
     tables, outcomes = [], []
     for page_idx in targets:

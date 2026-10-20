@@ -690,6 +690,16 @@ class OcrQueue:
         budget = self.sync_timeout if timeout is None else timeout
         if not job.event.wait(budget):
             with self._cond:
+                # Preserve completed table pages at the deadline. Snapshot under
+                # the same lock used by workers; late results cannot change the
+                # response. Other synchronous operations still fail closed.
+                table_results = [
+                    job.done.get(page, {
+                        "page_index": page, "tables": [], "source": "table_queue",
+                        "status": "failed", "reason": "table_request_timeout",
+                    })
+                    for page in targets
+                ] if operation == "tables" else None
                 # Stop scheduling its remaining pages; a stuck inference keeps
                 # its worker until it returns, and its result is discarded.
                 job.error = OcrTimeoutError(f"OCR did not finish within {budget:g}s")
@@ -701,6 +711,8 @@ class OcrQueue:
                 self._cond.notify_all()
             log.error("ocr_sync_timeout", operation=operation, pages=len(targets),
                       timeout_s=budget)
+            if table_results is not None:
+                return table_results
             raise job.error
         if job.error is not None:
             raise job.error

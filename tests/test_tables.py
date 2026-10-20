@@ -8,6 +8,7 @@ they are provisioned (RAPIDOCR_MODEL_DIR).
 """
 
 import json
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -373,3 +374,44 @@ def test_missing_predicted_cell_never_shifts_text_into_another_column(monkeypatc
     result = table_ocr.read_tables(np.full((40, 100, 3), 255, dtype=np.uint8), 100, 40, 0, ocr)
     assert result == [] and result.unresolved_regions == 1
     engine.table_matcher.assert_not_called()
+
+
+def test_table_deadline_is_rechecked_after_planning(monkeypatch):
+    from unittest.mock import Mock
+    from app.services import ocr_queue
+    clock = iter([10.0, 12.0])
+    monkeypatch.setattr(pdf_service, "time", SimpleNamespace(monotonic=lambda: next(clock)))
+    run = Mock(return_value=[{"page_index": 0, "tables": [], "status": "empty",
+                              "reason": "blank_page", "source": "native_pdf"}])
+    monkeypatch.setattr(ocr_queue, "get_queue", lambda: SimpleNamespace(run_pages=run))
+    pdf_service.extract_tables_result(_blank_scan(), deadline=15)
+    assert run.call_args.kwargs["timeout"] == 3
+
+
+def test_expired_table_deadline_does_not_enqueue_work(monkeypatch):
+    from unittest.mock import Mock
+    from app.services import ocr_queue
+    queue = Mock()
+    monkeypatch.setattr(ocr_queue, "get_queue", queue)
+    with pytest.raises(pdf_service.PdfEngineError, match="preparation timed out"):
+        pdf_service.extract_tables_result(_blank_scan(), deadline=time.monotonic() - 1)
+    queue.assert_not_called()
+
+
+def test_table_preparation_bounds_global_pdf_lock_wait(monkeypatch):
+    from unittest.mock import Mock
+    lock = Mock()
+    lock.acquire.return_value = False
+    monkeypatch.setattr(rapid_ocr, "FITZ_LOCK", lock)
+    with pytest.raises(pdf_service.PdfEngineError, match="preparation timed out"):
+        pdf_service.extract_tables_result(_blank_scan(), timeout=1)
+    assert 0 < lock.acquire.call_args.kwargs["timeout"] <= 1
+    lock.release.assert_not_called()
+
+
+def test_table_http_deadline_reports_failure(client, auth_headers, monkeypatch):
+    from app.routes import text
+    monkeypatch.setattr(text, "run_in_threadpool", AsyncMock(side_effect=TimeoutError))
+    response = _post(client, auth_headers, _blank_scan(), {})
+    assert response.status_code == 504
+    assert response.json()["error"]["code"] == "TABLE_REQUEST_TIMEOUT"

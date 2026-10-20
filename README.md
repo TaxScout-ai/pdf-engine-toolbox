@@ -81,13 +81,18 @@ uvicorn app.main:app --reload
 Development processes outside the container report `development` as their
 build identity and link to the repository's default branch.
 
-## RapidOCR backend (TAX-6490, TAX-6876)
+## RapidOCR, the only model runtime (TAX-6490, TAX-6876, TAX-6995)
 
-`OCR_BACKEND=rapid` is the code default since TAX-6713; a deployment may pin
-`OCR_BACKEND=paddle` as the rollback. Rapid needs `WORKERS=1` and `RAPIDOCR_MODEL_DIR` pointing to
-a read-only directory containing the three models listed in
-`app/services/rapid_ocr.py::MODEL_HASHES`. The ordinary `/text/ocr` endpoint and
-task polling contract select one backend; there is no automatic Paddle retry.
+RapidOCR (ONNX Runtime, CPU) serves every model operation: `/text/ocr`,
+identifier redaction, `/transform/orientation` and table recognition on page
+images. Paddle (`paddlepaddle`, `paddleocr`, `paddlex`) was removed in
+TAX-6995; there is no `OCR_BACKEND=paddle` rollback any more. A deployment
+that still sets `OCR_BACKEND` (or `OCR_DET_LIMIT_SIDE_LEN`) starts normally;
+the value is ignored and `ocr_backend_setting_ignored` is logged at startup.
+The engine needs `WORKERS=1` and `RAPIDOCR_MODEL_DIR` pointing to a read-only
+directory containing the models listed in
+`app/services/rapid_ocr_models.py` (`MODEL_HASHES` for OCR, `TABLE_MODEL_HASHES`
+for tables).
 RapidOCR is the planned production engine: responses carry
 `provenance.experimental: false`; earlier builds sent `true`. The field is
 kept so readers of the old shape keep working, and nothing in the engine
@@ -102,9 +107,13 @@ versioned upstream locations; the service verifies their SHA-256 before loading:
 - https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.9.2/onnx/PP-OCRv6/rec/PP-OCRv6_rec_small.onnx
 - https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.9.2/onnx/PP-OCRv4/cls/ch_ppocr_mobile_v2.0_cls_mobile.onnx
 
-Missing, altered or mismatched weights/packages fail the task; runtime does
-not download substitutes. Engines load lazily, one per OCR worker thread. The
-Rapid backend skips Paddle startup warmup. Rendering caps at 216 DPI and 16
+RapidTable's SLANet-plus table-structure model (7,758,305 bytes) comes from
+https://www.modelscope.cn/models/RapidAI/RapidTable/resolve/v2.0.0/slanet-plus.onnx
+and is verified the same way (`rapid-table==3.0.2`).
+
+Missing, altered or mismatched weights/packages abort startup and the build;
+runtime does not download substitutes. Engines load lazily, one per OCR worker
+thread. Rendering caps at 216 DPI and 16
 million pixels/page. Use a container CPU/memory budget during deployment and
 size it from measured whole-service peak RSS, including concurrent non-OCR
 operations.
@@ -183,26 +192,28 @@ finishes first. Nothing answers "busy": the only refusal is HTTP 429 with a
 `OCR_QUEUE_MAX_JOBS` unfinished jobs are queued. **Callers must retry a 429
 after `Retry-After` seconds.**
 
-`GET /health` lists `capabilities` (additive). `ocr-queue:persistent` is always
-present on this version; `identifier-redaction:rapid-ocr` is present only when
-`OCR_BACKEND=rapid`, i.e. when identifier redaction really reads with RapidOCR.
+`GET /health` lists `capabilities` (additive): `ocr-queue:persistent`,
+`identifier-redaction:rapid-ocr`, `orientation:rapid-ocr` and
+`tables:rapid-table`. All four are always present on this version.
 
-`WORKERS` (uvicorn processes) must stay 1 on both backends: the queue is
-scheduled and recovered by one process. Scale with `OCR_WORKERS` instead.
+`WORKERS` (uvicorn processes) must stay 1: the queue is scheduled and
+recovered by one process. Scale with `OCR_WORKERS` instead.
+
+Orientation and image-table requests run on the same workers as in-memory
+jobs of one unit per page (they are not persisted and do not count toward
+`OCR_QUEUE_MAX_JOBS`). A job left in the ledger by an engine that ran with
+`OCR_BACKEND=paddle` is re-planned as RapidOCR on start and resumes.
 
 Native digital text keeps the existing skip behavior without loading models.
 Rapid scan results include `provenance`, per-page `text_source`, and per-word
 `polygon`/`geometry_kind` alongside existing fields. Coordinates are **visual
 PDF points**, including PDF rotation. Word boxes are CTC-derived estimates,
 not manually validated character boundaries. No field is independently
-verified merely because OCR found the same digits. The application's legacy
-rotation normalization and hard-coded Paddle source label must be adapted
-before accepting these results into the production pipeline (TAX-6471 also
-tracks unsafe sign/decimal/wrong-field matching).
+verified merely because OCR found the same digits (TAX-6471 tracks unsafe
+sign/decimal/wrong-field matching).
 
-Identifier redaction follows `OCR_BACKEND`: with `rapid` it reads page images
-through the same OCR workers (same words-and-boxes contract) and never imports
-Paddle.
+Identifier redaction reads page images with RapidOCR through the same OCR
+workers (same words-and-boxes contract).
 
 **What is redacted.** Every reading OCR produced is searched: regular words,
 RapidOCR words below the 0.5 review threshold, and whole recognized lines
@@ -248,15 +259,71 @@ ground-truth position, or re-read by OCR. Results: pending the first full run.
 Re-run it with `RAPIDOCR_MODEL_DIR=… python scripts/redaction_leak_corpus.py`.
 Its work files go to `.corpus-work/` (gitignored), never `/tmp`.
 
-Table recognition (`/text/tables`) and orientation
-(`/transform/orientation`) keep their Paddle models, which load lazily on the
-first such request; every Paddle inference in the process is serialized by one
-lock (TAX-6255). Invoking those endpoints loads Paddle in addition to Rapid,
-so a Rapid-only memory estimate is not a whole mixed-workload budget.
-Rollback both OCR and redaction by selecting `OCR_BACKEND=paddle` and
-restarting; Paddle OCR jobs run through the same queue, one unit per document. Backend-specific cache keys prevent reusing Rapid results as
-Paddle results after rollback. Existing cached Paddle entries are invalidated
-once by the new versioned key.
+## Page orientation (TAX-6995)
+
+`POST /transform/orientation` keeps its contract: for each checked page whose
+text is turned 90/180/270 degrees with confidence of at least
+`min_confidence`, it returns `rotation` (the clockwise correction) and
+`detected_orientation` (= (360 - rotation) % 360, the meaning the PaddleX
+`PP-LCNet_x1_0_doc_ori` classifier gave it), plus `checked_page_count` and
+`skipped_page_count`. Native-text pages are skipped unless
+`scanned_only=false`.
+
+It no longer uses a document-orientation model. Each page is rendered at 144
+DPI and judged from its text lines (`app/services/page_orientation.py`):
+
+1. The RapidOCR detector finds the lines on the page scaled to 1024 px (again
+   at full resolution when it finds fewer than 8). Long thin boxes vote, by
+   length, for lines running across or down the page; square boxes do not.
+2. The page is turned so its lines run across, and its 32 longest lines are
+   read by the recognizer as they are and turned 180 degrees. A line votes for
+   a direction when one reading is credible (score at least 0.5) and beats the
+   other by at least 0.15; votes are weighted by that margin.
+3. Confidence = (share of line length on the winning axis) x (share of the
+   vote for the winning direction). Fewer than 3 voting lines: confidence 0,
+   the page is never turned.
+
+Measured on `scripts/orientation_corpus.py` (public IRS forms and synthetic
+pages only, each turned 0/90/180/270, clean, scan-like and faint variants;
+1,728 pages; `min_confidence` 0.85 as the app sends it):
+
+| Variant (576 pages each) | PaddleX classifier: correct / wrong / missed | RapidOCR lines: correct / wrong / missed |
+| --- | --- | --- |
+| clean | 543 / 0 / 33 | 576 / 0 / 0 |
+| scan | 507 / 0 / 69 | 576 / 0 / 0 |
+| faint | 391 / 0 / 185 | 510 / 0 / 66 |
+| **total (1,728)** | **1,441 / 0 / 287** | **1,662 / 0 / 66** |
+
+Re-run with `python scripts/orientation_corpus.py build --irs-dir <IRS_PDF>`
+then `RAPIDOCR_MODEL_DIR=… python scripts/orientation_corpus.py score`.
+
+A wrong answer counts any correction other than the right one, including any
+correction on an upright page. Cost: about one RapidOCR detection plus a
+batch of up to 64 short line readings per scanned page, on the OCR workers
+(the classifier it replaces was a ~0.05 s CNN pass; on the shared, loaded
+build host the new judgement took 1.7-2.7 s per page with 2 workers x 2
+threads).
+
+## Tables (TAX-6995)
+
+`POST /text/tables` keeps its request and response contract. Digital pages
+use PyMuPDF `find_tables` (no model). Scanned pages (50 characters of text or
+fewer), and digital pages where PyMuPDF finds nothing, are read from the
+page image (`app/services/table_ocr.py`), rendered at `dpi` capped at 216:
+
+- **Where:** ruled tables only. Long horizontal and vertical strokes are kept
+  by morphological opening; a region whose rules cross at least 9 times (a
+  2 x 2 grid of cells) is a table. Borderless tables on a scan are not found,
+  and such a page answers no table rather than a guessed one; it is then not
+  OCRed at all.
+- **Structure:** RapidTable SLANet-plus (ONNX, hash-pinned).
+- **Text:** the page is read once with RapidOCR and RapidTable's matcher puts
+  each line in its cell.
+
+`strategy` accepts `auto` (default), `pymupdf`, and `rapidtable`; the old name
+`ppstructure` is kept as an alias of `rapidtable`. Page images support only
+`language=en` (another language answers 422 `UNSUPPORTED_LANGUAGE`).
+PP-StructureV3 and its ~1.5 GB chart model are gone.
 
 `scripts/benchmark_rapid_pilot.py` exercises this adapter against the private,
 reviewed real-document manifests from TAX-6460. Supply `--benchmark-tools`
@@ -291,8 +358,8 @@ Crop and rotation transforms are inverted before returning every word polygon;
 The response keeps the quality decision, preparation metadata and model profile.
 These are review hints, never proof that a tax field is correct. Prepared
 searchable-PDF output is not certified (`searchable_output_verified=false`); the
-application keeps the original PDF for review. No automatic Paddle fallback or
-second model is invoked. The application must explicitly enable its separate
+application keeps the original PDF for review. No fallback or second model is
+invoked. The application must explicitly enable its separate
 manual-review integration before accepting this profile; production defaults
 remain unchanged.
 
@@ -313,20 +380,11 @@ inspection of the original. OCR agreement does not approve tax data. The
 searchable PDF output remains unverified and the app does not replace originals
 with it.
 
-Explicit rollback requires **both** `OCR_BACKEND=paddle` on this service and
-`OCR_RAPID_REVIEW_ENABLED=false` on the app, followed by process restarts. Cache
-keys separate backends. A mismatched pair fails closed at the app geometry gate;
-never reinterpret Rapid coordinates as Paddle evidence. Existing stored review
-receipts retain their provenance and can still be viewed after rollback.
-Paddle remains installed for this rollback and for separate identifier-redaction
-and table/classification operations; those operations are not changed here.
-The earlier opt-in pilot instructions above document the evaluation history;
-this section defines the new default. Production activation is a separate,
-coordinated release, not a side effect of local integration tests.
+There is no OCR rollback to Paddle since TAX-6995: Paddle is not installed.
+An app still configured for the Paddle pairing (`OCR_RAPID_REVIEW_ENABLED=false`)
+fails closed at its geometry gate on these results; set it back to its default
+before deploying this engine. Existing stored review receipts retain their
+provenance and can still be viewed.
 
-`DOCUMENT_IDENTIFIER_REDACTION=enforce` is not supported with Rapid manual
-review: its receipts cannot automatically restore full identifiers into the
-vault. The matching app rejects document model calls before redaction/inference
-for this combination. Keep the existing redaction policy and use the paired
-Paddle rollback settings above for enforced redaction; do not turn redaction
-off to activate Rapid. The default `text-layer` redaction policy is unchanged.
+Identifier redaction on scans reads with RapidOCR (TAX-6876); its measured
+leak rate is the held-out corpus above.

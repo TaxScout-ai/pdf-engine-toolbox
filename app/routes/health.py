@@ -9,7 +9,6 @@ from app.build_identity import (
     corresponding_source_url,
     read_build_commit,
 )
-from app.config import settings
 from app.models.responses import HealthResponse
 
 router = APIRouter()
@@ -22,13 +21,18 @@ def capabilities() -> list[str]:
       they survive a restart, and a full queue answers 429 with Retry-After
       (seconds) instead of failing a task as busy.
     * ``identifier-redaction:rapid-ocr`` — /redact/identifiers reads page
-      images with RapidOCR. Present only when OCR_BACKEND=rapid; under the
-      Paddle rollback redaction reads with Paddle and this is absent.
+      images with RapidOCR.
+    * ``orientation:rapid-ocr`` — /transform/orientation judges pages from
+      RapidOCR text lines (TAX-6995), not the PaddleX classifier.
+    * ``tables:rapid-table`` — /text/tables reads page images with RapidTable
+      (ruled tables only), not PP-StructureV3.
     """
-    caps = ["ocr-queue:persistent"]
-    if settings.ocr_backend == "rapid":
-        caps.append("identifier-redaction:rapid-ocr")
-    return caps
+    return [
+        "ocr-queue:persistent",
+        "identifier-redaction:rapid-ocr",
+        "orientation:rapid-ocr",
+        "tables:rapid-table",
+    ]
 
 
 @router.get("/health", response_model=HealthResponse)

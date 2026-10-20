@@ -20,16 +20,14 @@ WORKDIR /app
 
 # Install system dependencies:
 # - curl: for health checks
-# - libgomp1: OpenMP runtime required by PaddlePaddle
 # - libheif: for HEIC image support (iPhone photos)
-# - libgl1: required by opencv-python-headless
+# - libgl1: required by opencv-python
 # - libreoffice-core + writer + calc + impress: for office-to-PDF conversion
 # - fonts-liberation: standard fonts for LibreOffice rendering
 # - ghostscript: PDF/A output (TAX-5637)
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         curl \
-        libgomp1 \
         libheif-dev \
         libgl1 \
         libreoffice-core \
@@ -45,15 +43,17 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir setuptools && \
     pip install --no-cache-dir -r requirements.txt
 
-# Pre-download PaddleOCR PP-OCRv5 models + PPStructureV3 table models
-# during build (avoids ~300 MB download at runtime).
+# Download the pinned RapidOCR and RapidTable ONNX weights during build and
+# verify their SHA-256; any failure aborts the build (runtime never downloads).
 # Script is used instead of inline python -c to avoid Coolify ARG injection bug
 # with multi-line backslash-continued RUN commands.
 COPY scripts/download_models.py /tmp/download_models.py
 COPY app/services/rapid_ocr_models.py /tmp/rapid_ocr_models.py
-# Required default backend: unlike the optional legacy warmup, failures abort.
-RUN python /tmp/download_models.py --rapid-only
-RUN python /tmp/download_models.py || echo "Model pre-download failed; models will download at runtime"
+RUN python /tmp/download_models.py && rm /tmp/download_models.py /tmp/rapid_ocr_models.py
+# rapid-table creates <site-packages>/rapid_table/models on import (for its
+# runtime downloader, which the engine never uses). Create it here as root so
+# the import works as the non-root runtime user.
+RUN python -c "import rapid_table"
 
 # Copy application code
 COPY app/ ./app/
@@ -71,13 +71,13 @@ LABEL org.opencontainers.image.licenses="AGPL-3.0-only"
 LABEL org.opencontainers.image.revision=$SOURCE_COMMIT
 
 # Create non-root user and cache/temp directories
-# Copy PaddleX models if they were pre-downloaded
 RUN useradd -m -r appuser && \
     mkdir -p /app/cache /data /tmp/libreoffice && \
-    (cp -r /root/.paddlex /home/appuser/.paddlex 2>/dev/null || true) && \
     chown -R appuser:appuser /app/cache /data /tmp/libreoffice /home/appuser
 
 USER appuser
+# Fail the build if a model runtime cannot be imported by the runtime user.
+RUN python -c "import rapid_table, rapidocr, onnxruntime"
 
 # The image carries a verified revision, so refuse to serve without one rather
 # than fall back to advertising the mutable main branch as Corresponding Source.

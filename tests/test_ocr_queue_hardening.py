@@ -172,7 +172,7 @@ def test_a_dead_worker_is_replaced(monkeypatch):
 
 def test_a_late_checkpoint_cannot_orphan_a_row():
     queue = ocr_queue.get_queue()
-    task_id = queue.submit_ocr(scanned(1), [], "en", 300, "rapid")
+    task_id = queue.submit_ocr(scanned(1), [], "en", 300)
     assert queue.wait(task_id)["status"] == "completed"
     queue.store.save_unit(task_id, 0, {"full_text": "late"})  # after _finish
     assert queue.store._execute("SELECT COUNT(*) AS n FROM ocr_job_units")[0]["n"] == 0
@@ -434,38 +434,6 @@ def test_dusty_and_noisy_scan_false_refusal_profile():
     assert profile[(8, 0)] is True
 
 
-def test_paddle_rollback_redaction_refuses_a_failed_page(monkeypatch):
-    from app.services import pdf_service
-
-    class Crashing:
-        def predict(self, input):  # noqa: A002 - mirrors PaddleOCR
-            raise RuntimeError("std::exception")
-
-    monkeypatch.setattr(settings, "ocr_backend", "paddle")
-    monkeypatch.setattr(pdf_service, "_get_paddle_ocr", lambda lang="en": Crashing())
-    page = _image_only_pdf(lambda p: p.insert_text((72, 120), "SSN 123-45-6789"))
-    assert pdf_service.ocr_pages(page, force_ocr=True)["pages"][0]["status"] == "failed"
-    with pytest.raises(ir.RedactionIncompleteError, match=r"OCR failed on page\(s\) \[0\]"):
-        ir.redact_identifiers(page)
-
-
-def test_paddle_rollback_redaction_refuses_an_unread_page_with_print(monkeypatch):
-    from types import SimpleNamespace
-
-    from app.services import pdf_service
-
-    class Blind:
-        def predict(self, input):  # noqa: A002
-            return [SimpleNamespace(json={"res": {"rec_texts": [], "rec_scores": [],
-                                                  "dt_polys": []}})]
-
-    monkeypatch.setattr(settings, "ocr_backend", "paddle")
-    monkeypatch.setattr(pdf_service, "_get_paddle_ocr", lambda lang="en": Blind())
-    page = _image_only_pdf(lambda p: p.insert_text((72, 120), "SSN 123-45-6789"))
-    with pytest.raises(ir.RedactionIncompleteError, match="contain text OCR did not read"):
-        ir.redact_identifiers(page)
-
-
 def test_redaction_refuses_a_page_ocr_failed_on(monkeypatch):
     def crash(image, **_):
         raise RuntimeError("inference crashed")
@@ -523,7 +491,7 @@ def test_queue_limit_is_atomic_with_the_enqueue(monkeypatch):
 
     def go(index):
         try:
-            accepted.append(queue.submit_ocr(scanned(1, str(index)), None, "en", 300, "rapid"))
+            accepted.append(queue.submit_ocr(scanned(1, str(index)), None, "en", 300))
         except ocr_queue.QueueFullError:
             refused.append(index)
 

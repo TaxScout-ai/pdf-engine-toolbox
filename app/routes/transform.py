@@ -20,7 +20,7 @@ router = APIRouter(prefix="/transform")
 async def detect_page_orientation(request: OrientationRequest):
     """Detect cardinal rotation on image-based pages without changing the PDF."""
     pdf_bytes = await download_service.download_pdf(request.source_url)
-    # Off the event loop: the classifier can wait on the Paddle lock.
+    # Off the event loop: pages wait for the OCR queue's workers.
     return await run_in_threadpool(
         pdf_service.detect_page_orientations,
         pdf_bytes,

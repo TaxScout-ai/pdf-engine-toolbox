@@ -10,6 +10,13 @@ MODEL_HASHES = {
     "ch_ppocr_mobile_v2.0_cls_mobile.onnx": "e47acedf663230f8863ff1ab0e64dd2d82b838fceb5957146dab185a89d6215c",  # noqa: E501
 }
 
+# Table structure for /text/tables (TAX-6995). Kept apart from MODEL_HASHES,
+# which is the OCR provenance every /text/ocr result carries.
+TABLE_MODEL = "slanet-plus.onnx"
+TABLE_MODEL_HASHES = {
+    TABLE_MODEL: "d57a942af6a2f57d6a4a0372573c696a2379bf5857c45e2ac69993f3b334514b",
+}
+
 MODEL_BASE = "https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.9.2/onnx/"
 MODEL_URLS = {
     "PP-OCRv6_det_small.onnx": MODEL_BASE + "PP-OCRv6/det/PP-OCRv6_det_small.onnx",
@@ -17,6 +24,9 @@ MODEL_URLS = {
     "ch_ppocr_mobile_v2.0_cls_mobile.onnx": (
         MODEL_BASE + "PP-OCRv4/cls/ch_ppocr_mobile_v2.0_cls_mobile.onnx"
     ),
+}
+TABLE_MODEL_URLS = {
+    TABLE_MODEL: "https://www.modelscope.cn/models/RapidAI/RapidTable/resolve/v2.0.0/slanet-plus.onnx",
 }
 MAX_MODEL_BYTES = 100 * 1024 * 1024
 
@@ -28,8 +38,16 @@ def valid_model(path: Path, expected: str) -> bool:
         return hashlib.file_digest(source, "sha256").hexdigest() == expected
 
 
+def _required() -> dict[str, tuple[str, str]]:
+    """Every model the image must hold: name -> (sha256, build-time URL)."""
+    return {
+        **{name: (digest, MODEL_URLS[name]) for name, digest in MODEL_HASHES.items()},
+        **{name: (digest, TABLE_MODEL_URLS[name]) for name, digest in TABLE_MODEL_HASHES.items()},
+    }
+
+
 def validate_models(root: Path) -> None:
-    for name, expected in MODEL_HASHES.items():
+    for name, (expected, _) in _required().items():
         if not valid_model(root / name, expected):
             raise RuntimeError(f"RapidOCR model missing or hash mismatch: {name}")
 
@@ -37,14 +55,14 @@ def validate_models(root: Path) -> None:
 def download_models(root: Path) -> None:
     """Build only: verify before an atomic rename; failure must fail the build."""
     root.mkdir(parents=True, exist_ok=True)
-    for name, expected in MODEL_HASHES.items():
+    for name, (expected, url) in _required().items():
         target = root / name
         if valid_model(target, expected):
             continue
         temporary = target.with_suffix(".download")
         try:
             size = 0
-            with urlopen(MODEL_URLS[name], timeout=120) as response, temporary.open("wb") as out:
+            with urlopen(url, timeout=120) as response, temporary.open("wb") as out:
                 while chunk := response.read(1024 * 1024):
                     size += len(chunk)
                     if size > MAX_MODEL_BYTES:

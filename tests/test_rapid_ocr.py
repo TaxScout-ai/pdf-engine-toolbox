@@ -37,14 +37,13 @@ def prediction():
 @pytest.fixture(autouse=True)
 def isolated_cache(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "cache_dir", str(tmp_path / "cache"))
-    monkeypatch.setattr(settings, "ocr_backend", "rapid")
 
 
 @pytest.mark.parametrize("rotation", [0, 90, 180, 270])
 def test_words_use_visible_page_coordinates_and_search_pdf(monkeypatch, rotation):
     engine = MagicMock(return_value=prediction())
     monkeypatch.setattr(rapid_ocr, "_get_engine", lambda: engine)
-    result = pdf_service.ocr_pages(scan(rotation), backend="rapid")
+    result = pdf_service.ocr_pages(scan(rotation))
     word = result["pages"][0]["words"][0]
     assert word["bbox"] == pytest.approx({"x": 10, "y": 20, "w": 100, "h": 20})
     assert word["polygon"][0] == [10, 20]
@@ -59,10 +58,9 @@ def test_words_use_visible_page_coordinates_and_search_pdf(monkeypatch, rotation
     assert engine.return_value.word_results[0][0][2][0].tolist() == [30, 60]
 
 
-def test_native_pdf_does_not_initialize_either_engine(monkeypatch):
+def test_native_pdf_does_not_initialize_the_engine(monkeypatch):
     fail = MagicMock(side_effect=AssertionError("unexpected engine load"))
     monkeypatch.setattr(rapid_ocr, "_get_engine", fail)
-    monkeypatch.setattr(pdf_service, "_get_paddle_ocr", fail)
     with fitz.open() as doc:
         page = doc.new_page()
         page.insert_text(
@@ -71,17 +69,13 @@ def test_native_pdf_does_not_initialize_either_engine(monkeypatch):
             "for native extraction.",
         )
         data = doc.tobytes()
-    for backend in ["rapid", "paddle"]:
-        result = pdf_service.ocr_pages(data, backend=backend)
-        if backend == "paddle":
-            assert result["pages"][0]["words"] == []
-        else:
-            assert result["pages"][0]["words"][0]["geometry_kind"] == "native_word"
-        assert "selectable" in result["pages"][0]["full_text"]
+    result = pdf_service.ocr_pages(data)
+    assert result["pages"][0]["words"][0]["geometry_kind"] == "native_word"
+    assert "selectable" in result["pages"][0]["full_text"]
     fail.assert_not_called()
 
 
-def test_force_ocr_reads_the_page_image_on_either_backend(monkeypatch):
+def test_force_ocr_reads_the_page_image(monkeypatch):
     """Identifier redaction must read what a page shows, not its text layer."""
     with fitz.open() as doc:
         page = doc.new_page()
@@ -91,20 +85,15 @@ def test_force_ocr_reads_the_page_image_on_either_backend(monkeypatch):
             "for native extraction.",
         )
         data = doc.tobytes()
-    paddle = MagicMock()
-    paddle.predict.return_value = []
     engine = MagicMock(return_value=prediction())
-    monkeypatch.setattr(pdf_service, "_get_paddle_ocr", lambda lang: paddle)
     monkeypatch.setattr(rapid_ocr, "_get_engine", lambda: engine)
-    pdf_service.ocr_pages(data, force_ocr=True)
-    assert paddle.predict.call_count == 1
-    result = pdf_service.ocr_pages(data, force_ocr=True, backend="rapid")
+    result = pdf_service.ocr_pages(data, force_ocr=True)
     assert engine.call_count == 1
     assert result["pages"][0]["text_source"] == "rapidocr"
     assert result["pages"][0]["words"][0]["text"] == "12,345.67"
 
 
-def test_route_cache_keeps_geometry_provenance_and_separates_backends(
+def test_route_cache_keeps_geometry_and_provenance(
     client, auth_headers, monkeypatch
 ):
     from app.services import download_service
@@ -125,25 +114,15 @@ def test_route_cache_keeps_geometry_provenance_and_separates_backends(
     assert cached["pages"][0]["words"][0]["polygon"] == result["pages"][0]["words"][0]["polygon"]
     assert cached["provenance"]["profile"] == rapid_ocr.PROFILE
     assert engine.call_count == 1
-    monkeypatch.setattr(settings, "ocr_backend", "paddle")
-    paddle = MagicMock()
-    paddle.predict.return_value = []
-    monkeypatch.setattr(pdf_service, "_get_paddle_ocr", lambda lang: paddle)
-    queued = request()
-    assert "task_id" in queued
-    assert finished_task(queued["task_id"]).status.value == "completed"
-    assert paddle.predict.call_count == 1
 
 
-def test_inference_error_fails_task_without_paddle_fallback(client, auth_headers, monkeypatch):
+def test_inference_error_fails_task_without_fallback(client, auth_headers, monkeypatch):
     from app.services import download_service
 
     monkeypatch.setattr(download_service, "download_pdf", AsyncMock(return_value=scan()))
     monkeypatch.setattr(
         rapid_ocr, "_get_engine", MagicMock(side_effect=RuntimeError("model unavailable"))
     )
-    paddle = MagicMock(side_effect=AssertionError("unexpected fallback"))
-    monkeypatch.setattr(pdf_service, "_get_paddle_ocr", paddle)
     body = json.dumps({"source_url": "https://example.com/scan.pdf"})
     accepted = client.post(
         "/text/ocr", content=body, headers=auth_headers("POST", "/text/ocr", body)
@@ -152,7 +131,6 @@ def test_inference_error_fails_task_without_paddle_fallback(client, auth_headers
     assert task.status.value == "failed"
     assert task.result is None
     assert "model unavailable" in task.error
-    paddle.assert_not_called()
     # A failed job frees its worker: the next request is served.
     monkeypatch.setattr(rapid_ocr, "_get_engine", lambda: lambda *a, **kw: prediction())
     with fitz.open() as doc:
@@ -200,7 +178,7 @@ def test_invalid_geometry_is_not_silently_reported_as_success(monkeypatch):
 
 def test_pilot_refuses_multiple_workers():
     with pytest.raises(ValueError, match="WORKERS=1"):
-        Settings(ocr_backend="rapid", workers=2, _env_file=None)
+        Settings(workers=2, _env_file=None)
 
 
 def test_empty_detector_sentinel_preserves_other_pages(monkeypatch):

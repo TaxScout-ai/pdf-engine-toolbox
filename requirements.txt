@@ -16,18 +16,14 @@ openpyxl==3.1.5
 opencv-python==4.13.0.92
 Pillow==12.3.0
 pillow-heif==1.2.1
-# OCR (PaddleOCR 3.x – PP-OCRv5, CPU-only, no CUDA required)
-# PaddleOCR 3.x uses .predict() API with PP-OCRv5 models for best accuracy.
-# PPStructure replaced by PPStructureV3.
-# NOTE: PaddlePaddle 3.3.0 has a regression breaking CPU inference via oneDNN
-# (github.com/PaddlePaddle/Paddle/issues/77340). Pin to 3.2.2 until fixed.
-paddlepaddle>=3.2.0,<3.3.0
-paddleocr>=3.0.0,<4.0.0
-paddlex[ocr]
-# Primary review OCR; pinned weights are built into the image and hash-checked.
+# The only model runtime (TAX-6995: Paddle removed). OCR, identifier
+# redaction and page orientation use RapidOCR; table structure on page images
+# uses RapidTable. Pinned weights are built into the image and hash-checked
+# (app/services/rapid_ocr_models.py).
 rapidocr==3.9.2
+rapid-table==3.0.2
 onnxruntime==1.30.0
-# OCR queue encryption at rest (TAX-6876); already in the image via PaddleX.
+# OCR queue encryption at rest (TAX-6876).
 cryptography==50.0.2
 # Testing
 pytest==9.0.2

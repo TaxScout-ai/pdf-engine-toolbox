@@ -7,7 +7,6 @@ from fastapi import APIRouter, Depends, Response
 from fastapi.responses import JSONResponse
 from starlette.concurrency import run_in_threadpool
 
-from app.config import settings
 from app.dependencies import require_auth
 from app.models.requests import (
     BookmarksRequest,
@@ -103,15 +102,16 @@ async def extract_tables(request: ExtractTablesRequest):
     """Extract tabular data from PDF pages.
 
     Supports three strategies:
-    - ``auto`` (default): PyMuPDF for digital pages, PP-Structure for scans.
+    - ``auto`` (default): PyMuPDF for digital pages, RapidTable for scans.
     - ``pymupdf``: Fast rule-based extraction (digital PDFs only).
-    - ``ppstructure``: Neural network table recognition (best for scanned
-      1099s, W-2s, K-1s with faint or crooked lines).
+    - ``rapidtable`` (alias ``ppstructure``): ruled tables read from the page
+      image with RapidTable and RapidOCR on the OCR workers. Borderless
+      tables on a scan are not found.
     """
     start = time.monotonic()
 
     pdf_bytes = await download_service.download_pdf(request.source_url)
-    # Off the event loop: PP-Structure inference can wait on the Paddle lock.
+    # Off the event loop: image pages wait for the OCR queue's workers.
     tables = await run_in_threadpool(
         pdf_service.extract_tables,
         pdf_bytes,
@@ -211,7 +211,7 @@ def _readable_page_count(data: bytes) -> int:
 
 @router.post("/ocr", dependencies=[Depends(require_auth)])
 async def ocr_pages(request: OcrRequest):
-    """Run the configured OCR backend on scanned PDF pages.
+    """Run RapidOCR on scanned PDF pages.
 
     Returns rich JSON with per-word text, 4-point bounding boxes (in PDF
     points), and confidence scores.  Also includes the PDF with an invisible
@@ -224,7 +224,6 @@ async def ocr_pages(request: OcrRequest):
     must retry after that delay. Nothing else refuses a request as busy.
     """
     pdf_bytes = await download_service.download_pdf(request.source_url)
-    backend = settings.ocr_backend
 
     # Input the engine cannot read is the caller's to fix: answer 422 with the
     # reason, never a 500 the app would retry as a transient fault.
@@ -245,7 +244,7 @@ async def ocr_pages(request: OcrRequest):
         "pages": sorted(request.pages) if request.pages is not None else None,
         "language": request.language,
         "dpi": request.dpi,
-        **cache_profile(backend),
+        **cache_profile(),
     }
     # Deduplicated from the queue's sealed ledger, never the plaintext file
     # cache: OCR results carry client text and the searchable PDF.
@@ -273,7 +272,6 @@ async def ocr_pages(request: OcrRequest):
             request.pages,
             request.language,
             request.dpi,
-            backend,
             src_hash if cacheable else None,
             cache_params,
         )

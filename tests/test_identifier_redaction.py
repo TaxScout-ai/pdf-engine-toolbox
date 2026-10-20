@@ -1,6 +1,5 @@
 """TAX-4858: identifiers are blacked out before a document reaches a model."""
 
-import importlib.util
 import re
 
 import fitz
@@ -157,14 +156,21 @@ def test_fails_closed_when_an_identifier_survives(monkeypatch):
         ir.redact_identifiers(scan, ocr=_pixel_reading_ocr(positions["__words__"]))
 
 
-@pytest.mark.skipif(importlib.util.find_spec("paddleocr") is None, reason="PaddleOCR not installed")
-def test_real_paddle_ocr_reads_no_identifier_on_the_redacted_scan(monkeypatch):
-    from app.config import settings
+def _rapid_models_present() -> bool:
+    from pathlib import Path
 
-    monkeypatch.setattr(settings, "ocr_backend", "paddle")  # the rollback path
+    from app.config import settings
+    from app.services.rapid_ocr_models import MODEL_HASHES, valid_model
+
+    root = Path(settings.rapidocr_model_dir)
+    return all(valid_model(root / name, digest) for name, digest in MODEL_HASHES.items())
+
+
+@pytest.mark.skipif(not _rapid_models_present(), reason="RapidOCR models not provisioned")
+def test_real_rapid_ocr_reads_no_identifier_on_the_redacted_scan():
     scan, _ = _scanned_w2()
     result = ir.redact_identifiers(scan)
-    after = ir.paddle_ocr_words(result["pdf_bytes"], [0])[0]
+    after = ir.rapid_ocr_words(result["pdf_bytes"], [0])[0]
     joined = " ".join(w.text for w in after)
     digits = re.sub(r"\D", "", joined)
     for identifier in IDENTIFIERS:

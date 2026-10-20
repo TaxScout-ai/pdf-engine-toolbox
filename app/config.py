@@ -1,7 +1,5 @@
 """Application configuration from environment variables."""
 
-from typing import Literal
-
 from pydantic import model_validator
 from pydantic_settings import BaseSettings
 
@@ -34,18 +32,11 @@ class Settings(BaseSettings):
     sensitive_nonce_cache_max_entries: int = 10_000
     sensitive_nonce_db_path: str = "/data/pdf-engine-sensitive-nonces.sqlite3"
 
-    # OCR text detection runs on the page scaled so its longer side is at most
-    # this many pixels; recognition still reads each line from the full-DPI
-    # render. Unbounded detection on a 300-DPI letter page peaked at 5.7 GB and
-    # was OOM-killed on the 4 GiB production host; 1280 peaks at ~1.55 GB, is
-    # 3.5x faster and read 496/496 identifiers in small-print stress scans
-    # (TAX-4858). 0 restores the unbounded PaddleOCR default.
-    ocr_det_limit_side_len: int = 1280
-
-    # Primary OCR for /text/ocr and identifier redaction. OCR_BACKEND=paddle is
-    # the rollback path for both. Table extraction and orientation keep Paddle
-    # models, which load lazily on first use of those endpoints.
-    ocr_backend: Literal["paddle", "rapid"] = "rapid"
+    # RapidOCR is the only model runtime (TAX-6995): /text/ocr, identifier
+    # redaction, /transform/orientation and table recognition on page images
+    # all use the pinned ONNX weights in this directory. OCR_BACKEND and
+    # OCR_DET_LIMIT_SIDE_LEN belonged to the removed Paddle path and are
+    # ignored (a warning is logged at startup when OCR_BACKEND is still set).
     rapidocr_model_dir: str = "/opt/rapidocr/models"
 
     # OCR job queue (TAX-6876). Every /text/ocr request is a persistent job:
@@ -95,7 +86,9 @@ class Settings(BaseSettings):
     cache_max_size_mb: int = 500  # Max total cache size
     cache_ttl_seconds: int = 3600  # 1 hour default TTL
 
-    model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
+    # "ignore": a .env written for an older engine (OCR_BACKEND=paddle) must
+    # not stop the service from starting.
+    model_config = {"env_file": ".env", "env_file_encoding": "utf-8", "extra": "ignore"}
 
 
 settings = Settings()

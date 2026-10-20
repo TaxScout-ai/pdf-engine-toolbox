@@ -124,15 +124,19 @@ def test_scanned_page_is_redacted_from_ocr_boxes_and_checked_by_ocr():
     ocr = _pixel_reading_ocr(positions["__words__"])
     result = ir.redact_identifiers(scan, ocr=ocr)
     assert result["ocr_pages"] == [0]
-    assert {r["last4"] for r in result["redactions"]} == {"5678", "4567", "6789"}
+    # TAX-6876: on OCR'd pages any nine-digit run is identifier-shaped (an SSN
+    # read without its label or dashes looks the same), so the routing number
+    # loses its first five digits too. Text layers keep it (test above).
+    assert {r["last4"] for r in result["redactions"]} == {"5678", "4567", "6789", "0021"}
     assert all(r["source"] == "ocr" for r in result["redactions"])
     # The same reader now sees no identifier on the outgoing page.
     after = ocr(result["pdf_bytes"], [0])[0]
     seen = " ".join(w.text for w in after)
     assert not any(identifier in seen for identifier in IDENTIFIERS), seen
     assert "912-34" not in seen and "00-123" not in seen
-    assert "021000021" in [w.text for w in after]  # a routing number stays readable
-    assert "75250.00" in [w.text for w in after]
+    assert "021000021" not in seen
+    assert "75250.00" in [w.text for w in after]  # amounts stay readable
+    assert "78701-1234" in seen and "512-555-0100" in seen  # ZIP+4 and phone too
 
 
 def test_a_photo_is_converted_and_redacted():
@@ -140,7 +144,7 @@ def test_a_photo_is_converted_and_redacted():
     png = fitz.open(stream=scan, filetype="pdf")[0].get_pixmap(dpi=72).tobytes("png")
     result = ir.redact_identifiers(png, "image/png", ocr=_pixel_reading_ocr(positions["__words__"]))
     assert fitz.open(stream=result["pdf_bytes"], filetype="pdf").page_count == 1
-    assert {r["last4"] for r in result["redactions"]} == {"5678", "4567", "6789"}
+    assert {r["last4"] for r in result["redactions"]} == {"5678", "4567", "6789", "0021"}
 
 
 def test_fails_closed_when_an_identifier_survives(monkeypatch):
@@ -154,7 +158,10 @@ def test_fails_closed_when_an_identifier_survives(monkeypatch):
 
 
 @pytest.mark.skipif(importlib.util.find_spec("paddleocr") is None, reason="PaddleOCR not installed")
-def test_real_paddle_ocr_reads_no_identifier_on_the_redacted_scan():
+def test_real_paddle_ocr_reads_no_identifier_on_the_redacted_scan(monkeypatch):
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "ocr_backend", "paddle")  # the rollback path
     scan, _ = _scanned_w2()
     result = ir.redact_identifiers(scan)
     after = ir.paddle_ocr_words(result["pdf_bytes"], [0])[0]
@@ -164,6 +171,31 @@ def test_real_paddle_ocr_reads_no_identifier_on_the_redacted_scan():
         assert re.sub(r"\D", "", identifier) not in digits, joined
     assert "75250" in joined
     # The last four digits stay readable for the model.
+    assert "5678" in digits and "4567" in digits
+
+
+def _rapid_models_provisioned() -> bool:
+    from app.services import rapid_ocr
+
+    try:
+        rapid_ocr.validate_runtime()
+    except Exception:
+        return False
+    return True
+
+
+@pytest.mark.skipif(not _rapid_models_provisioned(), reason="RapidOCR models not provisioned")
+def test_real_rapid_ocr_reads_no_identifier_on_the_redacted_scan():
+    """The default backend: Rapid word boxes drive the redaction and its check."""
+    scan, _ = _scanned_w2()
+    result = ir.redact_identifiers(scan)
+    assert {r["source"] for r in result["redactions"]} == {"ocr"}
+    after = ir.rapid_ocr_words(result["pdf_bytes"], [0])[0]
+    joined = " ".join(w.text for w in after)
+    digits = re.sub(r"\D", "", joined)
+    for identifier in IDENTIFIERS:
+        assert re.sub(r"\D", "", identifier) not in digits, joined
+    assert "75250" in joined
     assert "5678" in digits and "4567" in digits
 
 

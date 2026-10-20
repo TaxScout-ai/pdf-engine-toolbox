@@ -1,6 +1,7 @@
 """Transform operation endpoints: orientation, deskew, compress, flatten, watermark."""
 
 from fastapi import APIRouter, Depends, Response
+from starlette.concurrency import run_in_threadpool
 
 from app.dependencies import require_auth
 from app.models.requests import (
@@ -19,7 +20,9 @@ router = APIRouter(prefix="/transform")
 async def detect_page_orientation(request: OrientationRequest):
     """Detect cardinal rotation on image-based pages without changing the PDF."""
     pdf_bytes = await download_service.download_pdf(request.source_url)
-    return pdf_service.detect_page_orientations(
+    # Off the event loop: the classifier can wait on the Paddle lock.
+    return await run_in_threadpool(
+        pdf_service.detect_page_orientations,
         pdf_bytes,
         request.pages,
         scanned_only=request.scanned_only,

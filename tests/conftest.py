@@ -23,6 +23,22 @@ def isolate_sensitive_nonce_ledger(tmp_path, monkeypatch):
     )
 
 
+@pytest.fixture(autouse=True)
+def isolate_ocr_queue(tmp_path, monkeypatch):
+    """Each test gets its own OCR job ledger and a fresh worker pool."""
+    from app.services import ocr_queue
+
+    ocr_queue.shutdown()
+    monkeypatch.setattr(settings, "ocr_queue_dir", str(tmp_path / "ocr-queue"))
+    monkeypatch.setattr(settings, "ocr_workers", 4)
+    monkeypatch.setattr(settings, "ocr_intra_op_threads", 1)
+    monkeypatch.setattr(settings, "ocr_max_active_jobs", 0)
+    # The queue refuses the default secret without a dedicated key.
+    monkeypatch.setattr(settings, "ocr_queue_key", "test-only ocr queue key")
+    yield
+    ocr_queue.shutdown()
+
+
 @pytest.fixture
 def client():
     """FastAPI test client."""

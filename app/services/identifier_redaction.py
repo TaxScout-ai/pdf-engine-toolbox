@@ -12,9 +12,8 @@ document's own text layer or OCR by those last four digits.
 Where the numbers are found:
   * a page with a usable text layer — its words (digital PDFs and PDFs that
     already carry an OCR text layer);
-  * a page without one (a scan or a photo) — OCR words from the configured
-    backend: RapidOCR by default, Paddle under the OCR_BACKEND=paddle
-    rollback. The default path never imports or loads Paddle (TAX-6876).
+  * a page without one (a scan or a photo) — RapidOCR words, read on the
+    shared OCR workers (TAX-6876). Paddle left the engine in TAX-6995.
 
 Before anything is returned the result is checked: every page's text layer
 is searched again, and every page that needed OCR is OCRed again. If an
@@ -51,7 +50,7 @@ _EIN_LABEL = re.compile(r"\b(EIN|FEIN|employer)\b", re.IGNORECASE)
 
 # A text layer counts as usable when it has some length and real words;
 # scans often carry garbage glyphs whose "words" average under 3 characters
-# (same heuristic as pdf_service.ocr_pages).
+# (the same idea as the text-layer quality check before OCR).
 _MIN_TEXT_CHARS = 50
 _MIN_AVG_TOKEN_LEN = 3.0
 # A page whose images cover this share of it may show an identifier that its
@@ -279,7 +278,7 @@ def _glyph_columns(page: fitz.Page, rect: fitz.Rect) -> list[tuple[float, float]
 def _part_rect(word: Word, lo: int, hi: int, page: fitz.Page | None, source: str) -> fitz.Rect:
     """The box of characters [lo, hi) of one word.
 
-    From the text layer the characters are located exactly. PaddleOCR returns a
+    From the text layer the characters are located exactly. OCR may return a
     whole text line as one "word", so its characters are located on the page
     image: glyphs are separated by the ink gaps between them and matched to the
     line's non-space characters in order. When the counts disagree the line is
@@ -438,11 +437,7 @@ OcrWords = Callable[[bytes, list[int]], dict[int, list[Word]]]
 
 
 def ocr_words(pdf_bytes: bytes, pages: list[int]) -> dict[int, list[Word]]:
-    """Words of the page images, read by the backend OCR_BACKEND selects."""
-    from app.config import settings
-
-    if settings.ocr_backend == "paddle":
-        return paddle_ocr_words(pdf_bytes, pages)
+    """Words of the page images, read by RapidOCR."""
     return rapid_ocr_words(pdf_bytes, pages)
 
 
@@ -453,13 +448,6 @@ def rapid_ocr_words(pdf_bytes: bytes, pages: list[int]) -> dict[int, list[Word]]
     result = rapid_ocr.ocr_pages(
         pdf_bytes, pages, force_ocr=True, with_pdf=False, low_confidence=True
     )
-    return _words(result, pdf_bytes)
-
-
-def paddle_ocr_words(pdf_bytes: bytes, pages: list[int]) -> dict[int, list[Word]]:
-    from app.services import pdf_service
-
-    result = pdf_service.ocr_pages(pdf_bytes, pages, force_ocr=True, backend="paddle")
     return _words(result, pdf_bytes)
 
 
@@ -753,8 +741,7 @@ def _words(result: dict, pdf_bytes: bytes) -> dict[int, list[Word]]:
 
     A ``failed`` page always refuses. Every other page refuses when it shows
     print that no OCR word covers (``unread_text``): words OCR found elsewhere
-    on the page are no evidence about the line it missed. Both backends tag
-    failed pages.
+    on the page are no evidence about the line it missed.
     """
     failed = sorted(p["page_index"] for p in result["pages"] if p.get("status") == "failed")
     if failed:

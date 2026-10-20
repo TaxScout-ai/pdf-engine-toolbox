@@ -80,32 +80,27 @@ def test_detect_page_orientation_endpoint(
 def test_detect_page_orientations_filters_low_confidence(
     monkeypatch, sample_pdf_bytes
 ):
-    """Only confident non-zero cardinal corrections leave the service."""
+    """Only confident non-zero cardinal corrections leave the service.
 
-    class Prediction:
-        def __init__(self, label: str, score: float):
-            self.json = {
-                "res": {
-                    "label_names": [label],
-                    "scores": [score],
-                }
-            }
+    ``detected_orientation`` keeps the PaddleX classifier's meaning (TAX-6995):
+    the page's orientation, whose clockwise correction is ``rotation``.
+    """
+    from app.services import page_orientation
 
-    class Model:
-        def predict(self, images, batch_size):
-            assert len(images) == 5
-            assert batch_size == 5
-            return [
-                Prediction("270", 0.97),
-                Prediction("90", 0.70),
-                Prediction("0", 0.99),
-                Prediction("180", 0.91),
-                Prediction("0", 0.96),
-            ]
+    verdicts = [
+        {"rotation": 90, "confidence": 0.97},
+        {"rotation": 270, "confidence": 0.70},
+        {"rotation": 0, "confidence": 0.99},
+        {"rotation": 180, "confidence": 0.91},
+        {"rotation": 0, "confidence": 0.0},
+    ]
+    seen = []
 
-    monkeypatch.setattr(
-        pdf_service, "_get_doc_orientation_model", lambda: Model()
-    )
+    def judge(source, index):
+        seen.append(index)
+        return verdicts[index]
+
+    monkeypatch.setattr(page_orientation, "read_page", judge)
 
     result = pdf_service.detect_page_orientations(
         sample_pdf_bytes,
@@ -131,6 +126,7 @@ def test_detect_page_orientations_filters_low_confidence(
         "checked_page_count": 5,
         "skipped_page_count": 0,
     }
+    assert sorted(seen) == [0, 1, 2, 3, 4]
 
 
 def test_flatten_annotations(client, auth_headers, sample_pdf_bytes):

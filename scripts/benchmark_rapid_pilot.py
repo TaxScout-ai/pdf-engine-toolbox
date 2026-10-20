@@ -61,7 +61,7 @@ def main():
         with fitz.open(stream=data, filetype="pdf") as doc:
             width, height = doc[0].rect.width, doc[0].rect.height
         began = time.perf_counter()
-        result = pdf_service.ocr_pages(data, backend="rapid")
+        result = pdf_service.ocr_pages(data)
         elapsed = time.perf_counter() - began
         words = []
         for word in result["pages"][0]["words"]:

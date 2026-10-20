@@ -5,7 +5,6 @@ import datetime
 import io
 import math
 import re
-import threading
 
 import cv2
 import fitz  # PyMuPDF
@@ -13,10 +12,10 @@ import numpy as np
 import structlog
 from PIL import Image
 
-from app.config import settings
 from app.utils.errors import (
     PageOutOfRangeError,
     PdfCorruptError,
+    PdfEngineError,
     PdfPasswordAuthorizationError,
     PdfPasswordNotRequiredError,
 )
@@ -471,54 +470,6 @@ def deskew_pages(pdf_bytes: bytes, pages: list[int] | None = None) -> bytes:
     return doc.tobytes(garbage=4, deflate=True)
 
 
-# One Paddle inference at a time, process-wide (TAX-6255, TAX-6876).
-#
-# Paddle predictors are not thread-safe, and every model below is a cached
-# singleton. On 2026-10-10 two OCR tasks reached ``.predict()`` on the same
-# predictor from two threads and production died with SIGSEGV.
-#
-# The lock is held per inference call (one page or one batch), never across a
-# whole document, so concurrent callers interleave pages. It also covers model
-# construction, which otherwise races on the caches and could load a model
-# while another one is inferring. Reentrant so that a getter may be called
-# with the lock already held. RapidOCR does not take this lock: its workers
-# own separate ONNX Runtime sessions (app/services/ocr_queue.py).
-_PADDLE_LOCK = threading.RLock()
-
-
-def _paddle_predict(predictor, *args, **kwargs) -> list:
-    """Run ``predictor.predict`` under the process-wide Paddle lock.
-
-    PaddleX models (and ``predict_iter`` pipelines) return a lazy generator
-    that only runs inference as it is consumed, so the result is drained into
-    a list before the lock is released. Callers must go through this helper
-    rather than calling ``.predict()`` themselves.
-    """
-    with _PADDLE_LOCK:
-        return list(predictor.predict(*args, **kwargs))
-
-
-_doc_orientation_model = None
-
-
-def _get_doc_orientation_model():
-    """Return the cached PaddleX cardinal document-orientation classifier."""
-    global _doc_orientation_model
-    if _doc_orientation_model is None:
-        with _PADDLE_LOCK:
-            if _doc_orientation_model is None:
-                try:
-                    from paddlex import create_model
-                except ImportError as exc:
-                    raise PdfCorruptError(
-                        "Document orientation detection requires paddlex"
-                    ) from exc
-                _doc_orientation_model = create_model(
-                    model_name="PP-LCNet_x1_0_doc_ori"
-                )
-    return _doc_orientation_model
-
-
 def detect_page_orientations(
     pdf_bytes: bytes,
     pages: list[int] | None = None,
@@ -529,8 +480,10 @@ def detect_page_orientations(
     """Detect 90/180/270-degree raster rotation before routing and OCR.
 
     PDF rotation metadata does not describe scans whose pixels were captured
-    sideways. The lightweight PaddleX classifier reads the rendered page and
-    returns the clockwise correction required to make its text upright.
+    sideways. Each candidate page is rendered and judged from its text lines
+    by the pinned RapidOCR detector and recognizer
+    (app/services/page_orientation.py), on the OCR queue's workers. The
+    result is the clockwise correction that makes the page's text upright.
     Native-text pages are skipped by default because their orientation is
     already represented by the PDF content/rotation model.
     """
@@ -539,59 +492,32 @@ def detect_page_orientations(
     if pages:
         _validate_pages(doc, pages)
 
-    candidate_pages: list[int] = []
-    images: list[np.ndarray] = []
-    for page_idx in target_pages:
-        page = doc[page_idx]
-        if scanned_only and len(page.get_text("text").strip()) >= 20:
-            continue
-
-        # 108 DPI is enough for the cardinal classifier and keeps the
-        # pre-router control cheap even for long brokerage statements.
-        pix = page.get_pixmap(matrix=fitz.Matrix(1.5, 1.5), alpha=False)
-        image = np.frombuffer(pix.samples, dtype=np.uint8).reshape(
-            pix.height, pix.width, pix.n
-        )
-        candidate_pages.append(page_idx)
-        images.append(image)
-
-    if not images:
+    candidate_pages = [
+        page_idx
+        for page_idx in target_pages
+        if not (scanned_only and len(doc[page_idx].get_text("text").strip()) >= 20)
+    ]
+    if not candidate_pages:
         return {
             "pages": [],
             "checked_page_count": 0,
             "skipped_page_count": len(target_pages),
         }
 
-    model = _get_doc_orientation_model()
-    predictions = _paddle_predict(
-        model, images, batch_size=min(8, len(images))
-    )
+    from app.services import ocr_queue
+
+    judged = ocr_queue.get_queue().run_pages("orientation", pdf_bytes, candidate_pages)
     rotations: list[dict] = []
-    for page_idx, prediction in zip(candidate_pages, predictions, strict=True):
-        payload = prediction.json if hasattr(prediction, "json") else prediction
-        if callable(payload):
-            payload = payload()
-        if isinstance(payload, dict):
-            payload = payload.get("res", payload)
-        if not isinstance(payload, dict):
+    for page_idx, verdict in zip(candidate_pages, judged, strict=True):
+        correction = verdict["rotation"]
+        confidence = verdict["confidence"]
+        if correction not in (90, 180, 270) or confidence < min_confidence:
             continue
-
-        labels = payload.get("label_names") or []
-        scores = payload.get("scores") or []
-        try:
-            rotation = int(labels[0])
-            confidence = float(scores[0])
-        except (IndexError, TypeError, ValueError):
-            continue
-
-        if rotation not in (90, 180, 270) or confidence < min_confidence:
-            continue
-        correction = (360 - rotation) % 360
         rotations.append(
             {
                 "page": page_idx,
                 "rotation": correction,
-                "detected_orientation": rotation,
+                "detected_orientation": (360 - correction) % 360,
                 "confidence": confidence,
             }
         )
@@ -1557,92 +1483,6 @@ def sanitize_document(
 # ============================================================================
 
 
-# PPStructureV3 singleton – separate from PaddleOCR text recognition.
-_pp_structure_instances: dict[str, object] = {}
-
-
-def _get_pp_structure(lang: str = "en"):
-    """Return a cached PPStructureV3 instance for the given language.
-
-    PPStructureV3 uses neural networks to detect table structure from images,
-    which works far better than rule-based approaches on scanned documents
-    (faint lines, skewed rows, merged cells).
-    """
-    if lang not in _pp_structure_instances:
-        with _PADDLE_LOCK:
-            if lang not in _pp_structure_instances:
-                try:
-                    from paddleocr import PPStructureV3
-                except ImportError:
-                    raise PdfCorruptError(
-                        "Table OCR requires paddleocr>=3.0 with PPStructureV3 "
-                        "support. pip install paddlepaddle paddleocr"
-                    )
-                _pp_structure_instances[lang] = PPStructureV3(
-                    device="cpu",
-                    use_doc_orientation_classify=False,
-                    use_doc_unwarping=False,
-                    use_textline_orientation=False,
-                    use_seal_recognition=False,
-                    use_formula_recognition=False,
-                    use_chart_recognition=False,
-                    use_table_recognition=True,
-                    lang=lang,
-                )
-    return _pp_structure_instances[lang]
-
-
-def _parse_html_table(html: str) -> list[list[str]]:
-    """Parse PP-Structure's HTML table output into rows of cell strings.
-
-    Handles colspan by inserting empty strings for spanned columns.
-    """
-    from html.parser import HTMLParser
-
-    class _Parser(HTMLParser):
-        def __init__(self):
-            super().__init__()
-            self.rows: list[list[str]] = []
-            self._row: list[str] = []
-            self._cell = ""
-            self._in_cell = False
-            self._colspan = 1
-
-        def handle_starttag(self, tag, attrs):
-            if tag in ("td", "th"):
-                self._in_cell = True
-                self._cell = ""
-                self._colspan = 1
-                for name, val in attrs:
-                    if name == "colspan":
-                        try:
-                            self._colspan = int(val)
-                        except (ValueError, TypeError):
-                            pass
-
-        def handle_endtag(self, tag):
-            if tag in ("td", "th"):
-                self._in_cell = False
-                self._row.append(self._cell.strip())
-                for _ in range(self._colspan - 1):
-                    self._row.append("")
-            elif tag == "tr":
-                if self._row:
-                    self.rows.append(self._row)
-                    self._row = []
-
-        def handle_data(self, data):
-            if self._in_cell:
-                self._cell += data
-
-    parser = _Parser()
-    parser.feed(html)
-    # Flush any remaining row
-    if parser._row:
-        parser.rows.append(parser._row)
-    return parser.rows
-
-
 def _extract_tables_pymupdf(doc, page_idx: int) -> list[dict]:
     """Extract tables from a page using PyMuPDF's built-in detection."""
     page = doc[page_idx]
@@ -1672,112 +1512,9 @@ def _extract_tables_pymupdf(doc, page_idx: int) -> list[dict]:
     return results
 
 
-def _extract_tables_ppstructure(
-    doc, page_idx: int, language: str = "en", dpi: int = 300,
-) -> list[dict]:
-    """Extract tables from a scanned page using PPStructureV3 neural network."""
-    engine = _get_pp_structure(language)
-    page = doc[page_idx]
-
-    # Render page as image for PPStructureV3
-    zoom = dpi / 72.0
-    mat = fitz.Matrix(zoom, zoom)
-    pix = page.get_pixmap(matrix=mat, alpha=False)
-    img_array = np.frombuffer(pix.samples, dtype=np.uint8).reshape(
-        pix.height, pix.width, 3
-    )
-
-    try:
-        output = _paddle_predict(engine, input=img_array)
-    except Exception as e:
-        log.warning("ppstructure_failed", page=page_idx, error=str(e))
-        return []
-
-    scale = 72.0 / dpi
-    results = []
-    tab_idx = 0
-
-    for res in output:
-        raw = res.json if hasattr(res, "json") else res
-        # PaddleOCR 3.4.0 nests results under a "res" key
-        data = raw.get("res", raw) if isinstance(raw, dict) else raw
-
-        # PPStructureV3 returns layout regions + table results.
-        # Extract table HTML from layout_det_res boxes + table_res_list.
-        table_items = _find_tables_in_ppstructurev3(data)
-
-        for html, bbox in table_items:
-            rows = _parse_html_table(html)
-            if not rows:
-                continue
-
-            results.append({
-                "page_index": page_idx,
-                "table_index": tab_idx,
-                "bbox": {
-                    "x0": round(bbox[0] * scale, 2),
-                    "y0": round(bbox[1] * scale, 2),
-                    "x1": round(bbox[2] * scale, 2),
-                    "y1": round(bbox[3] * scale, 2),
-                },
-                "rows": rows,
-                "row_count": len(rows),
-                "col_count": len(rows[0]) if rows else 0,
-            })
-            tab_idx += 1
-
-    return results
-
-
-def _find_tables_in_ppstructurev3(data: dict) -> list[tuple[str, list]]:
-    """Extract (html, bbox) pairs from a PPStructureV3 result dict.
-
-    PPStructureV3 output structure varies across versions. This function
-    tries multiple known access patterns and logs the actual keys when
-    no tables are found, aiding debugging.
-    """
-    tables: list[tuple[str, list]] = []
-
-    # Pattern 1: table_res_list with pred_html (most common in 3.x)
-    table_res_list = data.get("table_res_list", [])
-    layout_boxes = data.get("layout_det_res", {}).get("boxes", [])
-    table_boxes = [b for b in layout_boxes if b.get("label") == "table"]
-
-    for i, table_res in enumerate(table_res_list):
-        html = (
-            table_res.get("pred_html", "")
-            or table_res.get("html", "")
-            or table_res.get("structure_str", "")
-        )
-        if not html:
-            continue
-
-        # Bbox from matching layout detection box, or from table result
-        if i < len(table_boxes):
-            bbox = table_boxes[i].get("coordinate", [0, 0, 0, 0])
-        else:
-            bbox = table_res.get("bbox", table_res.get("coordinate", [0, 0, 0, 0]))
-
-        tables.append((html, bbox))
-
-    # Pattern 2: Fallback — older PPStructureV3 with parsing_res_list
-    if not tables:
-        for item in data.get("parsing_res_list", []):
-            label = item.get("block_label", item.get("type", ""))
-            if label != "table":
-                continue
-            html = item.get("block_content", item.get("res", {}).get("html", ""))
-            bbox = item.get("block_bbox", item.get("bbox", [0, 0, 0, 0]))
-            if html:
-                tables.append((html, bbox))
-
-    if not tables:
-        log.debug(
-            "ppstructurev3_no_tables_found",
-            result_keys=list(data.keys()) if isinstance(data, dict) else str(type(data)),
-        )
-
-    return tables
+# Strategy names that read the rendered page image. "ppstructure" is the name
+# callers used while PP-StructureV3 did this; it now means RapidTable.
+IMAGE_TABLE_STRATEGIES = ("rapidtable", "ppstructure")
 
 
 def extract_tables(
@@ -1790,56 +1527,60 @@ def extract_tables(
     """Extract tabular data from PDF pages.
 
     Strategies:
-      - ``"auto"`` (default): Use PyMuPDF for digital pages.  For scanned
-        pages (< 50 chars of extractable text) or when PyMuPDF finds no
-        tables, fall back to PP-Structure.
-      - ``"pymupdf"``: Always use PyMuPDF (fast, good for digital PDFs).
-      - ``"ppstructure"``: Always use PPStructureV3 neural network (best for
-        scanned 1099s, W-2s, K-1s with faint/crooked lines).
+      - ``"auto"`` (default, and any unrecognized name): PyMuPDF for
+        digital pages. Scanned pages (50 characters of text or fewer), and
+        digital pages where PyMuPDF finds no table, are read from the
+        rendered image with RapidTable.
+      - ``"pymupdf"``: Always PyMuPDF (fast, digital PDFs only, no model).
+      - ``"rapidtable"`` (alias ``"ppstructure"``): Always the image path:
+        ruled-table regions, SLANet-plus structure and RapidOCR text
+        (app/services/table_ocr.py). Borderless tables on a scan are not
+        found; such a page returns no table.
 
     Args:
         pdf_bytes: Source PDF
         pages: Pages to extract from (all if None)
-        strategy: "auto", "pymupdf", or "ppstructure"
-        language: PaddleOCR language code for PP-Structure
-        dpi: Rendering DPI for PP-Structure image input
+        strategy: "auto", "pymupdf", "rapidtable" or "ppstructure"
+        language: OCR language; the image path reads English only
+        dpi: Rendering DPI for the image path (capped at 216)
     """
     doc = _open_pdf(pdf_bytes)
     target_pages = pages if pages is not None else list(range(len(doc)))
     if pages:
         _validate_pages(doc, pages)
 
-    results = []
+    by_page: dict[int, list[dict]] = {}
+    image_pages: list[int] = []
     for page_idx in target_pages:
-        page = doc[page_idx]
-
         if strategy == "pymupdf":
-            results.extend(_extract_tables_pymupdf(doc, page_idx))
+            by_page[page_idx] = _extract_tables_pymupdf(doc, page_idx)
             continue
-
-        if strategy == "ppstructure":
-            results.extend(
-                _extract_tables_ppstructure(doc, page_idx, language, dpi)
-            )
-            continue
-
-        # strategy == "auto": decide per page
-        has_text = len(page.get_text().strip()) > 50
-
-        if has_text:
-            # Digital page — try PyMuPDF first (fast)
+        if strategy == "auto" and len(doc[page_idx].get_text().strip()) > 50:
+            # Digital page: PyMuPDF first (fast, exact text).
             page_tables = _extract_tables_pymupdf(doc, page_idx)
             if page_tables:
-                results.extend(page_tables)
+                by_page[page_idx] = page_tables
                 continue
-            # PyMuPDF found nothing → try PP-Structure as fallback
-            log.info("pymupdf_no_tables_fallback_ppstructure", page=page_idx)
+            log.info("pymupdf_no_tables_fallback_rapidtable", page=page_idx)
+        image_pages.append(page_idx)
 
-        # Scanned page or PyMuPDF found nothing → PP-Structure
-        results.extend(
-            _extract_tables_ppstructure(doc, page_idx, language, dpi)
-        )
+    if image_pages:
+        if language != "en":
+            raise PdfEngineError(
+                "UNSUPPORTED_LANGUAGE",
+                "Table recognition on page images supports only language=en",
+                422,
+            )
+        from app.services import ocr_queue
 
+        read = ocr_queue.get_queue().run_pages("tables", pdf_bytes, image_pages, {"dpi": dpi})
+        for page_idx, page_tables in zip(image_pages, read, strict=True):
+            by_page[page_idx] = page_tables
+
+    results = []
+    for page_idx in target_pages:
+        for tab_idx, table in enumerate(by_page.get(page_idx, [])):
+            results.append({**table, "page_index": page_idx, "table_index": tab_idx})
     return results
 
 
@@ -2355,50 +2096,8 @@ def classify_document(pdf_bytes: bytes) -> dict:
 
 
 # ============================================================================
-# OCR (Optical Character Recognition) – PaddleOCR engine
+# OCR (Optical Character Recognition) – RapidOCR engine
 # ============================================================================
-
-
-# Module-level singleton – PaddleOCR model loading is expensive (~2 s),
-# so we initialise once per process/language.
-_paddle_ocr_instances: dict[str, object] = {}
-
-
-def _get_paddle_ocr(lang: str = "en"):
-    """Return a cached PaddleOCR instance for the given language.
-
-    Uses **PP-OCRv5** models for maximum accuracy.  PP-OCRv5 delivers
-    significant accuracy improvements over v4, especially on dense tax
-    forms and receipts with small text and complex layouts.
-    """
-    if lang not in _paddle_ocr_instances:
-        with _PADDLE_LOCK:
-            if lang not in _paddle_ocr_instances:
-                try:
-                    from paddleocr import PaddleOCR
-                except ImportError:
-                    raise PdfCorruptError(
-                        "OCR requires paddleocr>=3.0 and paddlepaddle>=3.0 "
-                        "packages. pip install paddlepaddle paddleocr"
-                    )
-                _paddle_ocr_instances[lang] = PaddleOCR(
-                    ocr_version="PP-OCRv5",
-                    lang=lang,
-                    device="cpu",
-                    use_doc_orientation_classify=False,
-                    use_doc_unwarping=False,
-                    use_textline_orientation=True,
-                    **_det_limit_kwargs(),
-                )
-    return _paddle_ocr_instances[lang]
-
-
-def _det_limit_kwargs() -> dict:
-    """Bound text detection's input size (see settings.ocr_det_limit_side_len)."""
-    side = settings.ocr_det_limit_side_len
-    if side <= 0:
-        return {}
-    return {"text_det_limit_type": "max", "text_det_limit_side_len": side}
 
 
 def ocr_pages(
@@ -2407,191 +2106,15 @@ def ocr_pages(
     language: str = "en",
     dpi: int = 300,
     force_ocr: bool = False,
-    backend: str = "paddle",
 ) -> dict:
-    """Run PaddleOCR on scanned pages and return rich results.
+    """OCR scanned pages with RapidOCR (app/services/rapid_ocr.py).
 
-    For pages that have no extractable text (scans/images), this:
-      1. Renders the page as a high-res image.
-      2. Runs PaddleOCR PP-OCRv5 (detection + orientation + recognition).
-      3. Overlays invisible text at the correct positions so that
-         Ctrl+F search works in PDF viewers.
-      4. Returns per-word text, bounding rectangles, and confidence scores.
-
-    Args:
-        pdf_bytes: Source PDF
-        pages: Page indices to OCR (all if None)
-        language: PaddleOCR language code (e.g., "en", "fr", "de", "ch")
-        dpi: Rendering resolution for OCR (higher = more accurate, slower)
-
-    Returns:
-        {
-            "pages": [
-                {
-                    "page_index": 0,
-                    "words": [
-                        {"text": "...", "bbox": {"x": 50.0, "y": 50.0, "w": 150.0, "h": 25.0}, "confidence": 0.97}
-                    ],
-                    "full_text": "..."
-                }
-            ],
-            "total_words": 150,
-            "avg_confidence": 0.94,
-            "pdf_bytes": b"..."   # PDF with invisible text layer
-        }
+    Kept as the service-level entry point; the work runs on the OCR queue's
+    workers. See ``rapid_ocr.ocr_pages`` for the result shape.
     """
-    if backend == "rapid":
-        from app.services.rapid_ocr import ocr_pages as rapid_ocr_pages
-        return rapid_ocr_pages(pdf_bytes, pages, language, dpi, force_ocr=force_ocr)
-    if backend != "paddle":
-        raise ValueError("Unknown OCR backend")
+    from app.services.rapid_ocr import ocr_pages as rapid_ocr_pages
 
-    doc = _open_pdf(pdf_bytes)
-    target_pages = pages if pages is not None else list(range(len(doc)))
-    if pages:
-        _validate_pages(doc, pages)
-
-    all_page_results: list[dict] = []
-    total_words = 0
-    confidence_sum = 0.0
-
-    for page_idx in target_pages:
-        page = doc[page_idx]
-
-        # Skip pages that already have good quality digital text.
-        # Scanned PDFs often contain garbled embedded fonts that produce
-        # nonsensical characters (e.g. "CqCY,Cr)COPaD-").  These pass
-        # simple character-level checks because the chars are valid ASCII,
-        # but the "words" are extremely short (avg ~1.8 chars vs ~4-5 for
-        # real English text).  We use average token length as the heuristic.
-        existing_text = page.get_text().strip()
-        # force_ocr (TAX-4858): identifier redaction must read what the page
-        # shows, not what its text layer claims.
-        if len(existing_text) > 50 and not force_ocr:
-            tokens = existing_text.split()
-            avg_token_len = (
-                sum(len(t) for t in tokens) / len(tokens) if tokens else 0
-            )
-            if avg_token_len >= 3.0:
-                # Real text — skip OCR
-                all_page_results.append({
-                    "page_index": page_idx,
-                    "words": [],
-                    "full_text": existing_text,
-                })
-                continue
-            else:
-                log.info(
-                    "ocr_garbage_text_detected",
-                    page=page_idx,
-                    text_len=len(existing_text),
-                    avg_token_len=round(avg_token_len, 2),
-                )
-
-        # Render page at high DPI for OCR
-        zoom = dpi / 72.0
-        mat = fitz.Matrix(zoom, zoom)
-        pix = page.get_pixmap(matrix=mat, alpha=False)
-
-        # Convert to numpy array for PaddleOCR
-        img_array = np.frombuffer(pix.samples, dtype=np.uint8).reshape(
-            pix.height, pix.width, 3
-        )
-
-        # Run PaddleOCR PP-OCRv5 (detection + orientation + recognition)
-        try:
-            ocr_output = _paddle_predict(_get_paddle_ocr(language), input=img_array)
-        except Exception as e:
-            log.warning("ocr_failed", page=page_idx, error=str(e))
-            # Additive status (TAX-6876): zero words here is not a reading of
-            # the page, so identifier redaction must refuse it.
-            all_page_results.append({
-                "page_index": page_idx,
-                "words": [],
-                "full_text": "",
-                "status": "failed",
-            })
-            continue
-
-        # PaddleOCR 3.x .predict() returns an iterable of result objects.
-        # Each result has .json with: rec_texts, rec_scores, dt_polys, rec_boxes
-        page_words: list[dict] = []
-        page_texts: list[str] = []
-        # Scale factor from rendered image pixels back to PDF points
-        scale = 72.0 / dpi
-
-        for res in ocr_output:
-            raw = res.json if hasattr(res, "json") else res
-            # PaddleOCR 3.4.0 nests results under a "res" key
-            data = raw.get("res", raw) if isinstance(raw, dict) else raw
-            texts = data.get("rec_texts", [])
-            scores = data.get("rec_scores", [])
-            polys = data.get("dt_polys", [])
-
-            for i, text in enumerate(texts):
-                confidence = scores[i] if i < len(scores) else 0.0
-
-                if not text.strip() or confidence < 0.3:
-                    continue
-
-                # dt_polys[i]: 4-point polygon in image pixels
-                bbox_points = polys[i] if i < len(polys) else [[0, 0]] * 4
-                # Convert 4-point polygon to axis-aligned {x, y, w, h} rectangle
-                # in PDF points for frontend compatibility
-                xs = [pt[0] * scale for pt in bbox_points]
-                ys = [pt[1] * scale for pt in bbox_points]
-                bx = min(xs)
-                by = min(ys)
-                bw = max(xs) - bx
-                bh = max(ys) - by
-
-                page_words.append({
-                    "text": text.strip(),
-                    "bbox": {
-                        "x": round(bx, 2),
-                        "y": round(by, 2),
-                        "w": round(bw, 2),
-                        "h": round(bh, 2),
-                    },
-                    "confidence": round(confidence, 4),
-                })
-                page_texts.append(text.strip())
-
-                total_words += 1
-                confidence_sum += confidence
-
-                # Insert invisible text at the correct position in the PDF
-                x = bbox_points[0][0] * scale
-                y = bbox_points[0][1] * scale
-                h = abs(bbox_points[3][1] - bbox_points[0][1]) * scale
-                font_size = max(h * 0.8, 4)
-
-                page.insert_text(
-                    fitz.Point(x, y + h * 0.8),
-                    text.strip(),
-                    fontsize=font_size,
-                    fontname="helv",
-                    render_mode=3,  # Invisible text
-                )
-
-        page_result = {
-            "page_index": page_idx,
-            "words": page_words,
-            "full_text": " ".join(page_texts),
-        }
-        if not page_words:
-            # Read, but nothing recognized: not proof the page is blank.
-            page_result["status"] = "empty"
-        all_page_results.append(page_result)
-
-    avg_confidence = round(confidence_sum / total_words, 4) if total_words > 0 else 0.0
-
-    return {
-        "pages": all_page_results,
-        "total_words": total_words,
-        "avg_confidence": avg_confidence,
-        "pdf_bytes": doc.tobytes(garbage=4, deflate=True),
-    }
+    return rapid_ocr_pages(pdf_bytes, pages, language, dpi, force_ocr=force_ocr)
 
 
 # ============================================================================

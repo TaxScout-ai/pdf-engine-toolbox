@@ -17,7 +17,6 @@ services:
       - WORKERS=1
       - REQUEST_TIMEOUT_SECONDS=120
       - PDF_SOURCE_ALLOWED_HOSTS=taxscout-local.s3.us-east-1.amazonaws.com
-      - PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK=True
 
 volumes:
   pdf-engine-replay:

@@ -1,251 +1,292 @@
-"""Test table extraction endpoint (POST /text/tables).
+"""Table extraction (POST /text/tables), TAX-6995.
 
-Tests cover:
-  - PyMuPDF-based table detection (digital PDFs)
-  - PPStructureV3 neural network detection (scanned PDFs)
-  - Strategy selection: auto, pymupdf, ppstructure
-
-Tests target PaddleOCR 3.x (PPStructureV3, .predict() API).
+Digital pages use PyMuPDF. Page images (scans, and digital pages where
+PyMuPDF finds nothing) use ruled-table regions + RapidTable structure +
+RapidOCR text on the OCR workers; PP-StructureV3 and Paddle are gone.
+Unit tests use stand-in engines; one test runs the real pinned models when
+they are provisioned (RAPIDOCR_MODEL_DIR).
 """
 
 import json
-from unittest.mock import patch, AsyncMock, MagicMock
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
+import cv2
 import fitz
+import numpy as np
+import pytest
+
+from app.config import settings
+from app.services import pdf_service, rapid_ocr, table_ocr
+from app.services.rapid_ocr_models import MODEL_HASHES, TABLE_MODEL_HASHES, valid_model
+
+ROWS = [
+    ["Name", "Amount", "Date"],
+    ["W-2 Income", "$85,000", "2024-01-31"],
+    ["1099-INT", "$1,250", "2024-01-15"],
+    ["1099-DIV", "$3,500", "2024-02-01"],
+]
 
 
 def _create_pdf_with_table():
-    """Create a PDF with a simple table for testing."""
+    """A digital PDF with a ruled 4 x 3 table at (72, 72)-(372, 152)."""
     doc = fitz.open()
     page = doc.new_page(width=612, height=792)
-
-    # Draw a simple table with borders
-    x_start, y_start = 72, 72
-    col_width = 100
-    row_height = 20
-    rows = [
-        ["Name", "Amount", "Date"],
-        ["W-2 Income", "$85,000", "2024-01-31"],
-        ["1099-INT", "$1,250", "2024-01-15"],
-        ["1099-DIV", "$3,500", "2024-02-01"],
-    ]
-
-    for r, row in enumerate(rows):
+    for r, row in enumerate(ROWS):
         for c, cell_text in enumerate(row):
-            x = x_start + c * col_width
-            y = y_start + r * row_height
-            rect = fitz.Rect(x, y, x + col_width, y + row_height)
+            rect = fitz.Rect(72 + c * 100, 72 + r * 20, 172 + c * 100, 92 + r * 20)
             page.draw_rect(rect, color=(0, 0, 0), width=0.5)
-            page.insert_textbox(
-                rect,
-                cell_text,
-                fontsize=10,
-                fontname="helv",
-                align=fitz.TEXT_ALIGN_CENTER,
-            )
-
+            page.insert_textbox(rect, cell_text, fontsize=10, fontname="helv",
+                                align=fitz.TEXT_ALIGN_CENTER)
     return doc.tobytes()
 
 
-def _create_scanned_pdf():
-    """Create a PDF with no selectable text (simulates a scanned page)."""
+def _scan_of(pdf_bytes: bytes, dpi: int = 200) -> bytes:
+    """The first page as an image-only PDF, as a scanner would deliver it."""
+    src = fitz.open(stream=pdf_bytes, filetype="pdf")
+    pix = src[0].get_pixmap(dpi=dpi)
+    out = fitz.open()
+    page = out.new_page(width=src[0].rect.width, height=src[0].rect.height)
+    page.insert_image(page.rect, pixmap=pix)
+    return out.tobytes()
+
+
+def _blank_scan() -> bytes:
+    doc = fitz.open()
+    doc.new_page(width=612, height=792)
+    return doc.tobytes()
+
+
+def _gray(pdf_bytes: bytes, dpi: int = 144) -> np.ndarray:
+    page = fitz.open(stream=pdf_bytes, filetype="pdf")[0]
+    pix = page.get_pixmap(dpi=dpi, colorspace=fitz.csGRAY)
+    return np.frombuffer(pix.samples, np.uint8).reshape(pix.height, pix.width).copy()
+
+
+def _post(client, auth_headers, pdf_bytes, payload):
+    body = json.dumps({"source_url": "https://example.com/t.pdf", **payload})
+    headers = auth_headers("POST", "/text/tables", body)
+    with patch(
+        "app.services.download_service.download_pdf",
+        new_callable=AsyncMock,
+        return_value=pdf_bytes,
+    ):
+        return client.post("/text/tables", content=body, headers=headers)
+
+
+class _FakeOcr:
+    """RapidOCR stand-in: one reading per table cell of ROWS, in page pixels."""
+
+    def __init__(self, scale: float):
+        self.scale = scale
+        self.calls = 0
+
+    def __call__(self, image, **_):
+        self.calls += 1
+        boxes, texts = [], []
+        for r, row in enumerate(ROWS):
+            for c, text in enumerate(row):
+                x0, y0 = (75 + c * 100) * self.scale, (75 + r * 20) * self.scale
+                x1, y1 = (165 + c * 100) * self.scale, (89 + r * 20) * self.scale
+                boxes.append([[x0, y0], [x1, y0], [x1, y1], [x0, y1]])
+                texts.append(text)
+        return SimpleNamespace(boxes=np.array(boxes), txts=tuple(texts),
+                               scores=tuple(0.97 for _ in texts))
+
+
+class _FakeTable:
+    """RapidTable stand-in: a grid of 3 columns from the OCR lines it is given."""
+
+    def __init__(self):
+        self.crops = []
+
+    def table_structure(self, crops):
+        self.crops.extend(crops)
+        return [["<tr>"]], [np.zeros((0, 8))]
+
+    def table_matcher(self, structures, cell_boxes, dt_boxes, rec_res):
+        texts = [text for text, _ in rec_res[0]]
+        rows = [texts[i:i + 3] for i in range(0, len(texts), 3)]
+        body = "".join(
+            "<tr>" + "".join(f"<td>{cell}</td>" for cell in row) + "</tr>" for row in rows
+        )
+        return [f"<html><body><table>{body}</table></body></html>"]
+
+
+@pytest.fixture
+def fake_engines(monkeypatch):
+    ocr = _FakeOcr(scale=216 / 72)  # image pages render at the 216-DPI cap
+    table = _FakeTable()
+    monkeypatch.setattr(rapid_ocr, "_get_engine", lambda: ocr)
+    monkeypatch.setattr(table_ocr, "_get_engine", lambda: table)
+    return SimpleNamespace(ocr=ocr, table=table)
+
+
+# ------------------------------------------------------------- digital pages
+
+
+def test_extract_tables_digital(client, auth_headers, monkeypatch):
+    """A digital ruled table is read by PyMuPDF; no model loads."""
+    monkeypatch.setattr(table_ocr, "read_page", pytest.fail)
+    response = _post(client, auth_headers, _create_pdf_with_table(), {"pages": [0]})
+    assert response.status_code == 200
+    data = response.json()
+    assert data["success"] is True
+    assert data["data"]["total_count"] == 1
+    assert data["data"]["tables"][0]["rows"][1][1] == "$85,000"
+
+
+def test_extract_tables_pymupdf_strategy_never_reads_the_image(client, auth_headers, monkeypatch):
+    monkeypatch.setattr(table_ocr, "read_page", pytest.fail)
+    response = _post(client, auth_headers, _scan_of(_create_pdf_with_table()),
+                     {"pages": [0], "strategy": "pymupdf"})
+    assert response.status_code == 200
+    assert response.json()["data"]["tables"] == []
+
+
+# --------------------------------------------------------------- page images
+
+
+@pytest.mark.parametrize("strategy", ["rapidtable", "ppstructure", "auto"])
+def test_scanned_table_is_read_from_the_image(client, auth_headers, fake_engines, strategy):
+    response = _post(client, auth_headers, _scan_of(_create_pdf_with_table()),
+                     {"pages": [0], "strategy": strategy})
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["total_count"] == 1
+    table = data["tables"][0]
+    assert (table["page_index"], table["table_index"]) == (0, 0)
+    assert table["rows"] == ROWS
+    assert (table["row_count"], table["col_count"]) == (4, 3)
+    # The ruled region, in PDF points (drawn at 72,72 - 372,152).
+    assert table["bbox"]["x0"] == pytest.approx(72, abs=3)
+    assert table["bbox"]["y0"] == pytest.approx(72, abs=3)
+    assert table["bbox"]["x1"] == pytest.approx(372, abs=3)
+    assert table["bbox"]["y1"] == pytest.approx(152, abs=3)
+    assert len(fake_engines.table.crops) == 1
+
+
+def test_digital_page_without_a_pymupdf_table_falls_back_to_the_image(
+    client, auth_headers, fake_engines, monkeypatch
+):
+    monkeypatch.setattr(pdf_service, "_extract_tables_pymupdf", lambda doc, page_idx: [])
+    response = _post(client, auth_headers, _create_pdf_with_table(), {"pages": [0]})
+    assert response.json()["data"]["tables"][0]["rows"] == ROWS
+
+
+def test_a_scan_without_a_ruled_table_is_honestly_empty(client, auth_headers, fake_engines):
+    """No ruled grid: no table is claimed and the page is not even OCRed."""
     doc = fitz.open()
     page = doc.new_page(width=612, height=792)
-    # Draw rectangles to simulate table lines on a scanned page
-    page.draw_rect(fitz.Rect(50, 50, 400, 200), color=(0, 0, 0), width=0.5)
-    return doc.tobytes()
-
-
-def _mock_ppstructurev3_table_result(html: str, bbox: list):
-    """Build a mock PPStructureV3 .predict() result containing one table.
-
-    PPStructureV3.predict() returns an iterable of result objects.
-    Each result has a .json property with table_res_list (tables) and
-    layout_det_res (layout detection).
-    """
-    result_obj = MagicMock()
-    result_obj.json = {
-        "layout_det_res": {
-            "boxes": [
-                {
-                    "cls_id": 4,
-                    "label": "table",
-                    "score": 0.95,
-                    "coordinate": bbox,
-                },
-            ],
-        },
-        "table_res_list": [
-            {
-                "pred_html": html,
-                "bbox": bbox,
-            },
-        ],
-        "overall_ocr_res": {
-            "rec_texts": [],
-            "rec_scores": [],
-            "dt_polys": [],
-        },
-    }
-    return result_obj
-
-
-def test_extract_tables(client, auth_headers):
-    """Extract tables should find tabular data in PDF."""
-    pdf_bytes = _create_pdf_with_table()
-
-    body = json.dumps({
-        "source_url": "https://example.com/test.pdf",
-        "pages": [0],
-    })
-    headers = auth_headers("POST", "/text/tables", body)
-
-    with patch(
-        "app.services.download_service.download_pdf",
-        new_callable=AsyncMock,
-        return_value=pdf_bytes,
-    ):
-        response = client.post("/text/tables", content=body, headers=headers)
-
+    for i, row in enumerate(ROWS):  # the same values, without rules
+        page.insert_text((72, 100 + 20 * i), "      ".join(row), fontsize=10)
+    page.draw_rect(fitz.Rect(60, 60, 400, 200), color=(0, 0, 0), width=0.8)  # a frame
+    response = _post(client, auth_headers, _scan_of(doc.tobytes()), {"pages": [0]})
     assert response.status_code == 200
-    data = response.json()
-    assert data["success"] is True
-    # Table detection may or may not find the table depending on PyMuPDF version
-    assert isinstance(data["data"]["tables"], list)
+    assert response.json()["data"] == {"tables": [], "total_count": 0}
+    assert fake_engines.ocr.calls == 0
 
 
-def test_extract_tables_pymupdf_strategy(client, auth_headers):
-    """strategy='pymupdf' should only use PyMuPDF, never PPStructureV3."""
-    pdf_bytes = _create_pdf_with_table()
-
-    body = json.dumps({
-        "source_url": "https://example.com/test.pdf",
-        "pages": [0],
-        "strategy": "pymupdf",
-    })
-    headers = auth_headers("POST", "/text/tables", body)
-
-    with patch(
-        "app.services.download_service.download_pdf",
-        new_callable=AsyncMock,
-        return_value=pdf_bytes,
-    ), patch(
-        "app.services.pdf_service._get_pp_structure",
-    ) as mock_pps:
-        response = client.post("/text/tables", content=body, headers=headers)
-
-    assert response.status_code == 200
-    # PPStructureV3 should never be called with pymupdf strategy
-    mock_pps.assert_not_called()
+def test_tables_on_several_pages_keep_page_order(client, auth_headers, fake_engines):
+    scan = fitz.open(stream=_scan_of(_create_pdf_with_table()), filetype="pdf")
+    blank = fitz.open(stream=_blank_scan(), filetype="pdf")
+    doc = fitz.open()
+    for source in (scan, blank, scan):
+        doc.insert_pdf(source)
+    response = _post(client, auth_headers, doc.tobytes(), {})
+    tables = response.json()["data"]["tables"]
+    assert [(t["page_index"], t["table_index"]) for t in tables] == [(0, 0), (2, 0)]
 
 
-def test_extract_tables_ppstructure_strategy(client, auth_headers):
-    """strategy='ppstructure' should use PPStructureV3 neural network."""
-    pdf_bytes = _create_scanned_pdf()
-
-    body = json.dumps({
-        "source_url": "https://example.com/scanned.pdf",
-        "pages": [0],
-        "strategy": "ppstructure",
-    })
-    headers = auth_headers("POST", "/text/tables", body)
-
-    # Mock PPStructureV3 to return a table result
-    table_html = (
-        "<table><tr><td>Name</td><td>Amount</td></tr>"
-        "<tr><td>W-2</td><td>85000</td></tr></table>"
-    )
-    mock_engine = MagicMock()
-    mock_engine.predict.return_value = [
-        _mock_ppstructurev3_table_result(table_html, [50, 50, 400, 200]),
-    ]
-
-    with patch(
-        "app.services.download_service.download_pdf",
-        new_callable=AsyncMock,
-        return_value=pdf_bytes,
-    ), patch(
-        "app.services.pdf_service._get_pp_structure",
-        return_value=mock_engine,
-    ):
-        response = client.post("/text/tables", content=body, headers=headers)
-
-    assert response.status_code == 200
-    data = response.json()
-    assert data["success"] is True
-    assert data["data"]["total_count"] == 1
-
-    table = data["data"]["tables"][0]
-    assert table["page_index"] == 0
-    assert table["row_count"] == 2
-    assert table["col_count"] == 2
-    assert table["rows"][0] == ["Name", "Amount"]
-    assert table["rows"][1] == ["W-2", "85000"]
-    # Bbox should be in PDF points (scaled from image pixels)
-    assert "x0" in table["bbox"]
+def test_other_languages_are_refused_on_page_images(client, auth_headers, fake_engines):
+    response = _post(client, auth_headers, _scan_of(_create_pdf_with_table()),
+                     {"pages": [0], "language": "fr"})
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "UNSUPPORTED_LANGUAGE"
 
 
-def test_extract_tables_auto_scanned_page(client, auth_headers):
-    """Auto strategy should use PPStructureV3 for pages without text."""
-    pdf_bytes = _create_scanned_pdf()
+def test_a_failing_page_reports_no_table_but_a_broken_model_fails(fake_engines, monkeypatch):
+    scan = _scan_of(_create_pdf_with_table())
+    monkeypatch.setattr(table_ocr, "read_tables", lambda *a, **k: 1 / 0)
+    assert table_ocr.read_page(scan, 0, 300) == []
 
-    body = json.dumps({
-        "source_url": "https://example.com/scanned.pdf",
-        "pages": [0],
-        "strategy": "auto",
-    })
-    headers = auth_headers("POST", "/text/tables", body)
+    def broken():
+        raise RuntimeError("RapidOCR model missing or hash mismatch: slanet-plus.onnx")
 
-    table_html = "<table><tr><td>Item</td><td>Value</td></tr></table>"
-    mock_engine = MagicMock()
-    mock_engine.predict.return_value = [
-        _mock_ppstructurev3_table_result(table_html, [50, 50, 400, 200]),
-    ]
-
-    with patch(
-        "app.services.download_service.download_pdf",
-        new_callable=AsyncMock,
-        return_value=pdf_bytes,
-    ), patch(
-        "app.services.pdf_service._get_pp_structure",
-        return_value=mock_engine,
-    ):
-        response = client.post("/text/tables", content=body, headers=headers)
-
-    assert response.status_code == 200
-    data = response.json()
-    assert data["data"]["total_count"] == 1
-    # Verify PPStructureV3.predict() was called (scanned page has no text)
-    mock_engine.predict.assert_called_once()
+    monkeypatch.setattr(table_ocr, "_get_engine", broken)
+    with pytest.raises(rapid_ocr.RapidConfigurationError):
+        table_ocr.read_page(scan, 0, 300)
 
 
-def test_parse_html_table_with_colspan():
-    """HTML tables with colspan should expand into extra empty cells."""
-    from app.services.pdf_service import _parse_html_table
+# ----------------------------------------------------------- region detection
 
+
+def test_ruled_table_region_is_found():
+    regions = table_ocr.table_regions(_gray(_scan_of(_create_pdf_with_table())))
+    assert len(regions) == 1
+    x0, y0, x1, y1 = (v * 72 / 144 for v in regions[0])
+    assert (x0, y0, x1, y1) == pytest.approx((72, 72, 372, 152), abs=3)
+
+
+@pytest.mark.parametrize("draw", [
+    lambda page: None,
+    lambda page: page.draw_line((72, 300), (540, 300), width=1),
+    lambda page: page.draw_rect(fitz.Rect(72, 72, 300, 200), width=1),
+])
+def test_rules_that_do_not_form_a_grid_are_not_a_table(draw):
+    doc = fitz.open()
+    page = doc.new_page(width=612, height=792)
+    draw(page)
+    assert table_ocr.table_regions(_gray(doc.tobytes())) == []
+
+
+def test_a_slightly_noisy_scan_still_finds_the_grid():
+    gray = _gray(_scan_of(_create_pdf_with_table()))
+    rng = np.random.default_rng(0)
+    noisy = np.clip(gray.astype(float) * 0.92 + 10 + rng.normal(0, 8, gray.shape), 0, 255)
+    noisy = cv2.GaussianBlur(noisy.astype(np.uint8), (0, 0), 0.6)
+    assert len(table_ocr.table_regions(noisy)) == 1
+
+
+# --------------------------------------------------------------- HTML parsing
+
+
+def test_html_rows_expand_colspan_and_unescape():
     html = (
         "<table>"
         "<tr><td colspan=\"2\">Header Span</td><td>Col3</td></tr>"
-        "<tr><td>A</td><td>B</td><td>C</td></tr>"
+        "<tr><td>A &amp; B</td><td> B </td><td>C</td></tr>"
         "</table>"
     )
-    rows = _parse_html_table(html)
-    assert len(rows) == 2
-    assert rows[0] == ["Header Span", "", "Col3"]
-    assert rows[1] == ["A", "B", "C"]
+    assert table_ocr.html_rows(html) == [["Header Span", "", "Col3"], ["A & B", "B", "C"]]
 
 
-def test_parse_html_table_basic():
-    """Basic HTML table parsing."""
-    from app.services.pdf_service import _parse_html_table
-
+def test_html_rows_basic():
     html = (
         "<table><tbody>"
         "<tr><th>Name</th><th>Amount</th></tr>"
         "<tr><td>W-2</td><td>$85,000</td></tr>"
         "</tbody></table>"
     )
-    rows = _parse_html_table(html)
-    assert len(rows) == 2
-    assert rows[0] == ["Name", "Amount"]
-    assert rows[1] == ["W-2", "$85,000"]
+    assert table_ocr.html_rows(html) == [["Name", "Amount"], ["W-2", "$85,000"]]
+
+
+# --------------------------------------------------------------- real models
+
+
+def _models_present() -> bool:
+    root = Path(settings.rapidocr_model_dir)
+    hashes = {**MODEL_HASHES, **TABLE_MODEL_HASHES}
+    return all(valid_model(root / name, digest) for name, digest in hashes.items())
+
+
+@pytest.mark.skipif(not _models_present(), reason="RapidOCR/RapidTable models not provisioned")
+def test_real_models_read_a_scanned_ruled_table():
+    tables = pdf_service.extract_tables(_scan_of(_create_pdf_with_table()), [0])
+    assert len(tables) == 1
+    rows = tables[0]["rows"]
+    assert (tables[0]["row_count"], tables[0]["col_count"]) == (4, 3)
+    assert rows[0] == ["Name", "Amount", "Date"]
+    assert rows[1] == ["W-2 Income", "$85,000", "2024-01-31"]
+    assert rows[3][1] == "$3,500"

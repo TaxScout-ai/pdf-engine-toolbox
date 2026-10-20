@@ -7,7 +7,7 @@ thumbnails, and final PDF assembly.
 Licensed under AGPL-3.0 (required by PyMuPDF dependency).
 """
 
-import asyncio
+import os
 import time
 from contextlib import asynccontextmanager
 
@@ -88,34 +88,21 @@ async def lifespan(app: FastAPI):
     else:
         log.info("pdf_engine_build_identity", build_commit=revision)
 
-    if settings.ocr_backend == "rapid":
-        from app.services.rapid_ocr import validate_runtime
-        validate_runtime()
+    # Missing or altered weights/packages abort startup before serving.
+    from app.services.rapid_ocr import validate_runtime
+    validate_runtime()
 
-    # Resume OCR jobs that were queued or running before the restart.
+    legacy_backend = os.environ.get("OCR_BACKEND", "").strip().lower()
+    if legacy_backend not in ("", "rapid"):
+        # Paddle left the engine (TAX-6995); a leftover rollback pin must not
+        # stop the service, but whoever set it has to know it does nothing.
+        log.warning("ocr_backend_setting_ignored", ocr_backend=legacy_backend,
+                    reason="Paddle was removed; RapidOCR serves every OCR operation")
+
+    # Resume OCR jobs that were queued or running before the restart. Engines
+    # load lazily, one per OCR worker, on the first page that needs a model.
     from app.services import ocr_queue
     ocr_queue.get_queue()
-
-    # Pre-warm PaddleOCR only when explicitly selected for rollback.
-    # Only warm up the core OCR pipeline (_get_paddle_ocr) — NOT PPStructureV3
-    # (_get_pp_structure), which loads PP-Chart2Table (~1.5 GB transformer) and
-    # would OOM a t3a.medium (4 GB RAM) when combined with the rest of the stack.
-    # PPStructure models load lazily on first classify/table request.
-    # With RapidOCR selected no Paddle model loads until a table or
-    # orientation request arrives.
-    try:
-        def _warmup():
-            if settings.ocr_backend == "rapid":
-                # RapidOCR loads once, on the first scanned page.
-                return
-            from app.services.pdf_service import _get_paddle_ocr
-            _get_paddle_ocr("en")
-
-        loop = asyncio.get_event_loop()
-        await loop.run_in_executor(None, _warmup)
-        log.info("pdf_engine_models_ready")
-    except Exception as exc:
-        log.warning("pdf_engine_warmup_failed", error=str(exc))
 
     yield
     log.info("pdf_engine_shutting_down")

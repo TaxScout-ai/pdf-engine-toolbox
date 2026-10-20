@@ -78,7 +78,6 @@ class FakeEngine:
 
 @pytest.fixture(autouse=True)
 def rapid_queue(tmp_path, monkeypatch):
-    monkeypatch.setattr(settings, "ocr_backend", "rapid")
     monkeypatch.setattr(settings, "cache_dir", str(tmp_path / "cache"))
     monkeypatch.setattr(settings, "ocr_workers", 4)
 
@@ -333,16 +332,9 @@ def test_each_worker_owns_its_engine(monkeypatch):
     assert sum(len(engine.calls) for engine in created) == 12
 
 
-def test_identifier_redaction_reads_with_rapid_and_never_touches_paddle(monkeypatch):
+def test_identifier_redaction_reads_with_rapid(monkeypatch):
     from app.services import identifier_redaction as ir
-    from app.services import pdf_service
 
-    def no_paddle(*_, **__):
-        raise AssertionError("identifier redaction loaded Paddle")
-
-    monkeypatch.setattr(pdf_service, "_get_paddle_ocr", no_paddle)
-    # Another test in the session may have loaded the real model already.
-    monkeypatch.setattr(pdf_service, "_paddle_ocr_instances", {})
     calls = []
 
     def engine(image, **_):
@@ -359,7 +351,6 @@ def test_identifier_redaction_reads_with_rapid_and_never_touches_paddle(monkeypa
     assert result["redactions"] == [{"page": 0, "kind": "ssn", "last4": "6789", "source": "ocr"}]
     assert result["ocr_pages"] == [0]
     assert len(calls) == 2  # read, then re-read to prove nothing is left
-    assert pdf_service._paddle_ocr_instances == {}
 
 
 def test_identifier_redaction_does_not_import_paddle(tmp_path):
@@ -391,24 +382,52 @@ ocr_queue.shutdown()
     assert "PADDLE_MODULES []" in run.stdout, run.stdout[-2000:]
 
 
-def test_paddle_rollback_runs_through_the_same_queue(client, auth_headers, documents, monkeypatch):
-    from app.services import pdf_service
+def test_a_job_queued_under_the_removed_paddle_backend_resumes_on_rapid(monkeypatch):
+    """TAX-6995: a ledger row written by a Paddle-pinned engine is re-planned.
 
-    monkeypatch.setattr(settings, "ocr_backend", "paddle")
+    Before Paddle was removed such a job was one whole-document unit with an
+    unclamped DPI. After the upgrade it must be read page by page with
+    RapidOCR, not failed and not lost.
+    """
+    queue = ocr_queue.get_queue()
+    data = scanned(2)
+    job = ocr_queue._Job(
+        operation="ocr", backend="paddle",
+        params={"pages": None, "language": "en", "requested_dpi": 300, "dpi": 300,
+                "cache_key": None, "targets": [-1]},
+        source=None, persistent=True, targets=[-1], page_count=2,
+    )
+    job.source = queue.store.write_input(job.id, data)
+    queue.store.insert(job, ocr_queue.PENDING)
+    ocr_queue.shutdown()
 
-    class Paddle:
-        def predict(self, input):  # noqa: A002 - mirrors PaddleOCR
-            return [SimpleNamespace(json={"res": {
-                "rec_texts": ["Form W-2"], "rec_scores": [0.97],
-                "dt_polys": [[[50.0, 50.0], [200.0, 50.0], [200.0, 75.0], [50.0, 75.0]]],
-            }})]
+    engine = FakeEngine(delay=0)
+    monkeypatch.setattr(rapid_ocr, "_get_engine", lambda: engine)
+    result = ocr_queue.get_queue().wait(job.id)
+    assert result["status"] == "completed", result.get("error")
+    pages = result["result"]["pages"]
+    assert [p["full_text"] for p in pages] == ["p0", "p1"]
+    assert result["result"]["provenance"]["render_dpi"] == rapid_ocr.MAX_DPI
+    assert sorted(engine.calls) == [0, 1]
 
-    monkeypatch.setattr(pdf_service, "_get_paddle_ocr", lambda lang="en": Paddle())
-    monkeypatch.setattr(rapid_ocr, "_get_engine", lambda: pytest.fail("Rapid used"))
-    documents["https://example.com/p.pdf"] = scanned(2)
-    accepted = submit(client, auth_headers, "https://example.com/p.pdf").json()
-    task = poll(client, auth_headers, accepted["task_id"])["data"]
-    assert task["status"] == "completed", task.get("error")
-    assert [p["full_text"] for p in task["result"]["pages"]] == ["Form W-2", "Form W-2"]
-    stored = ocr_queue.get_queue().store.get(accepted["task_id"])
-    assert stored["backend"] == "paddle"
+
+def test_page_operations_share_the_workers_and_keep_page_order(monkeypatch):
+    """run_pages: one unit per page on the OCR workers, results in request order."""
+    from app.services import page_orientation
+
+    seen = []
+
+    def judge(source, index):
+        seen.append(index)
+        return {"rotation": 90 * index, "confidence": 0.9}
+
+    monkeypatch.setattr(page_orientation, "read_page", judge)
+    out = ocr_queue.get_queue().run_pages("orientation", scanned(4), [3, 0, 2])
+    assert out == [
+        {"rotation": 270, "confidence": 0.9},
+        {"rotation": 0, "confidence": 0.9},
+        {"rotation": 180, "confidence": 0.9},
+    ]
+    assert sorted(seen) == [0, 2, 3]
+    with pytest.raises(ValueError, match="Unknown page operation"):
+        ocr_queue.get_queue().run_pages("classify", scanned(1), [0])

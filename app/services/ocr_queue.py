@@ -42,10 +42,11 @@ one process, share the loaded Python/PyMuPDF runtime, and need no pickling of
 page images. A RapidOCR engine is never shared between threads (it mutates
 per-call state). PyMuPDF calls are serialized by ``rapid_ocr.FITZ_LOCK``.
 
-The Paddle rollback (``OCR_BACKEND=paddle``) uses the same queue, with one unit
-per document: Paddle inference is serialized by ``pdf_service._PADDLE_LOCK``
-anyway, so splitting pages would add nothing. Paddle units are not
-checkpointed per page; they restart from the first page after a restart.
+Page orientation (/transform/orientation) and table recognition on page
+images (/text/tables) run here too, as in-memory jobs of one unit per page
+(``run_pages``), so every model inference in the process shares the same
+bounded pool and per-worker engines (TAX-6995). Paddle is gone: a ledger row
+queued under the removed Paddle backend is re-planned as RapidOCR on start.
 """
 
 from __future__ import annotations
@@ -75,7 +76,8 @@ from app.services import rapid_ocr
 log = structlog.get_logger()
 
 PENDING, PROCESSING, COMPLETED, FAILED = "pending", "processing", "completed", "failed"
-_WHOLE_DOCUMENT = -1
+# In-memory, one-unit-per-page operations other than OCR (run_pages).
+_PAGE_OPERATIONS = ("orientation", "tables")
 # Seconds per page assumed before any page has been timed in this process.
 _INITIAL_PAGE_SECONDS = 4.0
 # A temporary file older than this is a leftover of an interrupted write.
@@ -456,9 +458,7 @@ class _Job:
         self.terminal: tuple[str, str] | None = None
 
     def remaining_pages(self) -> int:
-        if self.backend == "rapid":
-            return len(self.units) + self.inflight
-        return self.page_count if (self.units or self.inflight) else 0
+        return len(self.units) + self.inflight
 
 
 class OcrQueue:
@@ -498,14 +498,25 @@ class OcrQueue:
                 params = json.loads(row["params"])
                 if not row["input_path"] or not Path(row["input_path"]).exists():
                     raise RuntimeError("OCR input was lost before processing finished")
-                done = self.store.units(row["id"]) if row["backend"] == "rapid" else {}
+                if row["backend"] != "rapid":
+                    # Queued under the removed Paddle backend (TAX-6995): one
+                    # whole-document unit, unclamped DPI. Plan it as RapidOCR.
+                    data = self.store.read_input(row["id"], row["input_path"])
+                    params["targets"], params["dpi"] = rapid_ocr.plan(
+                        data, params.get("pages"), params.get("language", "en"),
+                        params.get("requested_dpi", params.get("dpi", 300)),
+                    )
+                    done = {}
+                else:
+                    done = self.store.units(row["id"])
             except Exception as exc:
                 self.store.fail(row["id"], str(exc))
                 continue
             job = _Job(
-                operation=row["operation"], backend=row["backend"], params=params,
+                operation=row["operation"], backend="rapid", params=params,
                 source=row["input_path"], persistent=True, targets=params["targets"],
-                page_count=row["page_count"], job_id=row["id"], created_at=row["created_at"],
+                page_count=len(params["targets"]), job_id=row["id"],
+                created_at=row["created_at"],
                 done=done,
             )
             # A job whose every page was recorded before the restart has no
@@ -576,7 +587,7 @@ class OcrQueue:
 
     # ---------------------------------------------------------------- submit
 
-    def submit_ocr(self, pdf_bytes: bytes, pages, language: str, dpi: int, backend: str,
+    def submit_ocr(self, pdf_bytes: bytes, pages, language: str, dpi: int,
                    cache_hash: str | None = None, cache_params: dict | None = None) -> str:
         """Persist an /text/ocr request and queue it. Returns the task id."""
         with self._cond:
@@ -584,8 +595,7 @@ class OcrQueue:
                 raise QueueFullError(self._retry_after_locked())
             self._reserved += 1
         try:
-            return self._submit(pdf_bytes, pages, language, dpi, backend,
-                                cache_hash, cache_params)
+            return self._submit(pdf_bytes, pages, language, dpi, cache_hash, cache_params)
         finally:
             with self._cond:
                 self._reserved -= 1
@@ -606,31 +616,28 @@ class OcrQueue:
             log.warning("ocr_cached_result_unreadable", task_id=hit[0], error=str(exc))
             return None
 
-    def _submit(self, pdf_bytes, pages, language, dpi, backend, cache_hash, cache_params):
+    def _submit(self, pdf_bytes, pages, language, dpi, cache_hash, cache_params):
         job_id = str(uuid.uuid4())
         data = _as_pdf_bytes(pdf_bytes)
         params = {
             "pages": pages, "language": language, "requested_dpi": dpi, "dpi": dpi,
             "cache_key": cache_key(cache_hash, cache_params) if cache_hash else None,
         }
-        error, targets, page_count = None, [_WHOLE_DOCUMENT], len(pages or [])
+        error, targets, page_count = None, [], len(pages or [])
         try:
-            if backend == "rapid":
-                targets, params["dpi"] = rapid_ocr.plan(data, pages, language, dpi)
-                page_count = len(targets)
-            else:
-                page_count = page_count or _page_count(data)
+            targets, params["dpi"] = rapid_ocr.plan(data, pages, language, dpi)
+            page_count = len(targets)
         except Exception as exc:  # the request itself is invalid: fail its task
             error = str(exc)
         params["targets"] = targets
         if error is not None:
-            job = _Job(operation="ocr", backend=backend, params=params, source=None,
+            job = _Job(operation="ocr", backend="rapid", params=params, source=None,
                        persistent=True, targets=targets, page_count=page_count, job_id=job_id)
             self.store.insert(job, FAILED, error)
             log.error("task_failed", task_id=job_id, error=error)
             return job_id
         path = self.store.write_input(job_id, data)
-        job = _Job(operation="ocr", backend=backend, params=params, source=path,
+        job = _Job(operation="ocr", backend="rapid", params=params, source=path,
                    persistent=True, targets=targets, page_count=page_count, job_id=job_id)
         try:
             self.store.insert(job, PENDING)
@@ -639,8 +646,7 @@ class OcrQueue:
             raise
         with self._cond:
             self._enqueue(job)
-        log.info("task_created", task_id=job_id, operation="ocr", backend=backend,
-                 pages=page_count)
+        log.info("task_created", task_id=job_id, operation="ocr", pages=page_count)
         return job_id
 
     def run_rapid(self, pdf_bytes: bytes, pages=None, language="en", dpi=300,
@@ -654,7 +660,23 @@ class OcrQueue:
         targets, dpi = rapid_ocr.plan(pdf_bytes, pages, language, dpi)
         params = {"dpi": dpi, "force_ocr": force_ocr, "with_pdf": with_pdf,
                   "low_confidence": low_confidence}
-        job = _Job(operation="rapid_ocr", backend="rapid", params=params, source=pdf_bytes,
+        return self._run_sync("rapid_ocr", pdf_bytes, targets, params, timeout)
+
+    def run_pages(self, operation: str, pdf_bytes: bytes, pages: list[int],
+                  params: dict | None = None, timeout: float | None = None) -> list:
+        """Run one page-level ``operation`` per page on the shared workers.
+
+        ``operation`` is ``"orientation"`` (app/services/page_orientation.py)
+        or ``"tables"`` (app/services/table_ocr.py). Returns the per-page
+        results in ``pages`` order. In memory, never persisted; fails closed
+        like ``run_rapid``.
+        """
+        if operation not in _PAGE_OPERATIONS:
+            raise ValueError(f"Unknown page operation: {operation}")
+        return self._run_sync(operation, pdf_bytes, list(pages), dict(params or {}), timeout)
+
+    def _run_sync(self, operation, pdf_bytes, targets, params, timeout):
+        job = _Job(operation=operation, backend="rapid", params=params, source=pdf_bytes,
                    persistent=False, targets=targets, page_count=len(targets))
         if getattr(_worker, "active", False):
             # Called from a worker: run here rather than wait on ourselves.
@@ -677,7 +699,8 @@ class OcrQueue:
                 if job in self._active and job.inflight == 0:
                     self._active.remove(job)
                 self._cond.notify_all()
-            log.error("ocr_sync_timeout", pages=len(targets), timeout_s=budget)
+            log.error("ocr_sync_timeout", operation=operation, pages=len(targets),
+                      timeout_s=budget)
             raise job.error
         if job.error is not None:
             raise job.error
@@ -818,7 +841,7 @@ class OcrQueue:
             result = self._run_unit(job, unit)
             # Record before the job can be seen as finished, so a checkpoint
             # never lands after the job's rows were cleared.
-            if job.persistent and job.backend == "rapid" and not self._stopped:
+            if job.persistent and not self._stopped:
                 self.store.save_unit(job.id, unit, result)
         except BaseException as exc:  # noqa: BLE001 - recorded on the job
             error = exc
@@ -833,8 +856,7 @@ class OcrQueue:
                 job.units.clear()
             else:
                 job.done[unit] = result
-                pages = 1 if job.backend == "rapid" else max(job.page_count, 1)
-                self._page_seconds = 0.8 * self._page_seconds + 0.2 * (elapsed / pages)
+                self._page_seconds = 0.8 * self._page_seconds + 0.2 * elapsed
             # The last unit back hands the job to the scheduler to finish.
             self._cond.notify_all()
 
@@ -848,25 +870,26 @@ class OcrQueue:
 
     def _run_unit(self, job: _Job, unit: int):
         data = self._job_bytes(job)
-        if job.backend == "rapid":
-            return rapid_ocr.read_page(
-                data, unit, job.params["dpi"], job.params.get("force_ocr", False)
-            )
-        from app.services import pdf_service
+        if job.operation == "orientation":
+            from app.services import page_orientation
 
-        return pdf_service.ocr_pages(
-            data, job.params["pages"], job.params["language"], job.params["dpi"],
-            backend="paddle",
+            return page_orientation.read_page(data, unit)
+        if job.operation == "tables":
+            from app.services import table_ocr
+
+            return table_ocr.read_page(data, unit, job.params.get("dpi", 300))
+        return rapid_ocr.read_page(
+            data, unit, job.params["dpi"], job.params.get("force_ocr", False)
         )
 
-    def _assemble(self, job: _Job) -> dict:
-        if job.backend == "rapid":
-            return rapid_ocr.assemble(
-                self._job_bytes(job), [job.done[unit] for unit in job.targets],
-                job.params["dpi"], with_pdf=job.params.get("with_pdf", True),
-                low_confidence=job.params.get("low_confidence", False),
-            )
-        return job.done[_WHOLE_DOCUMENT]
+    def _assemble(self, job: _Job):
+        if job.operation in _PAGE_OPERATIONS:
+            return [job.done[unit] for unit in job.targets]
+        return rapid_ocr.assemble(
+            self._job_bytes(job), [job.done[unit] for unit in job.targets],
+            job.params["dpi"], with_pdf=job.params.get("with_pdf", True),
+            low_confidence=job.params.get("low_confidence", False),
+        )
 
     def _finish(self, job: _Job):
         try:
@@ -964,14 +987,6 @@ def _as_pdf_bytes(data: bytes) -> bytes:
             return data  # unreadable: planning fails the task with the reason
         with _open_pdf(data) as doc:
             return doc.tobytes()
-
-
-def _page_count(data: bytes) -> int:
-    import fitz
-
-    with rapid_ocr.FITZ_LOCK:
-        with fitz.open(stream=data, filetype="pdf") as doc:
-            return len(doc)
 
 
 # --------------------------------------------------------------- singleton

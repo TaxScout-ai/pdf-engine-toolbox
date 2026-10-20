@@ -421,13 +421,19 @@ class ExtractTablesRequest(BaseModel):
         default="auto",
         description=(
             "Table detection strategy: "
-            "'auto' (PyMuPDF for digital, PP-Structure for scans), "
+            "'auto' (PyMuPDF for digital, RapidTable for scans), "
             "'pymupdf' (fast, digital only), "
-            "'ppstructure' (neural network, best for scanned forms)"
+            "'rapidtable' or its alias 'ppstructure' (ruled tables read from the "
+            "page image with RapidTable + RapidOCR)"
         ),
     )
-    language: str = Field(default="en", description="PaddleOCR language code for PP-Structure")
-    dpi: int = Field(default=300, ge=150, le=600, description="Rendering DPI for PP-Structure")
+    language: str = Field(
+        default="en", description="OCR language for page images; only 'en' is supported"
+    )
+    dpi: int = Field(
+        default=300, ge=150, le=600,
+        description="Rendering DPI for page images (capped at 216)",
+    )
 
 
 # ============================================================================
@@ -532,7 +538,7 @@ class OcrRequest(BaseModel):
 
     source_url: str
     pages: list[int] | None = Field(default=None, description="Pages to OCR (all if omitted)")
-    language: str = Field(default="en", description="PaddleOCR language code (en, fr, de, ch, etc.)")
+    language: str = Field(default="en", description="OCR language; only 'en' is supported")
     dpi: int = Field(default=300, ge=150, le=600, description="Rendering DPI for OCR")
 
 

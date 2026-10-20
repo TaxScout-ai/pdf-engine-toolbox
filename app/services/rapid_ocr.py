@@ -78,10 +78,9 @@ def intra_op_threads() -> int:
     return max(1, available_cpus() // worker_count())
 
 
-def cache_profile(backend: str) -> dict:
-    if backend == "rapid":
-        return {"backend": PROFILE}
-    return {"backend": "paddle-v5", "det_limit": settings.ocr_det_limit_side_len}
+def cache_profile() -> dict:
+    """The OCR result's identity in cache keys; changes with PROFILE."""
+    return {"backend": PROFILE}
 
 
 def validate_runtime():
@@ -203,7 +202,7 @@ def plan(source, pages=None, language="en", dpi=300) -> tuple[list[int], int]:
 
     if language != "en":
         raise ValueError(
-            "RapidOCR pilot supports only language=en; use the Paddle deployment otherwise"
+            "OCR supports only language=en"
         )
     if dpi <= 0:
         raise ValueError("OCR DPI must be positive")

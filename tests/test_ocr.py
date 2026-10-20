@@ -1,70 +1,43 @@
-"""Test PaddleOCR endpoint (POST /text/ocr).
+"""Test the OCR endpoint (POST /text/ocr) wiring with a stand-in RapidOCR engine.
 
-PaddleOCR is a heavy dependency (~150 MB models), so these tests mock
-the PaddleOCR engine and verify the request/response wiring, response
-format, and background task logic.
-
-Tests target PaddleOCR 3.x (.predict() API, PP-OCRv5).
+No model is loaded: ``rapid_ocr._get_engine`` returns a fake whose output has
+RapidOCR's shape (``txts``, ``boxes``, ``word_results``). Paddle was removed
+from the engine in TAX-6995; RapidOCR is the only backend.
 """
 
 import base64
 import json
-from unittest.mock import patch, AsyncMock, MagicMock
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import fitz
 import numpy as np
 import pytest
-from app.config import settings
-from app.services import ocr_queue
+
+from app.services import ocr_queue, rapid_ocr
+
+LINES = [
+    ("Form W-2", [[150, 150], [600, 150], [600, 225], [150, 225]]),
+    ("Wage and Tax Statement", [[150, 270], [900, 270], [900, 345], [150, 345]]),
+    ("Tax Year 2024", [[150, 390], [750, 390], [750, 465], [150, 465]]),
+]
 
 
-@pytest.fixture(autouse=True)
-def legacy_paddle_backend(monkeypatch):
-    """These endpoint tests exercise the explicit rollback path."""
-    monkeypatch.setattr(settings, "ocr_backend", "paddle")
-
+def _prediction(*_, **__):
+    polygons = [np.array(p, dtype=float) for _, p in LINES]
+    return SimpleNamespace(
+        txts=tuple(t for t, _ in LINES),
+        boxes=np.array(polygons),
+        word_results=[[(t, 0.97, p)] for (t, _), p in zip(LINES, polygons, strict=True)],
+    )
 
 
 def _create_scanned_pdf():
-    """Create a PDF with an image page (no selectable text) to trigger OCR."""
+    """A page with no selectable text, so OCR reads its image."""
     doc = fitz.open()
     page = doc.new_page(width=612, height=792)
-    # Draw a filled rectangle to simulate a scanned page with some "content"
-    rect = fitz.Rect(50, 50, 200, 80)
-    page.draw_rect(rect, color=(0, 0, 0), fill=(0.9, 0.9, 0.9))
+    page.draw_rect(fitz.Rect(50, 50, 200, 80), color=(0, 0, 0), fill=(0.9, 0.9, 0.9))
     return doc.tobytes()
-
-
-def _mock_paddle_result():
-    """Return a PaddleOCR 3.x .predict()-shaped result for one page.
-
-    PaddleOCR 3.x returns an iterable of result objects.  Each result
-    has a ``.json`` property returning a dict with rec_texts, rec_scores,
-    dt_polys, etc.
-    """
-    result_obj = MagicMock()
-    result_obj.json = {
-        "rec_texts": ["Form W-2", "Wage and Tax Statement", "Tax Year 2024"],
-        "rec_scores": [0.97, 0.95, 0.92],
-        "dt_polys": [
-            # 4-point polygons in image pixels
-            [[50.0, 50.0], [200.0, 50.0], [200.0, 75.0], [50.0, 75.0]],
-            [[50.0, 90.0], [300.0, 90.0], [300.0, 115.0], [50.0, 115.0]],
-            [[50.0, 130.0], [250.0, 130.0], [250.0, 155.0], [50.0, 155.0]],
-        ],
-    }
-    return [result_obj]
-
-
-def _mock_paddle_empty_result():
-    """Return an empty PaddleOCR 3.x result (no text detected)."""
-    result_obj = MagicMock()
-    result_obj.json = {
-        "rec_texts": [],
-        "rec_scores": [],
-        "dt_polys": [],
-    }
-    return [result_obj]
 
 
 def _drain(response):
@@ -75,183 +48,95 @@ def _drain(response):
 
 
 def _completed_task_result(client, auth_headers, accepted: dict) -> dict:
-    """Read the completed background result using the signed task endpoint."""
     assert accepted["status"] == "pending"
     path = f"/tasks/{accepted['task_id']}"
     response = client.get(path, headers=auth_headers("GET", path, ""))
     assert response.status_code == 200
     task = response.json()["data"]
-    assert task["status"] == "completed"
+    assert task["status"] == "completed", task.get("error")
     return task["result"]
 
 
-def test_ocr_returns_rich_json(client, auth_headers):
-    """OCR should return JSON with words, bboxes, confidence, and base64 PDF."""
-    pdf_bytes = _create_scanned_pdf()
-
-    body = json.dumps({
-        "source_url": "https://example.com/scanned.pdf",
-        "pages": [0],
-        "language": "en",
-        "dpi": 300,
-    })
+def _post(client, auth_headers, pdf_bytes, payload):
+    body = json.dumps(payload)
     headers = auth_headers("POST", "/text/ocr", body)
-
-    mock_paddle = MagicMock()
-    mock_paddle.predict.return_value = _mock_paddle_result()
-
     with patch(
         "app.services.download_service.download_pdf",
         new_callable=AsyncMock,
         return_value=pdf_bytes,
-    ), patch(
-        "app.services.pdf_service._get_paddle_ocr",
-        return_value=mock_paddle,
     ):
         response = client.post("/text/ocr", content=body, headers=headers)
         _drain(response)
+    return response
 
+
+def test_ocr_returns_rich_json(client, auth_headers, monkeypatch):
+    """OCR returns words, bboxes, confidence and a searchable base64 PDF."""
+    monkeypatch.setattr(rapid_ocr, "_get_engine", lambda: _prediction)
+    response = _post(client, auth_headers, _create_scanned_pdf(), {
+        "source_url": "https://example.com/scanned.pdf", "pages": [0],
+        "language": "en", "dpi": 300,
+    })
     assert response.status_code == 200
-    data = response.json()
-    assert data["success"] is True
-    ocr_data = _completed_task_result(client, auth_headers, data)
+    ocr_data = _completed_task_result(client, auth_headers, response.json())
 
-    # Check page results
-    assert len(ocr_data["pages"]) == 1
     page = ocr_data["pages"][0]
     assert page["page_index"] == 0
-    assert len(page["words"]) == 3
-
-    # Check word structure — bbox is {x, y, w, h} rectangle (not polygon)
-    w0 = page["words"][0]
-    assert w0["text"] == "Form W-2"
-    bbox = w0["bbox"]
-    assert "x" in bbox and "y" in bbox and "w" in bbox and "h" in bbox
-    assert bbox["w"] > 0  # Non-zero width
-    assert bbox["h"] > 0  # Non-zero height
-    assert w0["confidence"] > 0.9
-
-    # Check aggregates
+    assert [w["text"] for w in page["words"]] == [t for t, _ in LINES]
+    bbox = page["words"][0]["bbox"]
+    assert bbox["w"] > 0 and bbox["h"] > 0
+    assert page["words"][0]["confidence"] > 0.9
     assert ocr_data["total_words"] == 3
     assert ocr_data["avg_confidence"] > 0.9
-
-    # Check base64 PDF is present and decodable
-    assert "pdf_base64" in ocr_data
-    pdf_decoded = base64.b64decode(ocr_data["pdf_base64"])
-    assert pdf_decoded[:5] == b"%PDF-"
-
-    # Check full_text
-    assert "Form W-2" in page["full_text"]
+    assert base64.b64decode(ocr_data["pdf_base64"])[:5] == b"%PDF-"
     assert "Tax Year 2024" in page["full_text"]
+    assert ocr_data["provenance"]["profile"] == rapid_ocr.PROFILE
 
 
-def test_ocr_skips_pages_with_text(client, auth_headers):
-    """Pages that already have selectable text should be skipped (returned with empty words)."""
+def test_ocr_skips_pages_with_text(client, auth_headers, monkeypatch):
+    """A page with a usable text layer is answered from it; no engine loads."""
+    engine = MagicMock(side_effect=AssertionError("engine used on a text page"))
+    monkeypatch.setattr(rapid_ocr, "_get_engine", engine)
     doc = fitz.open()
     page = doc.new_page(width=612, height=792)
-    # This page has plenty of text already
-    page.insert_text(fitz.Point(72, 72), "This is an existing text page with lots of content that should not need OCR processing at all.", fontsize=12)
-    pdf_bytes = doc.tobytes()
-
-    body = json.dumps({
-        "source_url": "https://example.com/text.pdf",
-        "pages": [0],
-        "language": "en",
-        "dpi": 300,
+    page.insert_text(
+        fitz.Point(72, 72),
+        "This is an existing text page with lots of content that should not need OCR.",
+        fontsize=12,
+    )
+    response = _post(client, auth_headers, doc.tobytes(), {
+        "source_url": "https://example.com/text.pdf", "pages": [0],
     })
-    headers = auth_headers("POST", "/text/ocr", body)
-
-    mock_paddle = MagicMock()
-    # PaddleOCR should NOT be called for text pages
-
-    with patch(
-        "app.services.download_service.download_pdf",
-        new_callable=AsyncMock,
-        return_value=pdf_bytes,
-    ), patch(
-        "app.services.pdf_service._get_paddle_ocr",
-        return_value=mock_paddle,
-    ):
-        response = client.post("/text/ocr", content=body, headers=headers)
-        _drain(response)
-
-    assert response.status_code == 200
-    data = response.json()
-    assert data["success"] is True
-
-    page_result = _completed_task_result(client, auth_headers, data)["pages"][0]
-    # Should have no OCR words (page had existing text)
-    assert len(page_result["words"]) == 0
-    # But full_text should contain the existing text
+    page_result = _completed_task_result(client, auth_headers, response.json())["pages"][0]
+    assert page_result["text_source"] == "native_pdf"
     assert "existing text page" in page_result["full_text"]
-
-    # PaddleOCR.predict should NOT have been called
-    mock_paddle.predict.assert_not_called()
+    engine.assert_not_called()
 
 
-def test_ocr_large_doc_becomes_background_task(client, auth_headers):
-    """Documents with > 5 pages should go to background task."""
-    # Create a 10-page PDF
+def test_ocr_large_doc_becomes_background_task(client, auth_headers, monkeypatch):
+    monkeypatch.setattr(rapid_ocr, "_get_engine", lambda: _prediction)
     doc = fitz.open()
     for _ in range(10):
         doc.new_page(width=612, height=792)
-    pdf_bytes = doc.tobytes()
-
-    body = json.dumps({
+    response = _post(client, auth_headers, doc.tobytes(), {
         "source_url": "https://example.com/large.pdf",
-        "language": "en",
-        "dpi": 300,
     })
-    headers = auth_headers("POST", "/text/ocr", body)
-
-    # Mock both download and OCR processing — TestClient runs background
-    # tasks synchronously, so _run_ocr would actually load PaddleOCR models.
-    mock_paddle = MagicMock()
-    mock_paddle.predict.return_value = _mock_paddle_empty_result()
-
-    with patch(
-        "app.services.download_service.download_pdf",
-        new_callable=AsyncMock,
-        return_value=pdf_bytes,
-    ), patch(
-        "app.services.pdf_service._get_paddle_ocr",
-        return_value=mock_paddle,
-    ):
-        response = client.post("/text/ocr", content=body, headers=headers)
-        _drain(response)
-
-    assert response.status_code == 200
     data = response.json()
     assert data["success"] is True
-    assert "task_id" in data
     assert data["status"] == "pending"
     assert "10 pages" in data["message"]
 
 
-def test_ocr_default_language_is_en(client, auth_headers):
-    """Default language should be 'en' (PaddleOCR format, not 'eng')."""
-    pdf_bytes = _create_scanned_pdf()
-
-    body = json.dumps({
-        "source_url": "https://example.com/doc.pdf",
-        "pages": [0],
+@pytest.mark.parametrize("language", ["fr", "ch"])
+def test_ocr_other_languages_fail_the_task_with_the_reason(
+    client, auth_headers, monkeypatch, language
+):
+    """Only English is read; another language fails its task, never silently."""
+    monkeypatch.setattr(rapid_ocr, "_get_engine", lambda: _prediction)
+    response = _post(client, auth_headers, _create_scanned_pdf(), {
+        "source_url": "https://example.com/doc.pdf", "pages": [0], "language": language,
     })
-    headers = auth_headers("POST", "/text/ocr", body)
-
-    mock_paddle = MagicMock()
-    mock_paddle.predict.return_value = _mock_paddle_result()
-
-    with patch(
-        "app.services.download_service.download_pdf",
-        new_callable=AsyncMock,
-        return_value=pdf_bytes,
-    ), patch(
-        "app.services.pdf_service._get_paddle_ocr",
-        return_value=mock_paddle,
-    ) as mock_get_paddle:
-        response = client.post("/text/ocr", content=body, headers=headers)
-        _drain(response)
-
-    assert response.status_code == 200
-    # Verify PaddleOCR was initialised with 'en'
-    mock_get_paddle.assert_called_with("en")
+    path = f"/tasks/{response.json()['task_id']}"
+    task = client.get(path, headers=auth_headers("GET", path, "")).json()["data"]
+    assert task["status"] == "failed"
+    assert "language=en" in task["error"]

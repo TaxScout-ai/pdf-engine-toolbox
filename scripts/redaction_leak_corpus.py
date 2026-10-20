@@ -443,7 +443,6 @@ def main(argv=None) -> int:
     settings.ocr_queue_dir = str(args.work / "queue")
     settings.ocr_workers = args.workers
     settings.ocr_queue_key = settings.ocr_queue_key or "leak-corpus-local"
-    settings.ocr_backend = "rapid"
 
     cases, clean = build_cases(), build_clean_cases()
     if args.only:

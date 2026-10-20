@@ -1,29 +1,16 @@
-"""Pre-download PaddleOCR PP-OCRv5 models during Docker build.
+"""Download the pinned ONNX weights during the Docker build (TAX-6995).
 
-This avoids ~300 MB download on first request at runtime.
-Runs with || true semantics — failure here is non-fatal.
+RapidOCR (PP-OCRv6 Small detection/recognition, mobile line classifier) and
+RapidTable (SLANet-plus) weights are fetched from their versioned upstream
+locations and kept only when their SHA-256 matches
+``app/services/rapid_ocr_models.py``. Any failure fails the build: the
+service never downloads a model at runtime.
 
-NOTE: Only downloads the core OCR models (_get_paddle_ocr), NOT PPStructureV3.
-PPStructureV3 loads PP-Chart2Table (~1.5 GB transformer) which causes OOM
-on t3a.medium (4 GB) during both build and runtime. PPStructure models
-load lazily on first classify/table request if ever needed.
+Paddle and its models were removed from the engine in TAX-6995.
 """
-import sys
 from pathlib import Path
 
-if "--rapid-only" in sys.argv:
-    # Docker copies the standalone manifest beside this build script.
-    from rapid_ocr_models import download_models
-    download_models(Path("/opt/rapidocr/models"))
-    raise SystemExit(0)
+# Docker copies the standalone manifest beside this build script.
+from rapid_ocr_models import download_models
 
-from paddleocr import PaddleOCR
-
-PaddleOCR(
-    ocr_version="PP-OCRv5",
-    lang="en",
-    device="cpu",
-    use_doc_orientation_classify=False,
-    use_doc_unwarping=False,
-    use_textline_orientation=True,
-)
+download_models(Path("/opt/rapidocr/models"))

@@ -28,8 +28,8 @@ def _get_converter():
     global _converter
     if _converter is not None:
         return _converter
-    if importlib.metadata.version("docling") != "2.140.0":
-        raise RuntimeError("The evaluated fallback requires docling==2.140.0")
+    if importlib.metadata.version("docling") != "2.142.0":
+        raise RuntimeError("The evaluated fallback requires docling==2.142.0")
     root = Path(settings.docling_model_dir)
     manifest = json.loads(Path(__file__).with_name("docling_model_hashes.json").read_text())
     for name, expected in manifest.items():
@@ -70,7 +70,7 @@ def _get_converter():
     _converter = DocumentConverter(format_options={
         InputFormat.PDF: PdfFormatOption(pipeline_options=options),
     })
-    log.info("tableformer_ready", threads=threads, profile="docling-2.140.0-accurate")
+    log.info("tableformer_ready", threads=threads, profile="docling-2.142.0-accurate")
     return _converter
 
 

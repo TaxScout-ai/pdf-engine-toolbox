@@ -14,7 +14,7 @@ openpyxl==3.1.5
 # Image processing
 # RapidOCR requires this distribution; pin the same OpenCV version used before.
 opencv-python==4.13.0.92
-Pillow==12.3.0
+Pillow==13.0.0
 pillow-heif==1.2.1
 # The only model runtime (TAX-6995: Paddle removed). OCR, identifier
 # redaction and page orientation use RapidOCR; table structure on page images

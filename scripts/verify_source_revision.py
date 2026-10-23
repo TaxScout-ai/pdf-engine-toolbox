@@ -32,8 +32,10 @@ EXACT_FILES = {
     "README.md",
     "pyproject.toml",
     "requirements.txt",
+    "requirements-docling.txt",
     "third-party-sources.json",
     "scripts/download_models.py",
+    "scripts/download_docling_models.py",
     "scripts/verify_source_revision.py",
 }
 

@@ -4,17 +4,17 @@ starlette==1.9.0
 uvicorn[standard]==0.41.0
 PyMuPDF==1.27.1
 pydantic==2.12.5
-pydantic-settings==2.13.1
+pydantic-settings==2.16.1
 httpx==0.28.1
 httpx[http2]==0.28.1
-python-dotenv==1.2.1
+python-dotenv==1.2.2
 structlog==25.5.0
 # Spreadsheet pre-processing (fit-to-width for Excel→PDF)
 openpyxl==3.1.5
 # Image processing
 # RapidOCR requires this distribution; pin the same OpenCV version used before.
 opencv-python==4.13.0.92
-Pillow==12.3.0
+Pillow==13.0.0
 pillow-heif==1.2.1
 # The only model runtime (TAX-6995: Paddle removed). OCR, identifier
 # redaction and page orientation use RapidOCR; table structure on page images

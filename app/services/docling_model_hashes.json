@@ -1,0 +1,16 @@
+{
+  "docling-project--docling-layout-heron/config.json": "fdea30805ce2f5666b147fca941dcdd27ad468e27d6ed21902207d3da056a97d",
+  "docling-project--docling-layout-heron/model.safetensors": "00333a43451945aaf89db8ca9c0a17e75d1537c17db60fdb91aa95f4c7929e0c",
+  "docling-project--docling-layout-heron/preprocessor_config.json": "cd38cd59999e7a95d68e487fbe5132df3d4e5c32a0836add57e6126ba0c4eaf1",
+  "docling-project--docling-layout-heron-onnx/config.json": "c6e67b6cdf64fa245779d0409bb994aa96e8c1790e15ec07a65843628e232180",
+  "docling-project--docling-layout-heron-onnx/model.onnx": "59c81a3a2923042d85034ffc487f8f47e4854117e879aef89b2b9f728fb4922a",
+  "docling-project--docling-layout-heron-onnx/preprocessor_config.json": "54d086cf0d7d371f7fac36e5d3a0dae31e211298affc816106cc376506799d58",
+  "docling-project--docling-models/config.json": "9c34024dc28ff47b75818f415e769809798c29bf9bde6f2ccc63a4acb62396d9",
+  "docling-project--docling-models/model_artifacts/tableformer/accurate/tableformer_accurate.safetensors": "2a7d6c924b3cd12fb99a09280ca9c33a89c5d60b93253617d2e088c1a40374d9",
+  "docling-project--docling-models/model_artifacts/tableformer/accurate/tm_config.json": "984e122ceb8ccf84d84c9d2882f6f2302a44b4f1e577babd6289892c36f3cffd",
+  "docling-project--docling-models/model_artifacts/tableformer/fast/tableformer_fast.safetensors": "3119563aab5a7c96fda4d621119b63fd8806272b86c30936d15507616422f718",
+  "docling-project--docling-models/model_artifacts/tableformer/fast/tm_config.json": "dca6762508dddfae6d57d6cb4ef822c6000119dff0f3b6489db7413118c2622a",
+  "docling-project--docling-layout-heron/README.md": "175700839bc7808eac6af1d0c23e4f483606ab2276fe01122f4093e61a1a65b6",
+  "docling-project--docling-layout-heron-onnx/README.md": "48de0f07390f6823a225ce8aab348e7b57408534b56b71f1433ed6280456597f",
+  "docling-project--docling-models/README.md": "d17f233378eff1240b623b36da76ee8b40afcca05d505949713bf03f7e00822a"
+}

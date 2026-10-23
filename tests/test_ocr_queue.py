@@ -431,3 +431,47 @@ def test_page_operations_share_the_workers_and_keep_page_order(monkeypatch):
     assert sorted(seen) == [0, 2, 3]
     with pytest.raises(ValueError, match="Unknown page operation"):
         ocr_queue.get_queue().run_pages("classify", scanned(1), [0])
+
+
+def test_table_deadline_preserves_completed_pages_and_stops_pending_pages(monkeypatch):
+    from app.services import table_pipeline
+    monkeypatch.setattr(settings, "ocr_workers", 1)
+    release = threading.Event()
+    seen = []
+
+    def read(source, page, params):
+        seen.append(page)
+        if page == 1:
+            assert release.wait(10), "test did not release the running page"
+        return {"page_index": page, "tables": [], "status": "empty",
+                "source": "native_pdf", "reason": "blank_page"}
+
+    monkeypatch.setattr(table_pipeline, "read_page", read)
+    queue = ocr_queue.get_queue()
+    try:
+        result = queue.run_pages("tables", scanned(3), [0, 1, 2], timeout=2)
+        assert result[0]["status"] == "empty"
+        assert [r["reason"] for r in result[1:]] == [
+            "table_request_timeout", "table_request_timeout"]
+        assert [r["page_index"] for r in result] == [0, 1, 2]
+    finally:
+        release.set()
+        queue.shutdown()
+    assert seen == [0, 1], "a timed-out request must not start more pages"
+    assert result[1]["status"] == "failed", "late results cannot mutate the response"
+
+
+def test_orientation_deadline_still_raises(monkeypatch):
+    from app.services import page_orientation
+    release = threading.Event()
+
+    def read(*args, **kwargs):
+        release.wait(10)
+        return {"rotation": 0, "confidence": 1}
+
+    monkeypatch.setattr(page_orientation, "read_page", read)
+    try:
+        with pytest.raises(ocr_queue.OcrTimeoutError):
+            ocr_queue.get_queue().run_pages("orientation", scanned(1), [0], timeout=0)
+    finally:
+        release.set()

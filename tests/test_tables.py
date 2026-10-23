@@ -8,6 +8,7 @@ they are provisioned (RAPIDOCR_MODEL_DIR).
 """
 
 import json
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -99,19 +100,18 @@ class _FakeTable:
     """RapidTable stand-in: a grid of 3 columns from the OCR lines it is given."""
 
     def __init__(self):
+        from rapid_table.table_matcher.main import TableMatch
+        self.table_matcher = TableMatch()
         self.crops = []
 
     def table_structure(self, crops):
         self.crops.extend(crops)
-        return [["<tr>"]], [np.zeros((0, 8))]
+        h, w = crops[0].shape[:2]
+        structure = ["<table>"] + (["<tr>"] + ["<td></td>"] * 3 + ["</tr>"]) * len(ROWS) + ["</table>"]
+        boxes = [[c*w/3, r*h/len(ROWS), (c+1)*w/3, (r+1)*h/len(ROWS)]
+                 for r in range(len(ROWS)) for c in range(3)]
+        return [(structure, .99)], [np.asarray(boxes)]
 
-    def table_matcher(self, structures, cell_boxes, dt_boxes, rec_res):
-        texts = [text for text, _ in rec_res[0]]
-        rows = [texts[i:i + 3] for i in range(0, len(texts), 3)]
-        body = "".join(
-            "<tr>" + "".join(f"<td>{cell}</td>" for cell in row) + "</tr>" for row in rows
-        )
-        return [f"<html><body><table>{body}</table></body></html>"]
 
 
 @pytest.fixture
@@ -172,10 +172,13 @@ def test_digital_page_without_a_pymupdf_table_falls_back_to_the_image(
 ):
     monkeypatch.setattr(pdf_service, "_extract_tables_pymupdf", lambda doc, page_idx: [])
     response = _post(client, auth_headers, _create_pdf_with_table(), {"pages": [0]})
-    assert response.json()["data"]["tables"][0]["rows"] == ROWS
+    table = response.json()["data"]["tables"][0]
+    assert "$85,000" in [cell for row in table["rows"] for cell in row]
+    assert table["text_source"] == "native_pdf"
+    assert fake_engines.ocr.calls == 0
 
 
-def test_a_scan_without_a_ruled_table_is_honestly_empty(client, auth_headers, fake_engines):
+def test_borderless_table_is_unsupported_not_claimed_empty(client, auth_headers, fake_engines):
     """No ruled grid: no table is claimed and the page is not even OCRed."""
     doc = fitz.open()
     page = doc.new_page(width=612, height=792)
@@ -184,7 +187,11 @@ def test_a_scan_without_a_ruled_table_is_honestly_empty(client, auth_headers, fa
     page.draw_rect(fitz.Rect(60, 60, 400, 200), color=(0, 0, 0), width=0.8)  # a frame
     response = _post(client, auth_headers, _scan_of(doc.tobytes()), {"pages": [0]})
     assert response.status_code == 200
-    assert response.json()["data"] == {"tables": [], "total_count": 0}
+    data = response.json()["data"]
+    assert data["tables"] == []
+    assert data["status"] == "partial"
+    assert data["pages"][0]["status"] == "unsupported"
+    assert data["pages"][0]["reason"] == "no_ruled_table_region"
     assert fake_engines.ocr.calls == 0
 
 
@@ -206,10 +213,14 @@ def test_other_languages_are_refused_on_page_images(client, auth_headers, fake_e
     assert response.json()["error"]["code"] == "UNSUPPORTED_LANGUAGE"
 
 
-def test_a_failing_page_reports_no_table_but_a_broken_model_fails(fake_engines, monkeypatch):
+def test_recognition_failure_is_explicit_and_broken_configuration_raises(fake_engines, monkeypatch):
     scan = _scan_of(_create_pdf_with_table())
     monkeypatch.setattr(table_ocr, "read_tables", lambda *a, **k: 1 / 0)
-    assert table_ocr.read_page(scan, 0, 300) == []
+    result = table_ocr.read_page_result(scan, 0, 300)
+    assert result["status"] == "failed"
+    assert result["reason"] == "table_recognition_failed"
+    with pytest.raises(RuntimeError, match="table_recognition_failed"):
+        table_ocr.read_page(scan, 0, 300)
 
     def broken():
         raise RuntimeError("RapidOCR model missing or hash mismatch: slanet-plus.onnx")
@@ -217,6 +228,17 @@ def test_a_failing_page_reports_no_table_but_a_broken_model_fails(fake_engines, 
     monkeypatch.setattr(table_ocr, "_get_engine", broken)
     with pytest.raises(rapid_ocr.RapidConfigurationError):
         table_ocr.read_page(scan, 0, 300)
+
+
+def test_unread_second_region_does_not_make_first_table_disappear_or_claim_complete(
+    fake_engines, monkeypatch
+):
+    monkeypatch.setattr(table_ocr, "table_regions",
+                        lambda gray: [(200, 200, 1130, 470), (1200, 800, 1600, 1200)])
+    result = table_ocr.read_page_result(_scan_of(_create_pdf_with_table()), 0, 300)
+    assert len(result["tables"]) == 1
+    assert result["status"] == "unsupported"
+    assert result["reason"] == "table_region_unresolved"
 
 
 # ----------------------------------------------------------- region detection
@@ -290,3 +312,157 @@ def test_real_models_read_a_scanned_ruled_table():
     assert rows[0] == ["Name", "Amount", "Date"]
     assert rows[1] == ["W-2 Income", "$85,000", "2024-01-31"]
     assert rows[3][1] == "$3,500"
+
+
+def test_native_cells_carry_page_bounds_raw_text_and_hash(client, auth_headers):
+    import hashlib
+    pdf = _create_pdf_with_table()
+    data = _post(client, auth_headers, pdf, {"pages": [0]}).json()["data"]
+    assert data["status"] == "complete"
+    assert data["source_sha256"] == hashlib.sha256(pdf).hexdigest()
+    table = data["tables"][0]
+    assert len(table["cells"]) == 12
+    amount = next(c for c in table["cells"] if c["row_index"] == 1 and c["column_index"] == 1)
+    assert amount["raw_text"] == "$85,000"
+    assert amount["page_index"] == 0 and amount["source"] == "native_pdf"
+    assert amount["bbox"]["x0"] < amount["bbox"]["x1"]
+    assert amount["geometry_status"] == "available"
+
+
+def test_failed_page_does_not_erase_other_page_success(client, auth_headers, fake_engines, monkeypatch):
+    original = table_ocr.read_page_result
+    def read(source, index, dpi, **kwargs):
+        if index == 1:
+            return {"page_index": index, "status": "failed", "tables": [],
+                    "source": "rapidtable", "reason": "table_recognition_failed"}
+        return original(source, index, dpi)
+    monkeypatch.setattr(table_ocr, "read_page_result", read)
+    doc = fitz.open(stream=_scan_of(_create_pdf_with_table()), filetype="pdf")
+    doc.insert_pdf(fitz.open(stream=_scan_of(_create_pdf_with_table()), filetype="pdf"))
+    data = _post(client, auth_headers, doc.tobytes(), {}).json()["data"]
+    assert data["status"] == "partial"
+    assert [p["status"] for p in data["pages"]] == ["complete", "failed"]
+    assert len(data["tables"]) == 1
+
+
+def test_blank_scanned_page_is_explicitly_empty(client, auth_headers):
+    data = _post(client, auth_headers, _blank_scan(), {}).json()["data"]
+    assert data["status"] == "complete"
+    assert data["tables"] == []
+    assert data["pages"][0]["status"] == "empty"
+
+
+def test_missing_predicted_cell_never_shifts_text_into_another_column(monkeypatch):
+    from unittest.mock import Mock
+    engine = SimpleNamespace(
+        table_structure=Mock(return_value=([(["<table><tr><td></td><td></td><td></td></tr></table>"], .99)],
+            [np.asarray([[0, 0, 30, 20], [60, 0, 90, 20]])])),
+        table_matcher=Mock())
+    monkeypatch.setattr(table_ocr, "_get_engine", lambda: engine)
+    monkeypatch.setattr(table_ocr, "table_regions", lambda gray: [(0, 0, 100, 40)])
+    ocr = lambda image: SimpleNamespace(boxes=np.asarray([[[60, 0], [90, 0], [90, 20], [60, 20]]]), txts=["100.00"], scores=[.99])
+    result = table_ocr.read_tables(np.full((40, 100, 3), 255, dtype=np.uint8), 100, 40, 0, ocr)
+    assert result == [] and result.unresolved_regions == 1
+    engine.table_matcher.assert_not_called()
+
+
+def test_table_deadline_is_rechecked_after_planning(monkeypatch):
+    from unittest.mock import Mock
+    from app.services import ocr_queue
+    clock = iter([10.0, 12.0])
+    monkeypatch.setattr(pdf_service, "time", SimpleNamespace(monotonic=lambda: next(clock)))
+    run = Mock(return_value=[{"page_index": 0, "tables": [], "status": "empty",
+                              "reason": "blank_page", "source": "native_pdf"}])
+    monkeypatch.setattr(ocr_queue, "get_queue", lambda: SimpleNamespace(run_pages=run))
+    pdf_service.extract_tables_result(_blank_scan(), deadline=15)
+    assert run.call_args.kwargs["timeout"] == 3
+
+
+def test_expired_table_deadline_does_not_enqueue_work(monkeypatch):
+    from unittest.mock import Mock
+    from app.services import ocr_queue
+    queue = Mock()
+    monkeypatch.setattr(ocr_queue, "get_queue", queue)
+    with pytest.raises(pdf_service.PdfEngineError, match="preparation timed out"):
+        pdf_service.extract_tables_result(_blank_scan(), deadline=time.monotonic() - 1)
+    queue.assert_not_called()
+
+
+def test_table_preparation_bounds_global_pdf_lock_wait(monkeypatch):
+    from unittest.mock import Mock
+    lock = Mock()
+    lock.acquire.return_value = False
+    monkeypatch.setattr(rapid_ocr, "FITZ_LOCK", lock)
+    with pytest.raises(pdf_service.PdfEngineError, match="preparation timed out"):
+        pdf_service.extract_tables_result(_blank_scan(), timeout=1)
+    assert 0 < lock.acquire.call_args.kwargs["timeout"] <= 1
+    lock.release.assert_not_called()
+
+
+def test_table_http_deadline_reports_failure(client, auth_headers, monkeypatch):
+    from app.routes import text
+    monkeypatch.setattr(text, "run_in_threadpool", AsyncMock(side_effect=TimeoutError))
+    response = _post(client, auth_headers, _blank_scan(), {})
+    assert response.status_code == 504
+    assert response.json()["error"]["code"] == "TABLE_REQUEST_TIMEOUT"
+
+
+def test_scanned_sources_use_assigned_ocr_boxes_not_collapsed_structure_boxes(monkeypatch):
+    """Repeated amounts keep their own token boxes, even with thin SLANet cells."""
+    from rapid_table.table_matcher.main import TableMatch
+    region = (20, 30, 220, 150)
+    structure = ['<table>', '<tr>', '<td colspan="2">', '</td>', '</tr>',
+                 '<tr>', '<td></td>', '<td></td>', '</tr>',
+                 '<tr>', '<td></td>', '<td></td>', '</tr>', '</table>']
+    # Local structure coordinates; deliberately much thinner than the text.
+    predicted = np.array([[0, 0, 200, 20], [0, 45, 90, 46], [90, 45, 200, 46],
+                          [0, 85, 90, 86], [90, 85, 200, 86]], dtype=float)
+    engine = SimpleNamespace(table_structure=lambda images: ([(structure, .99)], [predicted]),
+                             table_matcher=TableMatch())
+    monkeypatch.setattr(table_ocr, '_get_engine', lambda: engine)
+    monkeypatch.setattr(table_ocr, 'table_regions', lambda gray: [region])
+    boxes = np.array([[[30, 35], [170, 35], [170, 45], [30, 45]],
+                      [[30, 70], [90, 70], [90, 90], [30, 90]],
+                      [[130, 70], [180, 70], [180, 90], [130, 90]],
+                      [[30, 110], [90, 110], [90, 130], [30, 130]],
+                      [[130, 110], [180, 110], [180, 130], [130, 130]]])
+    read = SimpleNamespace(boxes=boxes, txts=['Header', 'First', '100.00', 'Second', '100.00'], scores=[.99]*5)
+    tables = table_ocr.read_tables(np.full((180, 240, 3), 255, np.uint8), 120, 90, 2, lambda image: read)
+    assert len(tables) == 1
+    cells = tables[0]['cells']
+    assert cells[0]['column_span'] == 2
+    amounts = [c for c in cells if c['text'] == '100.00']
+    assert len(amounts) == 2
+    for cell, top, bottom in zip(amounts, [35, 55], [45, 65]):
+        assert cell['page_index'] == 2
+        assert cell['bbox']['x0'] <= 65 and cell['bbox']['x1'] >= 90
+        assert cell['bbox']['y0'] <= top and cell['bbox']['y1'] >= bottom
+        assert cell['bbox']['y1'] - cell['bbox']['y0'] >= 10
+    assert amounts[0]['bbox']['y1'] < amounts[1]['bbox']['y0']
+
+
+@pytest.mark.parametrize('left,available', [(10, True), (-10, False)])
+def test_source_geometry_preserves_crop_edges_and_rejects_invalid_originals(monkeypatch, left, available):
+    from rapid_table.table_matcher.main import TableMatch
+    structure = ['<table>', '<tr>', '<td></td>', '</tr>', '</table>']
+    predicted = np.array([[0, 20, 200, 100]], dtype=float)
+    engine = SimpleNamespace(table_structure=lambda images: ([(structure, .99)], [predicted]),
+                             table_matcher=TableMatch())
+    monkeypatch.setattr(table_ocr, '_get_engine', lambda: engine)
+    monkeypatch.setattr(table_ocr, 'table_regions', lambda gray: [(20, 30, 220, 150)])
+    # The first token is removed by the matcher (above the first cell). The
+    # second crosses the crop edge; a third token shares its multiline cell.
+    boxes = np.array([[[30, 32], [70, 32], [70, 40], [30, 40]],
+                      [[left, 70], [70, 70], [70, 90], [left, 90]],
+                      [[30, 100], [90, 100], [90, 120], [30, 120]]])
+    read = SimpleNamespace(boxes=boxes, txts=['ignored', '100.00', 'second line'], scores=[.99]*3)
+    tables = table_ocr.read_tables(np.full((180, 240, 3), 255, np.uint8), 120, 90, 2, lambda image: read)
+    cell = tables[0]['cells'][0]
+    assert cell['text'] == '100.00 second line'
+    if available:
+        assert cell['bbox'] == {'x0': 5, 'y0': 35, 'x1': 45, 'y1': 60}
+        assert cell['geometry_status'] == 'available'
+    else:
+        assert cell['bbox'] is None
+        assert cell['geometry_status'] == 'unavailable'
+        assert 'cell_geometry_unavailable' in tables[0]['warnings']

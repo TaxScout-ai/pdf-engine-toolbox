@@ -100,28 +100,18 @@ class _FakeTable:
     """RapidTable stand-in: a grid of 3 columns from the OCR lines it is given."""
 
     def __init__(self):
+        from rapid_table.table_matcher.main import TableMatch
+        self.table_matcher = TableMatch()
         self.crops = []
 
     def table_structure(self, crops):
         self.crops.extend(crops)
         h, w = crops[0].shape[:2]
-        structure = ["<table>"] + ["<tr><td></td><td></td><td></td></tr>"] * len(ROWS) + ["</table>"]
+        structure = ["<table>"] + (["<tr>"] + ["<td></td>"] * 3 + ["</tr>"]) * len(ROWS) + ["</table>"]
         boxes = [[c*w/3, r*h/len(ROWS), (c+1)*w/3, (r+1)*h/len(ROWS)]
                  for r in range(len(ROWS)) for c in range(3)]
         return [(structure, .99)], [np.asarray(boxes)]
 
-    def table_matcher(self, structures, cell_boxes, dt_boxes, rec_res):
-        rows = [["" for _ in range(3)] for _ in ROWS]
-        centers = np.asarray([[(b[0]+b[2])/2, (b[1]+b[3])/2] for b in cell_boxes[0]])
-        for box, (text, _) in zip(dt_boxes[0], rec_res[0]):
-            center = np.asarray([(box[0]+box[2])/2, (box[1]+box[3])/2])
-            cell_index = int(np.square(centers-center).sum(axis=1).argmin())
-            r, c = divmod(cell_index, 3)
-            rows[r][c] = (rows[r][c] + " " + text).strip()
-        body = "".join(
-            "<tr>" + "".join(f"<td>{cell}</td>" for cell in row) + "</tr>" for row in rows
-        )
-        return [f"<html><body><table>{body}</table></body></html>"]
 
 
 @pytest.fixture
@@ -415,3 +405,64 @@ def test_table_http_deadline_reports_failure(client, auth_headers, monkeypatch):
     response = _post(client, auth_headers, _blank_scan(), {})
     assert response.status_code == 504
     assert response.json()["error"]["code"] == "TABLE_REQUEST_TIMEOUT"
+
+
+def test_scanned_sources_use_assigned_ocr_boxes_not_collapsed_structure_boxes(monkeypatch):
+    """Repeated amounts keep their own token boxes, even with thin SLANet cells."""
+    from rapid_table.table_matcher.main import TableMatch
+    region = (20, 30, 220, 150)
+    structure = ['<table>', '<tr>', '<td colspan="2">', '</td>', '</tr>',
+                 '<tr>', '<td></td>', '<td></td>', '</tr>',
+                 '<tr>', '<td></td>', '<td></td>', '</tr>', '</table>']
+    # Local structure coordinates; deliberately much thinner than the text.
+    predicted = np.array([[0, 0, 200, 20], [0, 45, 90, 46], [90, 45, 200, 46],
+                          [0, 85, 90, 86], [90, 85, 200, 86]], dtype=float)
+    engine = SimpleNamespace(table_structure=lambda images: ([(structure, .99)], [predicted]),
+                             table_matcher=TableMatch())
+    monkeypatch.setattr(table_ocr, '_get_engine', lambda: engine)
+    monkeypatch.setattr(table_ocr, 'table_regions', lambda gray: [region])
+    boxes = np.array([[[30, 35], [170, 35], [170, 45], [30, 45]],
+                      [[30, 70], [90, 70], [90, 90], [30, 90]],
+                      [[130, 70], [180, 70], [180, 90], [130, 90]],
+                      [[30, 110], [90, 110], [90, 130], [30, 130]],
+                      [[130, 110], [180, 110], [180, 130], [130, 130]]])
+    read = SimpleNamespace(boxes=boxes, txts=['Header', 'First', '100.00', 'Second', '100.00'], scores=[.99]*5)
+    tables = table_ocr.read_tables(np.full((180, 240, 3), 255, np.uint8), 120, 90, 2, lambda image: read)
+    assert len(tables) == 1
+    cells = tables[0]['cells']
+    assert cells[0]['column_span'] == 2
+    amounts = [c for c in cells if c['text'] == '100.00']
+    assert len(amounts) == 2
+    for cell, top, bottom in zip(amounts, [35, 55], [45, 65]):
+        assert cell['page_index'] == 2
+        assert cell['bbox']['x0'] <= 65 and cell['bbox']['x1'] >= 90
+        assert cell['bbox']['y0'] <= top and cell['bbox']['y1'] >= bottom
+        assert cell['bbox']['y1'] - cell['bbox']['y0'] >= 10
+    assert amounts[0]['bbox']['y1'] < amounts[1]['bbox']['y0']
+
+
+@pytest.mark.parametrize('left,available', [(10, True), (-10, False)])
+def test_source_geometry_preserves_crop_edges_and_rejects_invalid_originals(monkeypatch, left, available):
+    from rapid_table.table_matcher.main import TableMatch
+    structure = ['<table>', '<tr>', '<td></td>', '</tr>', '</table>']
+    predicted = np.array([[0, 20, 200, 100]], dtype=float)
+    engine = SimpleNamespace(table_structure=lambda images: ([(structure, .99)], [predicted]),
+                             table_matcher=TableMatch())
+    monkeypatch.setattr(table_ocr, '_get_engine', lambda: engine)
+    monkeypatch.setattr(table_ocr, 'table_regions', lambda gray: [(20, 30, 220, 150)])
+    # The first token is removed by the matcher (above the first cell). The
+    # second crosses the crop edge; a third token shares its multiline cell.
+    boxes = np.array([[[30, 32], [70, 32], [70, 40], [30, 40]],
+                      [[left, 70], [70, 70], [70, 90], [left, 90]],
+                      [[30, 100], [90, 100], [90, 120], [30, 120]]])
+    read = SimpleNamespace(boxes=boxes, txts=['ignored', '100.00', 'second line'], scores=[.99]*3)
+    tables = table_ocr.read_tables(np.full((180, 240, 3), 255, np.uint8), 120, 90, 2, lambda image: read)
+    cell = tables[0]['cells'][0]
+    assert cell['text'] == '100.00 second line'
+    if available:
+        assert cell['bbox'] == {'x0': 5, 'y0': 35, 'x1': 45, 'y1': 60}
+        assert cell['geometry_status'] == 'available'
+    else:
+        assert cell['bbox'] is None
+        assert cell['geometry_status'] == 'unavailable'
+        assert 'cell_geometry_unavailable' in tables[0]['warnings']

@@ -166,8 +166,22 @@ def read_tables(image_bgr: np.ndarray, page_width: float, page_height: float,
                              page_width, page_height) is None for box in predicted)):
                 tables.unresolved_regions += 1
                 continue
-            matched = engine.table_matcher(structures, cell_boxes, [dt_boxes], [rec_res])
-            rows, cells = parse_table(matched[0] or "")
+            # Use the exact assignment that produces the cell text for its source
+            # geometry too. SLANet boxes describe a structure hypothesis: on real
+            # scans they can collapse into a thin line or miss the printed text.
+            matcher = engine.table_matcher
+            # The pinned formatter preserves order but clips boxes to the crop.
+            # Carry original page-token identities through the matcher's filter;
+            # clipped matching rectangles must never become source evidence.
+            indexed_readings = [(text, score, inside[i])
+                                for i, (text, score) in enumerate(rec_res)]
+            text_boxes, filtered_readings = matcher.filter_ocr_result(
+                predicted, dt_boxes, indexed_readings)
+            text_readings = [(text, score) for text, score, _ in filtered_readings]
+            source_indices = [index for _, _, index in filtered_readings]
+            assignment = matcher.match_result(predicted, text_boxes)
+            matched, _ = matcher.get_pred_html(structure, assignment, text_readings)
+            rows, cells = parse_table(matched or "")
             if not rows or len(cells) != len(physical_cells):
                 tables.unresolved_regions += 1
                 continue
@@ -181,11 +195,19 @@ def read_tables(image_bgr: np.ndarray, page_width: float, page_height: float,
             log.warning("rapidtable_region_failed", page_index=page_index,
                         error_type=type(exc).__name__)
             continue
-        predicted = cell_boxes[0] if len(cell_boxes) else []
         for cell_index, cell in enumerate(cells):
-            bounds = (pdf_bbox(np.asarray(predicted[cell_index]).reshape(-1),
-                              (x0, y0), (sx, sy), page_width, page_height)
-                      if len(predicted) == len(cells) else None)
+            # Preserve individual token identity (including duplicate amounts).
+            # Never search for matching text elsewhere or fall back to a guessed
+            # structure box when this cell has no observed text geometry.
+            assigned = [pdf_bbox(boxes[source_indices[i]].reshape(-1), (0, 0), (sx, sy),
+                                 page_width, page_height)
+                        for i in assignment.get(cell_index, [])]
+            bounds = None
+            if assigned and all(box is not None for box in assigned):
+                bounds = {"x0": min(box["x0"] for box in assigned),
+                          "y0": min(box["y0"] for box in assigned),
+                          "x1": max(box["x1"] for box in assigned),
+                          "y1": max(box["y1"] for box in assigned)}
             cell.update(page_index=page_index, bbox=bounds, source="rapidtable",
                         geometry_status="available" if bounds else "unavailable")
         warnings = (["cell_geometry_unavailable"] if any(c["bbox"] is None for c in cells)

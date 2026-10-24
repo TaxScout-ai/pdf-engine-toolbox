@@ -115,12 +115,22 @@ class TextBlock(BaseModel):
     font_size: float | None = None
 
 
+class NativeTextWord(BaseModel):
+    """A real PDF word rectangle in visual page points (rotation applied)."""
+
+    text: str
+    bbox: dict
+
+
 class PageText(BaseModel):
     """Extracted text for a page."""
 
     page_index: int
     text: str
     blocks: list[TextBlock] | None = None
+    words: list[NativeTextWord] | None = None
+    visual_width: float | None = None
+    visual_height: float | None = None
 
 
 class TextExtractData(BaseModel):

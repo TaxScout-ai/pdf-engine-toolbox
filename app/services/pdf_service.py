@@ -854,6 +854,21 @@ def extract_text(
                         )
 
             page_data["blocks"] = blocks
+            # Keep legacy blocks unchanged. Word geometry is a separate contract:
+            # real glyph positions, transformed into the displayed/cropped page.
+            words = []
+            for x0, y0, x1, y1, text, *_ in page.get_text("words"):
+                box = fitz.Rect(x0, y0, x1, y1) * page.rotation_matrix
+                box &= page.rect
+                if box.is_empty or not text.strip():
+                    continue
+                words.append({
+                    "text": text,
+                    "bbox": {"x0": box.x0, "y0": box.y0, "x1": box.x1, "y1": box.y1},
+                })
+            page_data["words"] = words
+            page_data["visual_width"] = page.rect.width
+            page_data["visual_height"] = page.rect.height
 
         result.append(page_data)
 

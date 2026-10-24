@@ -24,6 +24,7 @@ from app.models.responses import (
     OcrPageResult,
     OcrResponse,
     OcrWord,
+    NativeTextWord,
     PageText,
     SearchMatch,
     TaskAcceptedResponse,
@@ -59,6 +60,9 @@ async def extract_text(request: TextExtractRequest):
                 page_index=pd["page_index"],
                 text=pd["text"],
                 blocks=blocks,
+                words=[NativeTextWord(**w) for w in pd["words"]] if "words" in pd else None,
+                visual_width=pd.get("visual_width"),
+                visual_height=pd.get("visual_height"),
             )
         )
 

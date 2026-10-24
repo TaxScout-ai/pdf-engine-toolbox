@@ -1,6 +1,7 @@
 """Text extraction, search, bookmark, table, and OCR endpoints."""
 
 import base64
+import asyncio
 import time
 
 from fastapi import APIRouter, Depends, Response
@@ -114,25 +115,42 @@ async def extract_tables(request: ExtractTablesRequest):
     """
     start = time.monotonic()
 
-    pdf_bytes = await download_service.download_pdf(request.source_url)
+    # The application's HTTP budget is 120s. Leave response/transport headroom;
+    # synchronous queue deadlines retain completed table pages as partial data.
+    deadline = start + 100
+    try:
+        pdf_bytes = await asyncio.wait_for(
+            download_service.download_pdf(request.source_url), timeout=30)
+    except TimeoutError as exc:
+        raise pdf_service.PdfEngineError(
+            "TABLE_SOURCE_TIMEOUT", "The source download timed out. Retry this document.", 504
+        ) from exc
     # Off the event loop: image pages wait for the OCR queue's workers.
-    tables = await run_in_threadpool(
-        pdf_service.extract_tables,
-        pdf_bytes,
-        request.pages,
-        strategy=request.strategy,
-        language=request.language,
-        dpi=request.dpi,
-    )
+    try:
+        result = await asyncio.wait_for(
+            run_in_threadpool(
+                pdf_service.extract_tables_result,
+                pdf_bytes,
+                request.pages,
+                strategy=request.strategy,
+                language=request.language,
+                dpi=request.dpi,
+                # Absolute time includes threadpool scheduling and FITZ contention.
+                # Reserve a second for the queue's partial result to reach the route.
+                deadline=deadline - 1,
+            ),
+            timeout=max(0, deadline - time.monotonic()),
+        )
+    except TimeoutError as exc:
+        raise pdf_service.PdfEngineError(
+            "TABLE_REQUEST_TIMEOUT", "Table extraction timed out. Retry selected pages.", 504
+        ) from exc
 
     elapsed = (time.monotonic() - start) * 1000
 
     return ExtractTablesResponse(
         success=True,
-        data=ExtractTablesData(
-            tables=[ExtractedTable(**t) for t in tables],
-            total_count=len(tables),
-        ),
+        data=ExtractTablesData(**result),
         processing_time_ms=round(elapsed, 2),
     )
 

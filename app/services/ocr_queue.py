@@ -690,6 +690,16 @@ class OcrQueue:
         budget = self.sync_timeout if timeout is None else timeout
         if not job.event.wait(budget):
             with self._cond:
+                # Preserve completed table pages at the deadline. Snapshot under
+                # the same lock used by workers; late results cannot change the
+                # response. Other synchronous operations still fail closed.
+                table_results = [
+                    job.done.get(page, {
+                        "page_index": page, "tables": [], "source": "table_queue",
+                        "status": "failed", "reason": "table_request_timeout",
+                    })
+                    for page in targets
+                ] if operation == "tables" else None
                 # Stop scheduling its remaining pages; a stuck inference keeps
                 # its worker until it returns, and its result is discarded.
                 job.error = OcrTimeoutError(f"OCR did not finish within {budget:g}s")
@@ -701,6 +711,8 @@ class OcrQueue:
                 self._cond.notify_all()
             log.error("ocr_sync_timeout", operation=operation, pages=len(targets),
                       timeout_s=budget)
+            if table_results is not None:
+                return table_results
             raise job.error
         if job.error is not None:
             raise job.error
@@ -875,9 +887,22 @@ class OcrQueue:
 
             return page_orientation.read_page(data, unit)
         if job.operation == "tables":
-            from app.services import table_ocr
+            from app.services import table_pipeline
 
-            return table_ocr.read_page(data, unit, job.params.get("dpi", 300))
+            def claim_fallback():
+                # Spend the request budget only on a page that actually needs
+                # the heavier reader, including under concurrent workers.
+                with self._cond:
+                    used = job.params.get("_fallback_used", 0)
+                    if used >= settings.table_fallback_max_pages:
+                        return False
+                    job.params["_fallback_used"] = used + 1
+                    return True
+
+            return table_pipeline.read_page(data, unit, {
+                **job.params,
+                "claim_fallback": claim_fallback,
+            })
         return rapid_ocr.read_page(
             data, unit, job.params["dpi"], job.params.get("force_ocr", False)
         )

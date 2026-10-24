@@ -3,6 +3,8 @@
 import base64
 import datetime
 import io
+import hashlib
+import time
 import math
 import re
 
@@ -1510,10 +1512,13 @@ def _extract_tables_pymupdf(doc, page_idx: int) -> list[dict]:
     results = []
     for tab_idx, table in enumerate(tabs):
         rows = table.extract()
+        from app.services.table_evidence import native_cells
+        cells = native_cells(table, rows, page_idx, page.rect.width, page.rect.height)
         bbox = table.bbox
         results.append({
             "page_index": page_idx,
             "table_index": tab_idx,
+            "page_width": page.rect.width, "page_height": page.rect.height,
             "bbox": {
                 "x0": round(bbox[0], 2),
                 "y0": round(bbox[1], 2),
@@ -1521,6 +1526,10 @@ def _extract_tables_pymupdf(doc, page_idx: int) -> list[dict]:
                 "y1": round(bbox[3], 2),
             },
             "rows": rows,
+            "cells": cells,
+            "source": "native_pdf",
+            "warnings": (["cell_geometry_unavailable"]
+                         if any(c["bbox"] is None for c in cells) else []),
             "row_count": len(rows),
             "col_count": len(rows[0]) if rows else 0,
         })
@@ -1532,71 +1541,54 @@ def _extract_tables_pymupdf(doc, page_idx: int) -> list[dict]:
 IMAGE_TABLE_STRATEGIES = ("rapidtable", "ppstructure")
 
 
-def extract_tables(
-    pdf_bytes: bytes,
-    pages: list[int] | None = None,
-    strategy: str = "auto",
-    language: str = "en",
-    dpi: int = 300,
-) -> list[dict]:
-    """Extract tabular data from PDF pages.
+def extract_tables_result(
+    pdf_bytes: bytes, pages: list[int] | None = None, strategy: str = "auto",
+    language: str = "en", dpi: int = 300, timeout: float = 90,
+    deadline: float | None = None,
+) -> dict:
+    """Per-page outcomes and cell evidence; empty is never an error substitute."""
+    source_hash = hashlib.sha256(pdf_bytes).hexdigest()
+    from app.services import ocr_queue, rapid_ocr
+    deadline = time.monotonic() + timeout if deadline is None else deadline
+    remaining = max(0, deadline - time.monotonic())
+    if not remaining or not rapid_ocr.FITZ_LOCK.acquire(timeout=remaining):
+        raise PdfEngineError("TABLE_REQUEST_TIMEOUT",
+                            "Table preparation timed out. Retry selected pages.", 504)
+    try:
+        with _open_pdf(pdf_bytes) as doc:
+            targets = list(dict.fromkeys(pages)) if pages is not None else list(range(len(doc)))
+            _validate_pages(doc, targets)
+    finally:
+        rapid_ocr.FITZ_LOCK.release()
+    remaining = max(0, deadline - time.monotonic())
+    results = ([{
+        "page_index": page, "tables": [], "source": "table_queue",
+        "status": "failed", "reason": "table_request_timeout",
+    } for page in targets] if not remaining else
+    ocr_queue.get_queue().run_pages("tables", pdf_bytes, targets, {
+        "dpi": dpi, "language": language, "strategy": strategy,
+    }, timeout=remaining)) if targets else []
+    by_page = dict(zip(targets, results, strict=True))
+    tables, outcomes = [], []
+    for page_idx in targets:
+        result = by_page[page_idx]
+        page_tables = result["tables"]
+        outcomes.append({k: v for k, v in result.items() if k != "tables"} | {"table_count": len(page_tables)})
+        for tab_idx, table in enumerate(page_tables):
+            tables.append({**table, "page_index": page_idx, "table_index": tab_idx,
+                           "source_sha256": source_hash})
+    return {"tables": tables, "total_count": len(tables), "pages": outcomes,
+            "source_sha256": source_hash,
+            "status": "partial" if any(p["status"] in ("unsupported", "failed") for p in outcomes) else "complete"}
 
-    Strategies:
-      - ``"auto"`` (default, and any unrecognized name): PyMuPDF for
-        digital pages. Scanned pages (50 characters of text or fewer), and
-        digital pages where PyMuPDF finds no table, are read from the
-        rendered image with RapidTable.
-      - ``"pymupdf"``: Always PyMuPDF (fast, digital PDFs only, no model).
-      - ``"rapidtable"`` (alias ``"ppstructure"``): Always the image path:
-        ruled-table regions, SLANet-plus structure and RapidOCR text
-        (app/services/table_ocr.py). Borderless tables on a scan are not
-        found; such a page returns no table.
 
-    Args:
-        pdf_bytes: Source PDF
-        pages: Pages to extract from (all if None)
-        strategy: "auto", "pymupdf", "rapidtable" or "ppstructure"
-        language: OCR language; the image path reads English only
-        dpi: Rendering DPI for the image path (capped at 216)
-    """
-    doc = _open_pdf(pdf_bytes)
-    target_pages = pages if pages is not None else list(range(len(doc)))
-    if pages:
-        _validate_pages(doc, pages)
-
-    by_page: dict[int, list[dict]] = {}
-    image_pages: list[int] = []
-    for page_idx in target_pages:
-        if strategy == "pymupdf":
-            by_page[page_idx] = _extract_tables_pymupdf(doc, page_idx)
-            continue
-        if strategy == "auto" and len(doc[page_idx].get_text().strip()) > 50:
-            # Digital page: PyMuPDF first (fast, exact text).
-            page_tables = _extract_tables_pymupdf(doc, page_idx)
-            if page_tables:
-                by_page[page_idx] = page_tables
-                continue
-            log.info("pymupdf_no_tables_fallback_rapidtable", page=page_idx)
-        image_pages.append(page_idx)
-
-    if image_pages:
-        if language != "en":
-            raise PdfEngineError(
-                "UNSUPPORTED_LANGUAGE",
-                "Table recognition on page images supports only language=en",
-                422,
-            )
-        from app.services import ocr_queue
-
-        read = ocr_queue.get_queue().run_pages("tables", pdf_bytes, image_pages, {"dpi": dpi})
-        for page_idx, page_tables in zip(image_pages, read, strict=True):
-            by_page[page_idx] = page_tables
-
-    results = []
-    for page_idx in target_pages:
-        for tab_idx, table in enumerate(by_page.get(page_idx, [])):
-            results.append({**table, "page_index": page_idx, "table_index": tab_idx})
-    return results
+def extract_tables(pdf_bytes: bytes, pages: list[int] | None = None,
+                   strategy: str = "auto", language: str = "en", dpi: int = 300) -> list[dict]:
+    """Legacy list contract refuses an incomplete result instead of hiding it."""
+    result = extract_tables_result(pdf_bytes, pages, strategy, language, dpi)
+    if result["status"] != "complete":
+        raise PdfEngineError("TABLE_EXTRACTION_INCOMPLETE", "Some pages require table review", 422)
+    return result["tables"]
 
 
 # ============================================================================

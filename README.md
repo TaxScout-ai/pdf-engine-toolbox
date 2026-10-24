@@ -81,7 +81,7 @@ uvicorn app.main:app --reload
 Development processes outside the container report `development` as their
 build identity and link to the repository's default branch.
 
-## RapidOCR, the only model runtime (TAX-6490, TAX-6876, TAX-6995)
+## RapidOCR text runtime (TAX-6490, TAX-6876, TAX-6995)
 
 RapidOCR (ONNX Runtime, CPU) serves every model operation: `/text/ocr`,
 identifier redaction, `/transform/orientation` and table recognition on page
@@ -306,16 +306,16 @@ threads).
 
 ## Tables (TAX-6995)
 
-`POST /text/tables` keeps its request and response contract. Digital pages
-use PyMuPDF `find_tables` (no model). Scanned pages (50 characters of text or
-fewer), and digital pages where PyMuPDF finds nothing, are read from the
+`POST /text/tables` preserves the table list and adds explicit page outcomes.
+Digital pages whose text passes the quality gate use PyMuPDF `find_tables`
+(no model). Other pages, and digital pages where PyMuPDF finds nothing, are read from the
 page image (`app/services/table_ocr.py`), rendered at `dpi` capped at 216:
 
 - **Where:** ruled tables only. Long horizontal and vertical strokes are kept
   by morphological opening; a region whose rules cross at least 9 times (a
   2 x 2 grid of cells) is a table. Borderless tables on a scan are not found,
-  and such a page answers no table rather than a guessed one; it is then not
-  OCRed at all.
+  and such a page reports unsupported structure. The optional fallback below
+  can attempt those pages.
 - **Structure:** RapidTable SLANet-plus (ONNX, hash-pinned).
 - **Text:** the page is read once with RapidOCR and RapidTable's matcher puts
   each line in its cell.
@@ -388,3 +388,40 @@ provenance and can still be viewed.
 
 Identifier redaction on scans reads with RapidOCR (TAX-6876); its measured
 leak rate is the held-out corpus above.
+
+
+## Optional table structure fallback (TAX-7070)
+
+`POST /text/tables` returns a document status and per-page outcomes as well as
+successful tables. Each table includes physical cells with row/column spans,
+raw text, page and PDF-point bounds when available. `unsupported` is distinct
+from a blank page and from an inference error. Clients must inspect outcomes;
+a successful HTTP response does not establish complete table coverage.
+
+The HTTP route uses a 100-second absolute budget (including download,
+threadpool scheduling and PDF-lock contention), below the application's
+120-second timeout. The source download is capped at 30 seconds. At the
+queue deadline, completed pages are retained and unfinished pages report
+`failed` / `table_request_timeout`. Pending pages stop; an already running
+inference is not forcibly killed and cannot mutate the returned result.
+Preparation that cannot finish returns HTTP 504. Table jobs remain in memory;
+these deadlines do not add restart recovery or automatic retries.
+
+The default build remains RapidOCR/RapidTable. For a staging evaluation image,
+build the same public source revision with `--build-arg INCLUDE_DOCLING=true`.
+This adds the pinned CPU-only optional requirements and hash-verified model
+artifacts. Set `TABLE_FALLBACK=docling`, `DOCLING_MODEL_DIR=/opt/docling/models`
+and a bounded `TABLE_FALLBACK_MAX_PAGES` (default 4 per request). The default
+`TABLE_FALLBACK=none` never imports Docling or Torch. Explicit `pymupdf` and
+`rapidtable` comparisons do not silently invoke the fallback.
+
+Only unresolved/failed pages use TableFormer. Complete native tables preserve
+geometry warnings without loading a second model. Native text passing the
+quality gate is reused before image OCR. All page work uses the shared OCR
+queue; one process-wide lock bounds the heavy converter. Runtime downloads,
+remote services and external plugins are disabled. Provision artifacts during
+the build; do not depend on first-request downloads.
+
+See [the real financial-table evaluation](docs/benchmarks/TAX-7070-financial-tables.md)
+for coverage, timing, memory and the remaining limitations. The optional profile
+needs a separately measured memory budget; it is not a free accuracy upgrade.

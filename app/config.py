@@ -1,6 +1,8 @@
 """Application configuration from environment variables."""
 
-from pydantic import model_validator
+from typing import Literal
+
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings
 
 
@@ -38,6 +40,11 @@ class Settings(BaseSettings):
     # OCR_DET_LIMIT_SIDE_LEN belonged to the removed Paddle path and are
     # ignored (a warning is logged at startup when OCR_BACKEND is still set).
     rapidocr_model_dir: str = "/opt/rapidocr/models"
+    # Optional, offline table structure fallback. Disabled until this model
+    # build passes the financial-table evaluation for the deployment.
+    table_fallback: Literal["none", "docling"] = "none"
+    docling_model_dir: str = "/opt/docling/models"
+    table_fallback_max_pages: int = Field(default=4, ge=0, le=50)
 
     # OCR job queue (TAX-6876). Every /text/ocr request is a persistent job:
     # its bytes are spilled under OCR_QUEUE_DIR and its state is kept in a

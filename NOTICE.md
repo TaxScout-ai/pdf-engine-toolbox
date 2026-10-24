@@ -15,3 +15,20 @@ Exact versions, source archive locations, and SHA-256 hashes are recorded in
 
 No trademark rights are granted by the open-source licenses. Product and
 company names belong to their respective owners.
+
+
+The optional Docling profile includes Docling (MIT, The Docling Contributors),
+Heron layout weights (Apache-2.0) and the Docling model repository (which lists
+CDLA-Permissive-2.0 and Apache-2.0). Upstream notices and license terms continue
+to apply; the model repositories are:
+
+- https://github.com/docling-project/docling
+- https://huggingface.co/docling-project/docling-layout-heron
+- https://huggingface.co/docling-project/docling-layout-heron-onnx
+- https://huggingface.co/docling-project/docling-models
+
+Model cards are preserved alongside the downloaded artifacts. Applicable
+license texts are included in `app/services/model_licenses/`.
+
+Pinned artifact revisions are recorded in `scripts/download_docling_models.py`.
+Optional package versions are recorded in `requirements-docling.txt`.

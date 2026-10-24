@@ -6,8 +6,8 @@ FROM python:3.12-slim AS source-verifier
 ARG SOURCE_COMMIT
 WORKDIR /source-context
 COPY app/ ./app/
-COPY scripts/download_models.py scripts/verify_source_revision.py ./scripts/
-COPY Dockerfile requirements.txt pyproject.toml LICENSE NOTICE.md README.md third-party-sources.json ./
+COPY scripts/download_models.py scripts/download_docling_models.py scripts/verify_source_revision.py ./scripts/
+COPY Dockerfile requirements.txt requirements-docling.txt pyproject.toml LICENSE NOTICE.md README.md third-party-sources.json ./
 RUN python scripts/verify_source_revision.py \
         "$SOURCE_COMMIT" \
         --root /source-context \
@@ -15,6 +15,7 @@ RUN python scripts/verify_source_revision.py \
 
 FROM python:3.12-slim
 ARG SOURCE_COMMIT
+ARG INCLUDE_DOCLING=false
 
 WORKDIR /app
 
@@ -26,6 +27,7 @@ WORKDIR /app
 # - fonts-liberation: standard fonts for LibreOffice rendering
 # - ghostscript: PDF/A output (TAX-5637)
 RUN apt-get update && \
+    apt-get upgrade -y && \
     apt-get install -y --no-install-recommends \
         curl \
         libheif-dev \
@@ -42,6 +44,19 @@ RUN apt-get update && \
 COPY requirements.txt .
 RUN pip install --no-cache-dir setuptools && \
     pip install --no-cache-dir -r requirements.txt
+
+# Optional CPU-only image. The regular image does not install Torch or Docling.
+COPY requirements-docling.txt /tmp/requirements-docling.txt
+COPY scripts/download_docling_models.py /tmp/download_docling_models.py
+COPY app/services/docling_model_hashes.json /tmp/docling_model_hashes.json
+RUN case "$INCLUDE_DOCLING" in \
+      true) pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu \
+              torch==2.14.1+cpu torchvision==0.29.1+cpu && \
+            pip install --no-cache-dir -r requirements.txt -r /tmp/requirements-docling.txt && \
+            pip check && python /tmp/download_docling_models.py ;; \
+      false) ;; \
+      *) exit 1 ;; \
+    esac && rm /tmp/requirements-docling.txt /tmp/download_docling_models.py /tmp/docling_model_hashes.json
 
 # Download the pinned RapidOCR and RapidTable ONNX weights during build and
 # verify their SHA-256; any failure aborts the build (runtime never downloads).
@@ -83,6 +98,7 @@ RUN python -c "import rapid_table, rapidocr, onnxruntime"
 # than fall back to advertising the mutable main branch as Corresponding Source.
 ENV REQUIRE_BUILD_IDENTITY=true
 ENV PYTHONDONTWRITEBYTECODE=1
+ENV HF_HUB_OFFLINE=1 HF_HUB_DISABLE_TELEMETRY=1
 
 # Expose port
 EXPOSE 8000

@@ -333,15 +333,46 @@ class ReadAnnotationsResponse(BaseModel):
 # ============================================================================
 
 
+class TableCell(BaseModel):
+    page_index: int
+    row_index: int = Field(ge=0)
+    column_index: int = Field(ge=0)
+    row_span: int = Field(ge=1)
+    column_span: int = Field(ge=1)
+    raw_text: str
+    text: str
+    is_header: bool = False
+    bbox: dict | None
+    source: str
+    geometry_status: Literal["available", "unavailable"]
+
+
+class TablePageOutcome(BaseModel):
+    page_index: int
+    status: Literal["complete", "empty", "unsupported", "failed"]
+    reason: str | None = None
+    source: str
+    table_count: int
+    processing_time_ms: float | None = None
+    fallback_from: str | None = None
+
+
 class ExtractedTable(BaseModel):
     """A table extracted from a PDF page."""
 
     page_index: int
     table_index: int
+    page_width: float | None = None
+    page_height: float | None = None
+    text_source: str | None = None
     bbox: dict
     rows: list[list[str | None]]
     row_count: int
     col_count: int
+    cells: list[TableCell] = Field(default_factory=list)
+    source: str | None = None
+    source_sha256: str | None = None
+    warnings: list[str] = Field(default_factory=list)
 
 
 class ExtractTablesData(BaseModel):
@@ -349,6 +380,9 @@ class ExtractTablesData(BaseModel):
 
     tables: list[ExtractedTable]
     total_count: int
+    pages: list[TablePageOutcome] = Field(default_factory=list)
+    source_sha256: str | None = None
+    status: Literal["complete", "partial"] = "complete"
 
 
 class ExtractTablesResponse(BaseModel):

@@ -1,0 +1,11 @@
+# Optional fallback only. CPU torch wheels must be installed from the CPU index
+# before this file; never resolve CUDA packages into the regular OCR image.
+torch==2.14.1+cpu
+torchvision==0.29.1+cpu
+docling==2.142.0
+docling-core==2.104.0
+docling-ibm-models==4.0.4
+transformers==5.20.2
+docling-parse==7.23.0
+# Security fix for the existing Torch/Hugging Face lock-file dependency.
+filelock==4.2.1

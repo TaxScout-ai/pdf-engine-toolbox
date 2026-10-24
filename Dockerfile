@@ -27,6 +27,7 @@ WORKDIR /app
 # - fonts-liberation: standard fonts for LibreOffice rendering
 # - ghostscript: PDF/A output (TAX-5637)
 RUN apt-get update && \
+    apt-get upgrade -y && \
     apt-get install -y --no-install-recommends \
         curl \
         libheif-dev \

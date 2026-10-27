@@ -25,5 +25,40 @@
     "Scheduler verification does not prove OCR recognition accuracy.",
     "Deadlines are not guaranteed during overload or stuck inference.",
     "No production rollout is claimed by this review."
-  ]
+  ],
+  "actualModelBurst": {
+    "scope": "Local patched scheduler experiment on production base image, 2CPU/3GiB, burst of 20 OCR jobs plus concurrent tables/orientation on 3-page synthetic scan; fixed in-memory download, no network/cloud/data writes; not accuracy/staging/capacity acceptance",
+    "baseEngine": "5630f8dd5d65834186381e99af8531d23c210f2e",
+    "schedulerSha256": "9f12fab02d8db46b14044463021771d6af1bfb4e2b66dd3ec155b7f6c6280925",
+    "cpu": 2,
+    "memoryLimitMiB": 3072,
+    "ocrJobsCompleted": 20,
+    "ocrPagesPerJob": 3,
+    "totalSeconds": 451.918,
+    "tablesSeconds": 75.77,
+    "tablePagesComplete": 3,
+    "orientationSeconds": 36.505,
+    "orientationPagesComplete": 3,
+    "peakMemoryMiB": 2495.18,
+    "healthChecks": 863,
+    "healthFailures": 0,
+    "maxHealthSeconds": 0.314,
+    "oomKills": 0,
+    "queue": {
+      "rows": 20,
+      "completed": 20,
+      "wait_p95_seconds": 424.074,
+      "processing_p95_seconds": 69.737,
+      "wait_max_seconds": 431.377
+    },
+    "baseline": {
+      "totalSeconds": 394.31,
+      "ocrJobsCompleted": 20,
+      "tablesSeconds": 99.704,
+      "tablePagesComplete": 0,
+      "orientation": "client timeout after180.127s",
+      "peakMemoryMiB": 2478.66
+    },
+    "interpretation": "Interactive readers complete instead of timing out. Total burst time increased and now includes successful table/orientation work; this is not a claim of improved bulk OCR throughput."
+  }
 }

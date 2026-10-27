@@ -176,7 +176,7 @@ jobs also report `queue_position` (unfinished jobs submitted earlier) and
 | --- | --- | --- |
 | `OCR_WORKERS` | CPUs available (affinity and cgroup quota) | concurrent OCR inferences; one RapidOCR engine with its own ONNX Runtime sessions per worker thread |
 | `OCR_INTRA_OP_THREADS` | CPUs // `OCR_WORKERS`, at least 1 | ONNX Runtime intra-op threads per session and OpenCV threads; inter-op is 1 |
-| `OCR_MAX_ACTIVE_JOBS` | max(2, `OCR_WORKERS`) | documents interleaved page by page; later documents wait FIFO |
+| `OCR_MAX_ACTIVE_JOBS` | max(2, `OCR_WORKERS`) | documents interleaved page by page; OCR jobs keep their order, with one slot available to synchronous requests at page boundaries |
 | `OCR_QUEUE_MAX_JOBS` | 500 | unfinished jobs accepted before 429 |
 | `OCR_RESULT_TTL_SECONDS` | 3600 | how long finished results stay readable |
 | `OCR_QUEUE_KEY` | derived from `PDF_ENGINE_SECRET` | key for queue data at rest |
@@ -201,7 +201,17 @@ recovered by one process. Scale with `OCR_WORKERS` instead.
 
 Orientation and image-table requests run on the same workers as in-memory
 jobs of one unit per page (they are not persisted and do not count toward
-`OCR_QUEUE_MAX_JOBS`). A job left in the ledger by an engine that ran with
+`OCR_QUEUE_MAX_JOBS`). When OCR is queued, one active document slot is shared
+by these synchronous requests. An OCR document can yield that slot after its
+in-flight pages finish; its checkpointed pages remain intact and its decrypted
+input is released until it resumes. With only one active slot, the two classes
+alternate. When both classes have pages ready, synchronous work gets two page
+starts for each persistent page start, with separate round-robin cursors within
+each class. This keeps queued OCR progressing while reducing interactive waits;
+it does not guarantee a deadline during sustained overload or a stuck inference.
+Worker and active-document limits stay unchanged.
+
+A job left in the ledger by an engine that ran with
 `OCR_BACKEND=paddle` is re-planned as RapidOCR on start and resumes.
 
 Native digital text keeps the existing skip behavior without loading models.

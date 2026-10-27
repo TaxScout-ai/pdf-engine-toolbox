@@ -478,7 +478,10 @@ class OcrQueue:
         self._active: list[_Job] = []
         self._jobs: dict[str, _Job] = {}  # unfinished persistent jobs
         self._reserved = 0  # submissions past the limit check, not yet queued
-        self._rr = 0
+        self._persistent_rr = 0
+        self._sync_rr = 0
+        self._prefer_sync = True
+        self._sync_streak = 0
         self._seq = 0
         self._stopped = False
         self._threads: list[threading.Thread] = []
@@ -797,8 +800,6 @@ class OcrQueue:
 
     def _next_unit_locked(self):
         """Next (job, unit, first) to run; unit None means "finish this job"."""
-        while len(self._active) < self.max_active and self._pending:
-            self._active.append(self._pending.popleft())
         # A job with nothing left to run (no pages requested, every page
         # recorded before a restart, or cancelled) is finished at once.
         for job in self._active:
@@ -806,12 +807,68 @@ class OcrQueue:
                 job.finishing = True
                 self._active.remove(job)
                 return job, None, False
+
+        # Synchronous callers have an HTTP deadline. Give them one active
+        # document slot at a page boundary instead of making them wait behind
+        # the entire persistent backlog. Never interrupt inference or increase
+        # the worker/active-document limits. With one slot, alternate classes.
+        sync_waiting = next((j for j in self._pending if not j.persistent), None)
+        yielding = None
+        if (sync_waiting is not None
+                and not any(not j.persistent for j in self._active)
+                and (self.max_active > 1 or self._prefer_sync)
+                and len(self._active) >= self.max_active):
+            yielding = next((j for j in reversed(self._active)
+                             if j.persistent and j.units and j.error is None), None)
+            if yielding is not None and yielding.inflight == 0:
+                self._active.remove(yielding)
+                yielding.data = None  # reload sealed input when it resumes
+                self._pending.appendleft(yielding)
+                yielding = None
+
+        while len(self._active) < self.max_active and self._pending:
+            sync = next((j for j in self._pending if not j.persistent), None)
+            persistent = next((j for j in self._pending if j.persistent), None)
+            if sync is not None and persistent is not None:
+                if self.max_active == 1:
+                    job = sync if self._prefer_sync else persistent
+                else:
+                    # At most one synchronous slot while OCR is waiting;
+                    # the other slots continue persistent work.
+                    job = persistent if any(not j.persistent for j in self._active) else sync
+            else:
+                job = self._pending[0]
+            self._pending.remove(job)
+            self._active.append(job)
+            self._prefer_sync = job.persistent
+
         count = len(self._active)
+        ready = [j for j in self._active
+                 if j is not yielding and j.units and j.error is None]
+        mixed = any(j.persistent for j in ready) and any(not j.persistent for j in ready)
+        prefer_persistent = (self._sync_streak >= 2 if mixed
+                             else any(j.persistent for j in ready))
+        start = self._persistent_rr if prefer_persistent else self._sync_rr
         for offset in range(count):
-            index = (self._rr + offset) % count
+            index = (start + offset) % count
             job = self._active[index]
-            if job.units and job.error is None:
-                self._rr = index + 1
+            # A just-admitted empty/recovered job also needs finishing. With
+            # one worker there may be no later notification to wake us.
+            if not job.units and job.inflight == 0 and not job.finishing:
+                job.finishing = True
+                self._active.remove(job)
+                return job, None, False
+            if job is not yielding and job.units and job.error is None:
+                # Short synchronous deadlines get two page starts per one
+                # persistent page when both lanes are ready. Background OCR
+                # still advances even with a continuous interactive workload.
+                if mixed and job.persistent != prefer_persistent:
+                    continue
+                if job.persistent:
+                    self._persistent_rr = index + 1
+                else:
+                    self._sync_rr = index + 1
+                self._sync_streak = 0 if job.persistent else min(2, self._sync_streak + 1)
                 unit = job.units.popleft()
                 job.inflight += 1
                 first = not job.started

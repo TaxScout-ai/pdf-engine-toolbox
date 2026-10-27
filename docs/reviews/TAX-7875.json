@@ -1,0 +1,29 @@
+{
+  "ticket": "TAX-7875",
+  "schedulerSha256": "9f12fab02d8db46b14044463021771d6af1bfb4e2b66dd3ec155b7f6c6280925",
+  "independentChecker": {
+    "verdict": "PASS",
+    "queueTestsPassed": 158,
+    "independentThreadedProbesPassed": 6
+  },
+  "adversarial": {
+    "verdict": "CLEAN",
+    "randomizedSchedulesPassed": 1000,
+    "resolvedFindings": [
+      "Single-worker empty/recovered job needs completion after admission",
+      "Shared cursor can starve a short OCR document when synchronous work is ready",
+      "Lane cursors must also survive periods when synchronous work is in flight"
+    ]
+  },
+  "fullSuite": {
+    "passed": 485,
+    "skipped": 1,
+    "seconds": 173.65,
+    "environment": "Pinned production dependency image, read-only source checkout, local development identity setting; no external network"
+  },
+  "limitations": [
+    "Scheduler verification does not prove OCR recognition accuracy.",
+    "Deadlines are not guaranteed during overload or stuck inference.",
+    "No production rollout is claimed by this review."
+  ]
+}

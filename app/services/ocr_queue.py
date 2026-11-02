@@ -72,6 +72,7 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 from app.config import settings
 from app.services import rapid_ocr
+from app.services.input_provenance import input_provenance, verify_effective_input
 
 log = structlog.get_logger()
 
@@ -628,6 +629,7 @@ class OcrQueue:
         }
         error, targets, page_count = None, [], len(pages or [])
         try:
+            params["input_provenance"] = input_provenance(pdf_bytes, data)
             targets, params["dpi"] = rapid_ocr.plan(data, pages, language, dpi)
             page_count = len(targets)
         except Exception as exc:  # the request itself is invalid: fail its task
@@ -1025,7 +1027,12 @@ class OcrQueue:
         log.error("task_failed", task_id=job.id, error=reason)
 
     def _ocr_response(self, job: _Job, result: dict) -> dict:
+        receipt = job.params.get("input_provenance")
+        # Old queued jobs lack an acquisition record; never stamp them retroactively.
+        if receipt is not None:
+            verify_effective_input(receipt, self._job_bytes(job))
         return {
+            "input_provenance": receipt,
             "pages": result["pages"],
             "total_words": result["total_words"],
             "avg_confidence": result["avg_confidence"],

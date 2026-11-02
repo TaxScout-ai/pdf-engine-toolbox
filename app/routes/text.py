@@ -36,6 +36,7 @@ from app.models.responses import (
 )
 from app.services import cache_service, download_service, ocr_queue, pdf_service
 from app.services.rapid_ocr import cache_profile
+from app.services.input_provenance import native_input_provenance
 
 router = APIRouter(prefix="/text")
 
@@ -68,7 +69,7 @@ async def extract_text(request: TextExtractRequest):
 
     return TextExtractResponse(
         success=True,
-        data=TextExtractData(pages=pages),
+        data=TextExtractData(pages=pages, input_provenance=native_input_provenance(pdf_bytes)),
         processing_time_ms=round(elapsed, 2),
     )
 
@@ -267,6 +268,7 @@ async def ocr_pages(request: OcrRequest):
         "language": request.language,
         "dpi": request.dpi,
         **cache_profile(),
+        "input_provenance_version": 1,
     }
     # Deduplicated from the queue's sealed ledger, never the plaintext file
     # cache: OCR results carry client text and the searchable PDF.

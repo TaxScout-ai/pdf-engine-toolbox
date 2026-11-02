@@ -133,10 +133,21 @@ class PageText(BaseModel):
     visual_height: float | None = None
 
 
+class InputProvenance(BaseModel):
+    """Engine-acquired bytes; document/version ownership is the caller's check."""
+
+    schema_version: int
+    input_sha256: str
+    effective_pdf_sha256: str
+    input_size_bytes: int
+    page_count: int
+
+
 class TextExtractData(BaseModel):
     """Text extraction response data."""
 
     pages: list[PageText]
+    input_provenance: InputProvenance | None = None
 
 
 class TextExtractResponse(BaseModel):
@@ -501,6 +512,7 @@ class OcrData(BaseModel):
     pdf_base64: str  # Base64-encoded PDF with invisible text layer for Ctrl+F
     provenance: dict | None = None
     coverage: dict | None = None
+    input_provenance: InputProvenance | None = None
 
 
 class OcrResponse(BaseModel):

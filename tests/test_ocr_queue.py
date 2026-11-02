@@ -7,6 +7,7 @@ No real model is loaded.
 """
 
 import base64
+import hashlib
 import json
 import subprocess
 import sys
@@ -183,6 +184,11 @@ def test_queued_and_in_flight_jobs_resume_after_a_restart(
         pages = result["data"]["result"]["pages"]
         assert [p["page_index"] for p in pages] == [0, 1, 2]
         assert [p["full_text"] for p in pages] == ["p0", "p1", "p2"]
+        receipt = result["data"]["result"]["input_provenance"]
+        original = documents[f"https://example.com/{index}.pdf"]
+        assert receipt["input_sha256"] == hashlib.sha256(original).hexdigest()
+        assert receipt["effective_pdf_sha256"] == receipt["input_sha256"]
+        assert receipt["page_count"] == 3
     # The two pages read before the crash were checkpointed, not read again.
     assert len(after.calls) == 15 - 2
 
@@ -475,3 +481,37 @@ def test_orientation_deadline_still_raises(monkeypatch):
             ocr_queue.get_queue().run_pages("orientation", scanned(1), [0], timeout=0)
     finally:
         release.set()
+
+
+def test_acquisition_receipt_survives_cache_and_counts_unselected_pages(
+    client, auth_headers, documents, monkeypatch
+):
+    monkeypatch.setattr(rapid_ocr, "_get_engine", lambda: FakeEngine(delay=0))
+    original = scanned(3)
+    documents["https://example.com/proof.pdf"] = original
+    body = json.dumps({"source_url": "https://example.com/proof.pdf", "pages": [1]})
+    headers = auth_headers("POST", "/text/ocr", body)
+    first = client.post("/text/ocr", content=body, headers=headers).json()
+    result = poll(client, auth_headers, first["task_id"])["data"]["result"]
+    expected = {
+        "schema_version": 1,
+        "input_sha256": hashlib.sha256(original).hexdigest(),
+        "effective_pdf_sha256": hashlib.sha256(original).hexdigest(),
+        "input_size_bytes": len(original), "page_count": 3,
+    }
+    assert result["input_provenance"] == expected
+    assert [p["page_index"] for p in result["pages"]] == [1]
+    cached = client.post("/text/ocr", content=body, headers=headers).json()
+    assert cached["data"]["input_provenance"] == expected
+    assert cached["processing_time_ms"] == 0
+    documents["https://example.com/proof.pdf"] = scanned(3, tag="replacement")
+    changed = client.post("/text/ocr", content=body, headers=headers).json()
+    assert "task_id" in changed  # same URL is not source identity
+    updated = poll(client, auth_headers, changed["task_id"])["data"]["result"]
+    assert updated["input_provenance"]["input_sha256"] != expected["input_sha256"]
+
+
+def test_legacy_job_does_not_receive_a_fabricated_acquisition_receipt(monkeypatch):
+    queue = ocr_queue.get_queue()
+    result = {"pages": [], "total_words": 0, "avg_confidence": 0, "pdf_bytes": b""}
+    assert queue._ocr_response(SimpleNamespace(params={}), result)["input_provenance"] is None

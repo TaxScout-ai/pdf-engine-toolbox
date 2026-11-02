@@ -1,6 +1,7 @@
 """Test text extraction and search endpoints."""
 
 import json
+import hashlib
 from unittest.mock import patch, AsyncMock
 
 
@@ -48,3 +49,8 @@ def test_text_extract(client, auth_headers, sample_pdf_bytes):
     assert data["success"] is True
     assert len(data["data"]["pages"]) == 2
     assert "Page 1" in data["data"]["pages"][0]["text"]
+
+    receipt = data["data"]["input_provenance"]
+    assert receipt["input_sha256"] == hashlib.sha256(sample_pdf_bytes).hexdigest()
+    assert receipt["effective_pdf_sha256"] == receipt["input_sha256"]
+    assert receipt["page_count"] == 5  # total source, not two selected pages

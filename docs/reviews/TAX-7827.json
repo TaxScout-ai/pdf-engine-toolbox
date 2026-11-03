@@ -1,0 +1,112 @@
+{
+  "issue": "TAX-7827",
+  "scope": "Benchmark diagnostics only; no runtime or fallback enablement",
+  "checker": {
+    "issue": "TAX-7827",
+    "role": "independent checker",
+    "verdict": "PASS",
+    "reviewed_at": "2026-11-03T06:10:20.020183+00:00",
+    "base": "67f0b6b112e8410c234822c86a897f956ab2177f",
+    "scope": [
+      "scripts/evaluate_financial_tables.py",
+      "tests/test_financial_table_metrics.py"
+    ],
+    "working_tree_diff": true,
+    "diff_sha256": "72914c5046e32d9e2baf94db01b29f53f9c6da72674828f71578528db0f8c7d7",
+    "file_sha256": {
+      "scripts/evaluate_financial_tables.py": "869e62823396bf17f02925b1b77faa37d3a816d2cf4e5889d8dc235076989b23",
+      "tests/test_financial_table_metrics.py": "6a3dbce2022910426d3b1aeda11b3509a89e060496622ba39eeded94686333c9"
+    },
+    "findings": [],
+    "resolved_findings": [
+      {
+        "finding": "box accepts scalar strings as coordinate sequences; box(\"0011\") returns [0,0,1,1]. Malformed scalar geometry may earn credit.",
+        "resolution": "Box container requires list/tuple or coordinate dictionary; coordinates must be int/float excluding bool, finite and nondegenerate. Scalar/numeric strings rejected."
+      },
+      {
+        "finding": "Boolean page False compares equal to golden page0 and earns exact monetary credit; page types are not validated.",
+        "resolution": "Golden and prediction page metadata must be nonnegative integers excluding bool; invalid prediction page separately counted, invalid golden page raises ValueError."
+      },
+      {
+        "finding": "Golden dict/string-coordinate boxes pass box validation, then original unnormalized region/tight are used; independent probes raise KeyError and TypeError.",
+        "resolution": "Golden region/tight bbox normalized once and normalized values used throughout matching/containment. Coordinate dictionaries work; invalid string coordinates reject explicitly."
+      },
+      {
+        "finding": "New bbox_contained and exact_money_with_contained_bbox metrics include \u00b11-point tolerance. A box[-0.5,0,50.5,20] over region[0,0,50,20] receives contained credit.",
+        "resolution": "New contained-bbox metrics now require strict inclusion with no tolerance. Legacy geometric association retains its separate 1-point window; subpoint overflow regression verifies the distinction."
+      }
+    ],
+    "verified": [
+      "Page filtering excludes wrong table/cell page and inconsistent table-cell page metadata from value credit.",
+      "Number parser rejects malformed comma groups, double negatives and merged numeric text; signed/currency accounting forms retain Decimal comparison.",
+      "Matching remains geometry-first with used-prediction uniqueness. Exact-value, sign error, nonnumeric/merged and wrong-value outcomes are explicit; ambiguity is reported without duplicate credit.",
+      "Fully located/exact numeric rows require every numeric golden cell in the row, rather than merely one located value. This metric does not claim nonnumeric labels or all document rows are correct.",
+      "Strict bbox containment is reported separately from value agreement and monetary-cell classification. Explicit monetary annotations override the backward-compatible label heuristic.",
+      "Details contain only existing annotation identifiers, indices, booleans and outcome labels. No expected/predicted text, labels or monetary values are included. Synthetic CLI verified stdout and both report files omit private sentinel and amount.",
+      "git diff --check passed. Scope remains exactly two evaluator/test files; no engine inference/runtime or product activation change."
+    ],
+    "validation": {
+      "focused_tests": {
+        "passed": 14,
+        "files": 1,
+        "duration_seconds": 0.07,
+        "command": "/home/taxscout/.codex/artifacts/TAX-7070/docling-venv/bin/python -m pytest tests/test_financial_table_metrics.py -q",
+        "log": "/home/taxscout/.codex/artifacts/TAX-7827-financial-qualification/checker-tests-final.log",
+        "sha256": "db87308d2d7d74f3152e6ff011c77caa59f63238b5dd5bd7484304b2c1689279"
+      },
+      "independent_cli_probe": {
+        "path": "/home/taxscout/.codex/artifacts/TAX-7827-financial-qualification/checker-cli-probe.json",
+        "sha256": "6512352be0285400ae4b8147c34d1385910e9e345c0305752ee71820d352fcc1",
+        "result": "PASS synthetic privacy and positive full-row/strict-bbox controls"
+      }
+    },
+    "limitations": [
+      "No source edits or production mutations by checker; only focused synthetic tests/private artifacts.",
+      "No real document/model rerun. Reported real40 baseline85/431, Docling368/431 and unshipped candidate202/431 with148wrong are parent context, not independently recomputed.",
+      "Evaluation is labelled-region recall/agreement, not whole-document precision, semantic financial correctness or deployment acceptance.",
+      "Graph unavailable per parent; exact-source fallback without graph completeness claim.",
+      "Receipt binds current two-file diff SHA256; subsequent changes require delta review."
+    ]
+  },
+  "adversarial": {
+    "ticket": "TAX-7827",
+    "verdict": "CLEAN",
+    "findings": [],
+    "reviewedAt": "2026-11-03T06:11:19.248506+00:00",
+    "worktree": "/home/taxscout/worktrees/TAX-7827-financial-table-qualification",
+    "baseSha": "67f0b6b112e8410c234822c86a897f956ab2177f",
+    "diffCommand": "git diff --binary HEAD -- scripts/evaluate_financial_tables.py tests/test_financial_table_metrics.py",
+    "diffSha256": "72914c5046e32d9e2baf94db01b29f53f9c6da72674828f71578528db0f8c7d7",
+    "sha256": {
+      "scripts/evaluate_financial_tables.py": "869e62823396bf17f02925b1b77faa37d3a816d2cf4e5889d8dc235076989b23",
+      "tests/test_financial_table_metrics.py": "6a3dbce2022910426d3b1aeda11b3509a89e060496622ba39eeded94686333c9"
+    },
+    "scope": "Two-file offline benchmark diagnostic change only. Exact-source fallback; graph unavailable. No production calls, source edits or model runs by reviewer.",
+    "checks": [
+      "Final geometry validator rejects scalar/string/bool/nonfinite/degenerate boxes; normalizes supported coordinate dictionaries before labelled geometry math. Valid page identities must be nonnegative integers, explicitly rejecting booleans/floats/strings. Independent malformed boolean-page and string-box probes yield missing cells with diagnostic counts, never credit.",
+      "Source comparison confirms geometric association still precedes numeric comparison and does not search candidates by matching monetary value. Each prediction can be consumed once. Ambiguity, merged columns, oversized highlights, partial rows and mismatch classes are separately exposed.",
+      "Monetary parser now rejects malformed comma grouping and double-negative accounting notation. Supported currency/minus/parenthesis forms retain sign; merged digit tokens cannot become a single value. Strict parser removes one native-text false credit.",
+      "New bbox containment metric uses exact region containment with no inherited one-point association tolerance. Fully located/exact numeric rows count every numeric labelled cell, not merely one located cell. Explicit is_monetary boolean overrides the legacy column-label heuristic.",
+      "Independent replay over all40 development pages confirms every legacy metric unchanged for baseline and Docling. Exact money remains85/431 and368/431 respectively. Docling16 wrong-money associations consist of14 nonnumeric/merged texts and2 numeric value differences; they are not16 established wrong placements.",
+      "Independent strict native-text replay confirms202/431 exact monetary cells and148 mismatches:88 nonnumeric/merged,58 numeric differences,2 sign-only differences;81 missing. This experiment remains rejected.",
+      "Final diagnostic-replay.json matches independent current totals. Strict contained exact-money counts are baseline4, Docling347, native21; older tolerance-based46/368/22 counts must not be quoted as strict containment.",
+      "Diagnostic detail schema includes indices/outcome/booleans without raw document text or monetary values. Corpus manifest explicitly records independent_cpa_reviewed:false and holdout_labels_ready:false."
+    ],
+    "validation": {
+      "tests": "Independent targeted pytest:14 passed in0.11seconds; one unrelated installed Starlette/httpx deprecation warning. No heavy tests.",
+      "probes": "adversarial-malformed-probes.json",
+      "independentReplay": "adversarial-metric-replay.json",
+      "reportSha256": "d1f0eed9a038ad15cd88f94d7b00bced9811b48f60bfd0fd5d44e2ee6679dc06",
+      "corpusManifestSha256": "1c5e4ea2691748b2a27841964d560f61948d849041afbc5661831c6d65aaf1d6"
+    },
+    "claimLimits": [
+      "CLEAN approves diagnostic implementation and accurately bounded reporting, not production engine qualification or candidate promotion.",
+      "Legacy exact counts are labelled-region geometric/value matches, not whole-document precision, unique unambiguous placement guarantees, or valid complete-page highlighting. Strict bbox containment is an additional subset, not independent evidence of all table semantics.",
+      "Ambiguous predictions can still earn legacy exact credit and are separately counted; same-value duplicates, split-table column identity and greedy association remain evaluator limitations.",
+      "Sign-only mismatch statistics compare values with equal magnitude; they are not a complete sign-error rate when magnitude also differs.",
+      "Legacy monetary denominator uses column-label heuristics unless explicit annotation exists;431 is not an independent CPA certification of all monetary cells.",
+      "No independent CPA-reviewed truth or labelled representative unseen-source holdout exists. The40 pages are development evidence. Reserved pages sharing one unseen source are not a qualified representative holdout.",
+      "Reported model outcomes do not establish taxpayer errors, universal OCR accuracy, or safe rollout. No runtime routing/dependency/model changes included."
+    ]
+  }
+}

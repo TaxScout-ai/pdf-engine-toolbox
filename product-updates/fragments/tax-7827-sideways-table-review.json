@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "id": "tax-7827-sideways-table-review",
+  "audience": "design_partners",
+  "category": "fix",
+  "customerVisible": true,
+  "title": "Sideways tables are marked for manual review",
+  "summary": "Pages dominated by sideways or upside-down PDF text now require manual table review instead of showing a misleading completed extraction.",
+  "bodyMarkdown": "## What changed\n\nWhen a table page contains mostly sideways or upside-down PDF text that the table reader cannot reliably interpret, extraction reports an unsupported structure. It does not present a fragment of the table as a completed result.\n\n## Why it matters\n\nA recognized header alone can omit the transactions underneath it. These pages now clearly require review of the original.\n\n## Where to find it\n\nUse **Extract Tables** in the PDF toolbox. Pages already displayed upright by their PDF rotation settings continue to use normal table extraction.",
+  "fromFeedback": false,
+  "channels": {
+    "widget": true,
+    "inApp": true,
+    "email": false
+  },
+  "cta": null,
+  "email": null,
+  "screenshot": {
+    "required": false,
+    "captureInstructions": null,
+    "altText": null
+  },
+  "relatedLinearIssueIds": [
+    "TAX-7827"
+  ]
+}

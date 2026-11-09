@@ -1,4 +1,5 @@
 """One table page on the shared OCR queue, including native PDF extraction."""
+import math
 import time
 
 import structlog
@@ -8,6 +9,30 @@ from app.services import rapid_ocr, table_ocr
 from app.services.ocr_preprocessing import text_layer_quality
 
 log = structlog.get_logger()
+
+
+def _native_text_needs_orientation(page) -> bool:
+    """Abstain on predominantly sideways/upside-down displayed native text.
+
+    A ruled header can otherwise be reported as a complete table while every
+    transaction below it is omitted. Account for PDF display rotation: metadata
+    that already makes the text upright must not trigger this guard. A short
+    vertical margin label alone is not enough to reject an upright page.
+    """
+    angle = math.radians(page.rotation)
+    total = unresolved = 0
+    for span in page.get_texttrace():
+        # Searchable scans may contain invisible OCR overlays. Their direction
+        # is not the direction of the printed table the image reader will see.
+        if span["type"] == 3 or span["opacity"] == 0:
+            continue
+        count = sum(chr(char[0]).isalnum() for char in span["chars"])
+        dx, dy = span["dir"]
+        displayed_x = dx * math.cos(angle) - dy * math.sin(angle)
+        total += count
+        if displayed_x < 0.9:
+            unresolved += count
+    return unresolved >= 24 and unresolved >= 0.8 * total
 
 
 def read_page(source, index: int, params: dict) -> dict:
@@ -20,7 +45,12 @@ def read_page(source, index: int, params: dict) -> dict:
         try:
             with rapid_ocr.FITZ_LOCK, rapid_ocr.open_source(source) as doc:
                 page = doc[index]
-                if strategy == "pymupdf" or text_layer_quality(page)["accepted"]:
+                if _native_text_needs_orientation(page):
+                    result = {
+                        "page_index": index, "tables": [], "source": "native_pdf",
+                        "status": "unsupported", "reason": "native_text_orientation_unresolved",
+                    }
+                elif strategy == "pymupdf" or text_layer_quality(page)["accepted"]:
                     tables = pdf_service._extract_tables_pymupdf(doc, index)
                     if tables or strategy == "pymupdf":
                         blank = (not page.get_text().strip() and not page.get_images()
@@ -46,7 +76,10 @@ def read_page(source, index: int, params: dict) -> dict:
     # Explicit native-only / RapidTable comparisons never silently use another model.
     # Geometry warnings remain visible for review; a complete native table does
     # not justify loading a second model and replacing its correct text.
-    needs_fallback = result["status"] in ("unsupported", "failed")
+    # Neither current table reader qualifies sideways native financial layouts.
+    # A second header-only detection must not turn this abstention into success.
+    needs_fallback = (result["status"] in ("unsupported", "failed")
+                      and result.get("reason") != "native_text_orientation_unresolved")
     if strategy == "auto" and needs_fallback and settings.table_fallback == "docling":
         claim = params.get("claim_fallback")
         allowed = claim() if callable(claim) else params.get("allow_fallback", True)

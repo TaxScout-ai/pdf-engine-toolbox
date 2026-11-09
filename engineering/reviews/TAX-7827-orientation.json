@@ -1,0 +1,136 @@
+{
+  "issue": "TAX-7827",
+  "reviewedSource": "2999ff842c178e1a5eed6497e9a4bcd73229c21d",
+  "scope": "Only conservative native orientation abstention; financial-table qualification remains incomplete",
+  "reviews": [
+    {
+      "verdict": "PASS",
+      "issue": "TAX-7827",
+      "review_round": 2,
+      "reviewed_at": "2026-11-09T18:29:30.100221+00:00",
+      "scope": "Bounded orientation abstention and fallback suppression; not general financial-table accuracy or production acceptance.",
+      "base": "0899a3d8950455fd2e17fac2839402f320b9c2a7",
+      "head": "2999ff842c178e1a5eed6497e9a4bcd73229c21d",
+      "tree": "45201a87bdd7b0373c3a320ca7404d7b5c3c6233",
+      "working_tree_clean": true,
+      "diff_sha256": "7d69722c5846a3fb77fd910ac260c5e784a3974f494a7627455d7ae40f8d8f2f",
+      "source_hashes": {
+        "app/services/table_pipeline.py": "153949002d3780f4ee29209f85ade4404bc8705f62aa7911555b236d51f7d34a",
+        "product-updates/fragments/tax-7827-sideways-table-review.json": "f38da01d91f8e886965df9406e66539be9ab8908878047b8c2b87245fd8f9b43",
+        "tests/test_table_pipeline.py": "3e2c9b012b1d152ebfb1ebabedc9cb8d685a5a39384b81380234e55e7e2b472b"
+      },
+      "findings": [],
+      "independent_evidence": {
+        "focused_tests": {
+          "result": "17/17 passed in0.67s; one existing Starlette/httpx deprecation warning",
+          "log": "/home/taxscout/.codex/artifacts/TAX-7827-followthrough-20261109/orientation-checker-r2-tests.log"
+        },
+        "previous_probe_suite_on_new_head": {
+          "result": "26/26 PASS",
+          "cases": "16 physical/display quarter-turn combinations;7 actual-PDF count/ratio boundaries;F062 auto/native-only;aggregate response model and legacy refusal",
+          "report": "/home/taxscout/.codex/artifacts/TAX-7827-followthrough-20261109/orientation-checker-probe.json",
+          "log": "/home/taxscout/.codex/artifacts/TAX-7827-followthrough-20261109/orientation-checker-r2-probe.log"
+        },
+        "additional_visibility_controls": {
+          "result": "8/8 PASS",
+          "cases": "Invisible render-mode3 or opacity0 upright overlays cannot dilute sideways visible text; all4 metadata quarter-turns",
+          "report": "/home/taxscout/.codex/artifacts/TAX-7827-followthrough-20261109/orientation-checker-r2-corpus.json"
+        },
+        "development_corpus_guard_only": {
+          "result": "40/40 guard false,0 newly abstained",
+          "source": "Original PDFs named development by blind-review/pages.csv; no labels or predictions needed",
+          "report": "/home/taxscout/.codex/artifacts/TAX-7827-followthrough-20261109/orientation-checker-r2-corpus.json",
+          "not_claimed": "No OCR or table accuracy rerun"
+        },
+        "delta_source_review": "Entire new get_texttrace guard, earlier guard placement before native quality, three added tests. Product fragment unchanged in round2."
+      },
+      "verified_behavior": [
+        "Display rotation is composed with extracted native text baseline direction. Metadata that makes native text upright is not rejected. All16 cardinal content/display combinations behaved correctly.",
+        "Boundary24 nonupright alphanumeric characters and80percent is inclusive;23 chars and79percent do not trigger. Upright text with a small sideways margin label remains accepted.",
+        "The new unsupported reason prevents both RapidTable primary fallback and Docling secondary fallback from replacing the abstention. No fallback budget is consumed.",
+        "Actual F062 source returns unsupported with no tables under auto and pymupdf. No financial values or identifiers were emitted in probe results.",
+        "Aggregate status is partial with table_count0 and explicit page reason; legacy list contract raises TABLE_EXTRACTION_INCOMPLETE.",
+        "Short-circuit result-is-None condition safely avoids reading uninitialized tables on the abstention path. Existing native-only and ordinary fallback behavior is preserved by source inspection and focused tests.",
+        "Render-mode3 and zero-opacity text contribute neither numerator nor denominator. Actual hidden upright overlay controls confirm they cannot dilute visible sideways evidence.",
+        "The guard runs before text_layer_quality so a visible sideways hybrid page with substantial raster content cannot reach unqualified image/model fallback; new actual-PDF test passed."
+      ],
+      "limits": [
+        "Guard now examines visible native text before quality selection for auto and pymupdf. Explicit rapidtable and pages with no qualifying visible native text retain existing behavior. It is not a scan-only orientation solution.",
+        "Page-wide predominance is a conservative heuristic; sideways minority tables, low-text pages and mixed layouts below thresholds are not newly qualified or comprehensively detected.",
+        "No auto-rotation, semantic-column repair, full table accuracy, staging acceptance or production deployment claim.",
+        "No repository/source edits, production calls or customer-text output. Graph unavailable per parent; exact source fallback used."
+      ],
+      "artifact_hashes": {
+        "orientation-checker-r2-tests.log": "da239b571595bcaec2a71aec42eee2c525ad1359976a87a15284ec04961bedf9",
+        "orientation-checker-probe.py": "6a0210d73f2be629e4eeb89676fa88a2833b2550d79670027ad887b481213ede",
+        "orientation-checker-probe.json": "d2181aaf530db94f3951de9f376c2193e0adc1cd0892e1625452e5c2afcaf5f9",
+        "orientation-checker-r2-probe.log": "18d77ff923016e6587bde8d6cdb4abe0a8db519240ae8148f0e073797dffaef3",
+        "orientation-checker-r2-corpus.py": "4bc3070b608978317163f19e19e6530928252aebfd753952f6bdb92959640b3e",
+        "orientation-checker-r2-corpus.json": "c35514b9775bf365feeb49801a7ebb4af76c578e868b520a1ff4b176f97f424a",
+        "orientation-checker-r2-corpus.log": "53535d2c3d1fa13065c7845c4980587b1280e24ad86851865090d994c29977f4"
+      },
+      "round2_diff_sha256": "e7db133fb6e84d8f4fa9a5eec7159b960b1068c6eed957fe70f46dcf1e9c766a",
+      "resolved_since_round1": [
+        "Invisible native overlay false positives excluded.",
+        "Hybrid raster quality-rejection bypass closed by placing guard before quality selection."
+      ]
+    },
+    {
+      "issue": "TAX-7827",
+      "review_round": 2,
+      "verdict": "CLEAN",
+      "reviewed_at": "2026-11-09T18:30:56.791123+00:00",
+      "base_sha": "0899a3d8950455fd2e17fac2839402f320b9c2a7",
+      "prior_review_sha": "d6bf8070c8612f087ea1c46081ee21c2d8855984",
+      "source_sha": "2999ff842c178e1a5eed6497e9a4bcd73229c21d",
+      "tree_sha": "45201a87bdd7b0373c3a320ca7404d7b5c3c6233",
+      "working_tree_clean": true,
+      "diff_sha256": "7d69722c5846a3fb77fd910ac260c5e784a3974f494a7627455d7ae40f8d8f2f",
+      "round2_diff_sha256": "e7db133fb6e84d8f4fa9a5eec7159b960b1068c6eed957fe70f46dcf1e9c766a",
+      "scope": "Bounded re-review of both round1 orientation guard findings and final three-file feature diff. No source modifications or production operations.",
+      "source_files_sha256": {
+        "app/services/table_pipeline.py": "153949002d3780f4ee29209f85ade4404bc8705f62aa7911555b236d51f7d34a",
+        "product-updates/fragments/tax-7827-sideways-table-review.json": "f38da01d91f8e886965df9406e66539be9ab8908878047b8c2b87245fd8f9b43",
+        "tests/test_table_pipeline.py": "3e2c9b012b1d152ebfb1ebabedc9cb8d685a5a39384b81380234e55e7e2b472b"
+      },
+      "findings": [],
+      "resolved_findings": [
+        {
+          "id": "ORIENT-ADV-1",
+          "verification": "Original real sideways native table with substantial raster background still fails native text-layer quality, but now returns unsupported/native_text_orientation_unresolved with empty tables. Both RapidTable and Docling mocks remained uncalled."
+        },
+        {
+          "id": "ORIENT-ADV-2",
+          "verification": "Original upright native table with extensive invisible rotated margin text now remains complete with every baseline row unchanged. Independent zero-opacity equivalent also remains complete and unchanged. Rendering-mode3 and opacity0 spans are excluded."
+        }
+      ],
+      "independent_probes": {
+        "content_display_rotation_combinations": 16,
+        "rotation_cases_passed": 16,
+        "invisible_text_replay": "PASS",
+        "zero_opacity_control": "PASS",
+        "raster_quality_bypass_replay": "PASS",
+        "test_command": "python -m pytest -q tests/test_table_pipeline.py",
+        "focused_tests_passed": 17
+      },
+      "review_conclusions": [
+        "Guard now precedes native quality routing for auto/pymupdf, so image-backed pages cannot skip the known native-orientation abstention.",
+        "Unsupported orientation retains empty tables and cannot become complete through Docling fallback. Explicit RapidTable comparison strategy remains unchanged.",
+        "PDF display rotation composition still distinguishes all four corrected quarter-turn cases from the twelve uncorrected combinations.",
+        "The change introduces no models, flags, external services, credentials or raw customer-data logs. Text tracing is linear in page text and runs within the existing FITZ lock.",
+        "Round2 changes only the orientation helper, its routing order and three focused regressions; no source contract or unrelated behavior change identified."
+      ],
+      "limits": [
+        "Orientation is a conservative threshold heuristic for native visible text, not a universal rendering-visibility or OCR accuracy proof.",
+        "Synthetic real PDFs/native extraction were exercised. Downstream models were mocked only to establish absence of invocation, not model accuracy.",
+        "No full corpus rerun, model qualification, CPA adjudication or production validation claimed. Parent-reported broader79-test result was not independently repeated."
+      ],
+      "evidence_sha256": {
+        "orientation-adversarial-round2-probe.py": "353b5ee05f137072fe3f37082b8dab6633d72d339b8e689d7ef208a8c0ee646c",
+        "orientation-adversarial-round2-probes.json": "1076cfe4e4c7911a3d899f763e2e4ae2a133c77c1060551bf34d76c58a4a8187",
+        "orientation-round2-invisible-text.pdf": "efebbaa5a0912af9692543b466cfcc7b89e81841784082e1f62c2d7b29cef86a",
+        "orientation-adversarial-round2-tests.log": "8dada42e4bc6d23fdd599abb19b90d42369deaa86bc96e69073fcf9dc9a484ff"
+      }
+    }
+  ]
+}

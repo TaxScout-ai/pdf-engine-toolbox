@@ -79,3 +79,57 @@ def test_tableformer_preserves_merged_cells_and_document_page():
         prov=item.prov, data=SimpleNamespace(num_rows=2, num_cols=1, table_cells=[cell])))
     partial = table_docling.map_document(doc, 7, strict=False)
     assert len(partial) == 1 and partial.unresolved_tables == 1
+
+
+def _oriented_native_table(content_rotation, display_rotation=0):
+    import fitz
+    with fitz.open() as source, fitz.open() as output:
+        page = source.new_page(width=400, height=500)
+        for row, texts in enumerate([
+            ['Description', 'Proceeds', 'Cost basis'],
+            ['FIRST TRANSACTION', '123.45', '100.00'],
+            ['SECOND TRANSACTION', '678.90', '600.00'],
+        ]):
+            for col, text in enumerate(texts):
+                rect = fitz.Rect(20 + col * 120, 100 + row * 25,
+                                 140 + col * 120, 125 + row * 25)
+                page.draw_rect(rect)
+                page.insert_textbox(rect, text, fontsize=9)
+        width, height = ((500, 400) if content_rotation % 180 else (400, 500))
+        target = output.new_page(width=width, height=height)
+        target.show_pdf_page(target.rect, source, 0, rotate=content_rotation)
+        target.set_rotation(display_rotation)
+        return output.tobytes()
+
+
+@pytest.mark.parametrize('rotation', [90, 180, 270])
+@pytest.mark.parametrize('strategy', ['auto', 'pymupdf'])
+def test_sideways_native_table_is_not_complete_or_replaced_by_fallback(monkeypatch, rotation, strategy):
+    monkeypatch.setattr(settings, 'table_fallback', 'docling')
+    fallback = Mock(side_effect=AssertionError('unqualified fallback must not run'))
+    monkeypatch.setattr(table_docling, 'read_page_result', fallback)
+    monkeypatch.setattr(table_ocr, 'read_page_result', fallback)
+    result = table_pipeline.read_page(_oriented_native_table(rotation), 0, {'strategy': strategy})
+    assert result['status'] == 'unsupported'
+    assert result['reason'] == 'native_text_orientation_unresolved'
+    assert result['tables'] == []
+    fallback.assert_not_called()
+
+
+@pytest.mark.parametrize('rotation', [0, 90, 180, 270])
+def test_pdf_display_rotation_already_corrects_native_text(rotation):
+    import fitz
+    with fitz.open(stream=_oriented_native_table(rotation, rotation), filetype='pdf') as doc:
+        assert not table_pipeline._native_text_needs_orientation(doc[0])
+    result = table_pipeline.read_page(_oriented_native_table(rotation, rotation), 0,
+                                      {'strategy': 'pymupdf'})
+    assert result['status'] == 'complete'
+    assert result['tables'][0]['rows'][1] == ['FIRST TRANSACTION', '123.45', '100.00']
+
+
+def test_small_vertical_margin_label_does_not_reject_upright_table():
+    import fitz
+    with fitz.open(stream=_oriented_native_table(0), filetype='pdf') as doc:
+        doc[0].insert_text((390, 480), 'COPY FOR RECIPIENT', rotate=90, fontsize=8)
+        assert not table_pipeline._native_text_needs_orientation(doc[0])
+        assert table_pipeline.read_page(doc.tobytes(), 0, {'strategy': 'pymupdf'})['status'] == 'complete'

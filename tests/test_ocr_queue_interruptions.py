@@ -6,6 +6,7 @@ import signal
 import sqlite3
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 import fitz
@@ -167,3 +168,48 @@ def test_legacy_ledger_upgrade_and_orphan_cleanup(tmp_path):
         assert receipt(child(root, task, "success"))["task"]["status"] == "completed"
     finally:
         after.store._db.close()
+
+
+@pytest.mark.parametrize("recover", [False, True])
+def test_duplicate_pages_preserve_output_without_spending_extra_attempts(tmp_path, recover):
+    queue = OcrQueue(tmp_path / "queue", 4, 1, 10, 3600, key=KEY)
+    with fitz.open() as doc:
+        for index in range(2):
+            page = doc.new_page()
+            for line in range(15):
+                page.insert_text((50, 50 + line * 20), f"Page {index + 1} native text for queue recovery testing.")
+        data = doc.tobytes()
+    if recover:
+        task = queue.submit_ocr(data, [1, 1, 1, 1, 0, 1], "en", 150)
+        # Previously interrupted twice: only one physical attempt remains.
+        queue.store.begin_unit(task, 1)
+        queue.store.begin_unit(task, 1)
+        queue.store._db.close()
+        queue = OcrQueue(tmp_path / "queue", 4, 1, 10, 3600, key=KEY)
+    real_read = queue._run_unit
+    seen = []
+    lock = threading.Lock()
+    two_pages = threading.Event()
+
+    def read(job, unit):
+        with lock:
+            seen.append(unit)
+            if set(seen) == {0, 1}:
+                two_pages.set()
+        assert two_pages.wait(3), "distinct pages did not reach workers"
+        return real_read(job, unit)
+
+    queue._run_unit = read
+    try:
+        queue.start()
+        if not recover:
+            task = queue.submit_ocr(data, [1, 1, 1, 1, 0, 1], "en", 150)
+        result = queue.wait(task, timeout=10)
+        assert result["status"] == "completed", result.get("error")
+        assert sorted(seen) == [0, 1]
+        assert [page["page_index"] for page in result["result"]["pages"]] == [1, 1, 1, 1, 0, 1]
+        assert queue.store._execute("SELECT * FROM ocr_job_attempts") == []
+    finally:
+        two_pages.set()
+        queue.shutdown()
+        queue.store._db.close()

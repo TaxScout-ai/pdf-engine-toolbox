@@ -482,7 +482,10 @@ class _Job:
         self.persistent = persistent
         self.targets = targets
         self.done: dict[int, object] = done or {}
-        self.units = deque(unit for unit in targets if unit not in self.done)
+        # Repeated requested pages share one checkpoint and attempt budget.
+        # Schedule each physical page once; targets retains output order and
+        # multiplicity, including when recovering a previously queued job.
+        self.units = deque(unit for unit in dict.fromkeys(targets) if unit not in self.done)
         self.inflight = 0
         self.error: BaseException | None = None
         self.created_at = created_at or time.time()

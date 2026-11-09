@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "id": "tax-7829-interrupted-document-recovery",
+  "audience": "design_partners",
+  "category": "fix",
+  "customerVisible": true,
+  "title": "Repeatedly interrupted documents stop retrying indefinitely",
+  "summary": "Documents that repeatedly interrupt processing now stop with an error, allowing other documents to continue. Completed pages are retained during recovery.",
+  "bodyMarkdown": "## What changed\n\nAfter repeated interruptions on the same page or while preparing the result, document processing stops with an error instead of retrying indefinitely. Completed pages are reused when processing resumes.\n\n## Why it matters\n\nOne repeatedly interrupted document no longer keeps retrying without an end, and other queued documents can continue processing.\n\n## Where to find it\n\nCheck the processing status in **Documents**. A document that cannot finish after repeated interruptions is reported as failed.",
+  "fromFeedback": false,
+  "channels": {"widget": true, "inApp": true, "email": false},
+  "cta": null,
+  "email": null,
+  "screenshot": {"required": false, "captureInstructions": null, "altText": null},
+  "relatedLinearIssueIds": ["TAX-7829"]
+}

@@ -1,0 +1,374 @@
+{
+  "issue": "TAX-7829",
+  "reviewedSource": "884fcf2580e3e8b7ed3cf1a12f4b3d85ed8109a9",
+  "reviews": [
+    {
+      "issue": "TAX-7829",
+      "role": "independent checker",
+      "round": 1,
+      "verdict": "PASS",
+      "reviewed_at": "2026-11-09T15:16:17.195997+00:00",
+      "head": "70d78e27df7ade59f5a240f892d65dd9b48dfbda",
+      "base": "7a0a68f8d68b81f4e8c9d52cc390566c861bd05a",
+      "tree": "1724c38a49d61eb756c92363bcf74d58dc2875fa",
+      "worktree_clean": true,
+      "scope": [
+        "README.md",
+        "app/services/ocr_queue.py",
+        "product-updates/fragments/tax-7829-interrupted-document-recovery.json",
+        "tests/test_ocr_queue_interruptions.py"
+      ],
+      "diff_sha256": "816122eefdd8f6a5420fe6534f03f64a13a363bb67ed054b856c9e3b0d37a5ed",
+      "file_sha256": {
+        "README.md": "70bde8416212c8a80c54a62cb5cca40fd0e169b725bd00eb6e2311341f5f56bb",
+        "app/services/ocr_queue.py": "1b5a7747414b10c014ce97638789efe035970bef1976328852e702a5960f2ba4",
+        "product-updates/fragments/tax-7829-interrupted-document-recovery.json": "bd9a49d50d35cc558fc75eb02d7cb7d02029c08d1ee04e578b7c8c1f26fbca80",
+        "tests/test_ocr_queue_interruptions.py": "052769af1f58bfab72c726646eca7b3bec222849177b2b4175cf3b9a9e14daa8"
+      },
+      "findings": [],
+      "verified": [
+        "Read complete ocr_queue.py and all changed tests/docs/product fragment; inspected text submission, task status and lifecycle callers using exact source fallback.",
+        "Each persistent page reserves its own attempt before _run_unit; final assembly uses separate sentinel -1 before assembly/response/write. SQLite conditional UPSERT caps attempts atomically at three; terminal jobs cannot reserve another unit.",
+        "Checkpoint write and corresponding attempt deletion are one transaction. Recovery loads completed units and schedules only missing units, preserving page order and original work. Third attempt can succeed.",
+        "Exhaustion becomes terminal failed through existing error path, clears pending units, releases active slot, deletes input/checkpoints/attempts and preserves terminal error across restart. Subsequent work completes.",
+        "Additive IF NOT EXISTS attempt table upgrades an older ledger without rewriting checkpoints. Startup/sweeper clear orphan attempts; synchronous in-memory operations do not use persistent budgets.",
+        "README accurately scopes this to repeated persistent-work interruptions, including abandoned shutdown work; it does not claim live inference timeout or determine OOM cause. No configuration/worker-count changes.",
+        "git diff --check passes."
+      ],
+      "validation": {
+        "independent_focused_tests": {
+          "command": "/home/taxscout/.codex/artifacts/TAX-7070/docling-venv/bin/python -m pytest tests/test_ocr_queue_interruptions.py -q",
+          "passed": 5,
+          "duration_seconds": 6.24,
+          "log": "/home/taxscout/.codex/artifacts/TAX-7829-crash-recovery-20261109/checker-tests.log",
+          "sha256": "962620b8a6dc25e68425a1483dfde8b174de00951ccdff3c153745c4a6d6e85b",
+          "coverage": "Real child-process SIGKILL page/assembly exhaustion; checkpoint reuse; third page attempt success; terminal persistence and cleanup; following-job completion; atomic rollback; legacy ledger upgrade."
+        },
+        "independent_probes": {
+          "source": "/home/taxscout/.codex/artifacts/TAX-7829-crash-recovery-20261109/checker-probe.py",
+          "source_sha256": "d6dd9395d667585829ce499882b49a70317e53a86a250a17c64bd1c693126276",
+          "log": "/home/taxscout/.codex/artifacts/TAX-7829-crash-recovery-20261109/checker-probe.log",
+          "log_sha256": "9b4ae1685436347ef9bc8613e28cf66180be70090c81526c7e99dce5ed1f9232",
+          "results": [
+            "16 concurrent reservations: exactly 3 accepted, 13 rejected; separate page/assembly counters preserved; terminal row rejects new work.",
+            "After two actual SIGKILL interruptions during assembly, third assembly succeeds using all three recorded page checkpoints without rerunning them; following job completes and attempt rows are empty."
+          ],
+          "command": "PYTHONPATH=. /home/taxscout/.codex/artifacts/TAX-7070/docling-venv/bin/python /home/taxscout/.codex/artifacts/TAX-7829-crash-recovery-20261109/checker-probe.py"
+        },
+        "parent_exact_source_tests": {
+          "passed": 215,
+          "duration_seconds": 46.61,
+          "log": "/home/taxscout/.codex/artifacts/TAX-7829-crash-recovery-20261109/final-tests.log",
+          "sha256": "148f619c618011c3762ce4a4a60dace8e652c3ecaf1eef765bd8a753b6a2f99a",
+          "independently_inspected": true,
+          "independently_rerun": false
+        }
+      },
+      "limitations": [
+        "Only local synthetic inputs and isolated temporary ledgers were used; no customer data, production mutations, source edits or remote actions.",
+        "Tests exercise process SIGKILL, not actual model inference/OOM or host power loss; existing SQLite WAL NORMAL policy remains unchanged.",
+        "Persistent page/assembly restart budget does not bound live inference duration, startup decoding work or synchronous orientation/table operation retries.",
+        "No deployment, capacity or financial extraction accuracy claim.",
+        "Graph unavailable per parent; direct exact-source review used without a graph-completeness claim."
+      ]
+    },
+    {
+      "issue": "TAX-7829",
+      "role": "independent adversarial reviewer",
+      "round": 1,
+      "verdict": "GAMED",
+      "verdictMeaning": "Not CLEAN: reproducible compatibility/concurrency regression. This label follows the requested verdict vocabulary and does not allege intentional evidence manipulation.",
+      "reviewedAt": "2026-11-09T15:17:59.291154+00:00",
+      "sourceSha": "70d78e27df7ade59f5a240f892d65dd9b48dfbda",
+      "baseSha": "7a0a68f8d68b81f4e8c9d52cc390566c861bd05a",
+      "tree": "1724c38a49d61eb756c92363bcf74d58dc2875fa",
+      "diffSha256": "816122eefdd8f6a5420fe6534f03f64a13a363bb67ed054b856c9e3b0d37a5ed",
+      "filesSha256": {
+        "README.md": "70bde8416212c8a80c54a62cb5cca40fd0e169b725bd00eb6e2311341f5f56bb",
+        "app/services/ocr_queue.py": "1b5a7747414b10c014ce97638789efe035970bef1976328852e702a5960f2ba4",
+        "product-updates/fragments/tax-7829-interrupted-document-recovery.json": "bd9a49d50d35cc558fc75eb02d7cb7d02029c08d1ee04e578b7c8c1f26fbca80",
+        "tests/test_ocr_queue_interruptions.py": "052769af1f58bfab72c726646eca7b3bec222849177b2b4175cf3b9a9e14daa8"
+      },
+      "findings": [
+        {
+          "id": "CRASH-ADV-1",
+          "priority": "P2",
+          "title": "Repeated requested page indices exhaust the new budget without interruptions",
+          "locations": [
+            "app/services/ocr_queue.py:340",
+            "app/services/ocr_queue.py:485",
+            "app/services/ocr_queue.py:951"
+          ],
+          "reproduction": "Start actual queue with4 workers and1 active slot, submit a one-page native PDF with pages=[0,0,0,0]. Hold the first three read entries long enough for all workers to start, then release and execute the original native reader/assembler. Base7a0a68f completes and returns4 pages; candidate70d78e27 fails OCR page1 could not finish after3 attempts although no process or read was interrupted.",
+          "cause": "OcrRequest, rapid_ocr.plan and _validate_pages accept duplicate indices. _Job.units schedules each duplicate, but ocr_job_attempts keys only by(job_id, physical page index). Simultaneous legitimate starts are mistaken for retries.",
+          "suggestedFix": "Schedule each physical page index only once for persistent jobs, preserving original job.targets order and multiplicity for assembly. Apply the same unique scheduling invariant during recovery; keep in-memory operation behavior intentional. Add duplicate-index concurrency and recovery regressions.",
+          "evidence": "duplicate-pages-probe.py/json/log"
+        }
+      ],
+      "positiveChecks": [
+        "Reviewed complete changed runtime file and changed tests/docs, with exact source fallback after graph unavailable.",
+        "Attempt UPSERT is atomic under SQLite locking and occurs before work; checkpoint insertion and page-counter deletion are one transaction. Assembly counter is independent. Terminal cleanup and orphan attempt sweeping preserve prior contracts.",
+        "Independent actual native-PDF SIGKILL after checkpoint commit: page0 persisted and counter removed atomically; new process executed only pages1,2 and returned exactly[0,1,2] with complete_pages3. No fake inference or assembly used in this probe.",
+        "Committed tests use actual subprocess SIGKILL and actual encrypted queue persistence with explicitly substituted inference/assembly; those tests are suitable for queue interruption boundaries but miss duplicate requested page indices.",
+        "Inspected parent215/215 tests and checker5/5 test evidence; these passes do not cover the reproduced regression."
+      ],
+      "probes": {
+        "duplicatePages": [
+          {
+            "revision": "base",
+            "status": "completed",
+            "error": null,
+            "executionCalls": [
+              0,
+              0,
+              0,
+              0
+            ],
+            "pages": 4
+          },
+          {
+            "revision": "candidate",
+            "status": "failed",
+            "error": "OCR page 1 could not finish after 3 attempts; processing stopped after repeated interruptions",
+            "executionCalls": [
+              0,
+              0,
+              0
+            ],
+            "pages": 0
+          }
+        ],
+        "checkpointBoundary": {
+          "killAfterDurableCheckpoint": true,
+          "checkpointedPages": [
+            0
+          ],
+          "attemptRowsAfterCheckpoint": [],
+          "recovery": {
+            "status": "completed",
+            "calls": [
+              1,
+              2
+            ],
+            "pages": [
+              0,
+              1,
+              2
+            ],
+            "coverage": {
+              "requested_pages": 3,
+              "complete_pages": 3,
+              "partial_pages": 0,
+              "empty_pages": 0,
+              "failed_pages": 0,
+              "discarded_words": 0,
+              "status": "complete"
+            }
+          },
+          "inference": "Actual native PDF read and actual assembly; no fake inference/results."
+        }
+      },
+      "evidenceSha256": {
+        "duplicate-pages-probe.py": "75ebfcf466b0935208f57928237d748aea34069ce30a58b777f3adb48912b7ac",
+        "duplicate-pages-probe.json": "03b8d111837d30eaacaea29ce1d496e6b1f5ec9e567d475247838d7847ff393e",
+        "duplicate-pages-probe.log": "a0d19f2f488e84ae76a4b3033a6390f333b5ef0b382f54ebca4be6bce7220a46",
+        "checkpoint-boundary-probe.py": "ec9aca728ab9b9aaf599f164f7f4b3ccfcb367e0555be64defcf781d5dd935be",
+        "checkpoint-boundary-probe.json": "f403d1143244ac2b88aa8c1c5c897903bc4e66d55f570c6069da8d6848c3d84a",
+        "checkpoint-boundary-probe.log": "baea28cf6c60992d1276740456bf412b5e0d63f0bb825586044f76aaa5fea6f6",
+        "final-tests.log": "148f619c618011c3762ce4a4a60dace8e652c3ecaf1eef765bd8a753b6a2f99a"
+      },
+      "limitations": [
+        "One-process scheduler contract WORKERS=1; multi-process ownership/leases are outside scope.",
+        "Process-interruption budget does not bound live inference duration, model memory consumption, host power loss or startup decoding. Existing WAL NORMAL policy unchanged.",
+        "No real OCR model/OOM or deployment/capacity/accuracy claim. Probes use only generated native PDFs and private temporary ledgers.",
+        "Reviewer made no repository source edits, production actions or remote writes."
+      ]
+    },
+    {
+      "issue": "TAX-7829",
+      "role": "independent checker",
+      "round": 2,
+      "verdict": "PASS",
+      "reviewed_at": "2026-11-09T15:24:31.811845+00:00",
+      "head": "884fcf2580e3e8b7ed3cf1a12f4b3d85ed8109a9",
+      "base": "70d78e27df7ade59f5a240f892d65dd9b48dfbda",
+      "tree": "387f38716afc682c6cfecdda5dfb3fb9d02797f9",
+      "worktree_clean": true,
+      "scope": [
+        "app/services/ocr_queue.py",
+        "tests/test_ocr_queue_interruptions.py"
+      ],
+      "diff_sha256": "fa721ebdf9034627eb174ec6521a69bacc7e9c2e2d363f2a6cb0f1fb86043062",
+      "file_sha256": {
+        "app/services/ocr_queue.py": "ea7109fe203692edfefd81a677f1572489593ae11b8ec7255cd1f794d13197bd",
+        "tests/test_ocr_queue_interruptions.py": "4ad357b60d24f62dc3741fc61bb8b71584bcf7a9ea6dae53028111fb2c7d7783"
+      },
+      "findings": [],
+      "verified": [
+        "Only _Job.units scheduling changes: dict.fromkeys preserves first-appearance order and schedules every physical page once, excluding already checkpointed pages. Original targets remain unchanged.",
+        "One page therefore cannot consume multiple persistent attempts merely because it occurs repeatedly in a request. Existing attempt budgets and checkpoint cleanup remain unchanged.",
+        "RapidOCR _assemble reconstructs results from job.done in original targets order, including repeated entries. rapid_ocr.assemble copies result dictionaries and retains ordered response pages and multiplicity. Existing searchable-PDF handling is unchanged.",
+        "The common _Job change also deduplicates synchronous page work; its output still follows original targets. An independent direct probe verifies a checkpointed page is omitted from work while repeated output remains intact.",
+        "New native PDF regressions test fresh and recovered jobs with four workers and six requested entries for two physical pages; recovery starts with two attempts already spent. Both complete with each physical page read once.",
+        "git diff --check passes."
+      ],
+      "validation": {
+        "independent_focused_tests": {
+          "command": "/home/taxscout/.codex/artifacts/TAX-7070/docling-venv/bin/python -m pytest tests/test_ocr_queue_interruptions.py -q",
+          "passed": 7,
+          "duration_seconds": 6.62,
+          "log": "/home/taxscout/.codex/artifacts/TAX-7829-crash-recovery-20261109/checker-round2-tests.log",
+          "sha256": "24033ed3537bd9c8fdab40607c0e71f96398c1b8e89487a8a07c34ed54a9edc6"
+        },
+        "independent_checkpoint_output_probe": {
+          "log": "/home/taxscout/.codex/artifacts/TAX-7829-crash-recovery-20261109/checker-round2-probe.log",
+          "sha256": "5ae3b89646560b4bf14f21d5a924036fe5c7a24af9420647b585e3306d769f39",
+          "requested_and_output": [
+            2,
+            0,
+            2,
+            1,
+            0
+          ],
+          "checkpointed": [
+            0
+          ],
+          "scheduled": [
+            2,
+            1
+          ]
+        },
+        "parent_exact_source_suite": {
+          "passed": 217,
+          "duration_seconds": 66.71,
+          "log": "/home/taxscout/.codex/artifacts/TAX-7829-crash-recovery-20261109/round2-tests.log",
+          "sha256": "359d6e5cafdccb00361c4f3d634001d81430e248c2b48d109cc86efc83bc52eb",
+          "independently_inspected": true,
+          "independently_rerun": false
+        }
+      },
+      "prior_review": {
+        "path": "/home/taxscout/.codex/artifacts/TAX-7829-crash-recovery-20261109/checker.json",
+        "sha256": "c77d09a912bad6181157706d2c0fd0437d9e71c09ca7c3f7bfc558e06388031c",
+        "preserved": true,
+        "retained_scope": "Round1 attempt accounting, terminal failure, cleanup and legacy ledger review; amended here for duplicate-page scheduling."
+      },
+      "limitations": [
+        "No source edits, remote operations, customer data or production mutations.",
+        "Local native synthetic PDFs and fake-inference SIGKILL tests; no actual model OOM, production qualification or deployment claim."
+      ]
+    },
+    {
+      "issue": "TAX-7829",
+      "role": "independent adversarial reviewer",
+      "round": 2,
+      "verdict": "CLEAN",
+      "reviewedAt": "2026-11-09T15:24:35.471614+00:00",
+      "sourceSha": "884fcf2580e3e8b7ed3cf1a12f4b3d85ed8109a9",
+      "baseSha": "70d78e27df7ade59f5a240f892d65dd9b48dfbda",
+      "tree": "387f38716afc682c6cfecdda5dfb3fb9d02797f9",
+      "diffSha256": "fa721ebdf9034627eb174ec6521a69bacc7e9c2e2d363f2a6cb0f1fb86043062",
+      "filesSha256": {
+        "app/services/ocr_queue.py": "ea7109fe203692edfefd81a677f1572489593ae11b8ec7255cd1f794d13197bd",
+        "tests/test_ocr_queue_interruptions.py": "4ad357b60d24f62dc3741fc61bb8b71584bcf7a9ea6dae53028111fb2c7d7783"
+      },
+      "findings": [],
+      "resolved": [
+        {
+          "id": "CRASH-ADV-1",
+          "resolution": "Pending units now deduplicate physical page indices in first-occurrence order while targets keeps the requested sequence and multiplicity. Fresh and recovered jobs share that invariant, so concurrent duplicate entries cannot spend the same unfinished-page retry budget."
+        }
+      ],
+      "checks": [
+        "Read exact two-file delta: _Job.units uniqueness plus fresh/recovery duplicate-page tests; no changes to counter transaction, checkpoint storage, assembly ordering or result-status logic.",
+        "Independent original accepted-request replay: base and candidate both return4 pages for[0,0,0,0]; candidate now runs physical page0 exactly once and completes without retry exhaustion. Actual native reader and assembler used.",
+        "Independent fresh-process recovery: page0 already checkpointed, page1 attempts=2, requested targets[1,0,1,1,0]. Recovery reads only page1 once, succeeds on its third attempt, returns exact sequence, coverage complete_pages5 and no remaining attempt rows.",
+        "Parent round2-tests.log independently inspected:217 passed, one unrelated Starlette/httpx deprecation warning. Broad suite not duplicated.",
+        "Prior bounded review of atomic counters, checkpoint commit, SIGKILL recovery, terminal failure/progression and compatibility remains applicable. Historical round1 receipt preserved."
+      ],
+      "probes": {
+        "freshDuplicates": [
+          {
+            "revision": "base",
+            "status": "completed",
+            "error": null,
+            "executionCalls": [
+              0,
+              0,
+              0,
+              0
+            ],
+            "pages": 4
+          },
+          {
+            "revision": "candidate",
+            "status": "completed",
+            "error": null,
+            "executionCalls": [
+              0
+            ],
+            "pages": 4
+          }
+        ],
+        "recoveryDuplicates": {
+          "beforeRecovery": {
+            "checkpointedPages": [
+              0
+            ],
+            "attempts": [
+              {
+                "unit": 1,
+                "attempts": 2
+              }
+            ]
+          },
+          "afterRecovery": {
+            "status": "completed",
+            "calls": [
+              1
+            ],
+            "pages": [
+              1,
+              0,
+              1,
+              1,
+              0
+            ],
+            "coverage": {
+              "requested_pages": 5,
+              "complete_pages": 5,
+              "partial_pages": 0,
+              "empty_pages": 0,
+              "failed_pages": 0,
+              "discarded_words": 0,
+              "status": "complete"
+            },
+            "attemptRows": []
+          },
+          "execution": "Fresh subprocess, actual native PDF reader/assembly. One physical page checkpoint preserved; other page succeeds on its third permitted attempt."
+        }
+      },
+      "evidenceSha256": {
+        "adversarial.json": "b2ca0b6b0b2ae2774ae75c7a4c6880e74d685efb884be2389888fec4d274cbb4",
+        "duplicate-pages-round2-probe.py": "81564906ee13ff8d949fe5e904663b0d6a9bc420cb96f4381f37b49484564787",
+        "duplicate-pages-round2-probe.json": "72577b32a8b920221701b5afe38b3ca023aa57397aab7b548c54fc6efa310dc4",
+        "duplicate-pages-round2-probe.log": "25ee7a7a1b084eed37886d6a24d19d2498a2daafd29f2d6f33e623225fd84fea",
+        "duplicate-recovery-round2-probe.py": "b8345750ab6dc5d96f628c3a8ec7c3c0fc549db8df30313bea7427be81a76782",
+        "duplicate-recovery-round2-probe.json": "7a64091465d4b0bb7230b49dd6119b37d5a7b4cf06c4c4a72aa3bdfa703896bc",
+        "duplicate-recovery-round2-probe.log": "57b65c67f97cd5aad564df96f7045ee7fd472b4eedbb2d755041068b68f55a54",
+        "round2-tests.log": "359d6e5cafdccb00361c4f3d634001d81430e248c2b48d109cc86efc83bc52eb"
+      },
+      "limitations": [
+        "Bounded restart and concurrency review only; no live inference timeout, real-model OOM, host power-loss, capacity or production-deployment claim.",
+        "Single process scheduler ownership remains required; independent multi-process queue scheduling is outside scope.",
+        "Physical-unit deduplication also applies to queued in-memory page jobs; original targets preserve output multiplicity and order.",
+        "No repository source edits or production actions; generated native PDF probes and temporary local ledgers only."
+      ]
+    }
+  ],
+  "finalVerdicts": {
+    "checker": "PASS",
+    "adversarial": "CLEAN"
+  },
+  "productionQualification": "pending; no production claim"
+}

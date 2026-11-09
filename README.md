@@ -126,6 +126,15 @@ persistent `/data` volume) and its state lives in `OCR_QUEUE_DIR/jobs.sqlite3`.
 On startup, jobs that were `pending` or `processing` are re-queued in their
 original order; RapidOCR jobs resume from the first page not yet recorded, and
 a job whose every page was recorded before the restart is finished at once.
+Each persistent page and final result assembly has a separate three-attempt
+budget, recorded before execution. A page repeatedly interrupted by process
+termination is not retried forever: after three unfinished attempts, recovery
+marks the task `failed` with the affected page (or assembly) in its error.
+Completed checkpoints are reused during recovery; pending pages do not spend
+attempts. On terminal failure the input, checkpoints and attempt counters are
+removed, and subsequent jobs can proceed. This also counts pages abandoned
+during shutdown. It bounds restart loops, not live inference duration, and
+does not identify whether an interruption was caused by OOM or another event.
 Completed and failed results stay readable for `OCR_RESULT_TTL_SECONDS`
 (default 3600); after that a read answers `TASK_NOT_FOUND`.
 

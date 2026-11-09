@@ -85,6 +85,11 @@ _INITIAL_PAGE_SECONDS = 4.0
 _STALE_TMP_SECONDS = 600
 _MAGIC = b"OQ1\x00"
 _DEFAULT_SECRET = "change-me"
+# Attempts are committed before work starts, so SIGKILL/OOM cannot reset the
+# budget. Each page and final assembly have separate budgets; pending pages
+# and completed checkpoints never spend another page's retries.
+_MAX_UNIT_ATTEMPTS = 3
+_ASSEMBLY_UNIT = -1
 
 _worker = threading.local()
 
@@ -230,6 +235,12 @@ class _Store:
                 result BLOB NOT NULL,
                 PRIMARY KEY (job_id, unit)
             );
+            CREATE TABLE IF NOT EXISTS ocr_job_attempts (
+                job_id TEXT NOT NULL,
+                unit INTEGER NOT NULL,
+                attempts INTEGER NOT NULL,
+                PRIMARY KEY (job_id, unit)
+            );
             """
         )
         columns = {row[1] for row in self._db.execute("PRAGMA table_info(ocr_jobs)")}
@@ -316,12 +327,32 @@ class _Store:
     def save_unit(self, job_id: str, unit: int, result: dict):
         sealed = self.cipher.seal(json.dumps(result).encode(), f"unit:{job_id}:{unit}")
         # Only while the job is unfinished: a late writer cannot orphan a row.
-        self._execute(
+        self._transaction([(
             "INSERT OR REPLACE INTO ocr_job_units (job_id, unit, result)"
             " SELECT ?, ?, ? WHERE EXISTS"
             " (SELECT 1 FROM ocr_jobs WHERE id = ? AND status IN (?, ?))",
             (job_id, unit, sealed, job_id, PENDING, PROCESSING),
+        ), (
+            "DELETE FROM ocr_job_attempts WHERE job_id = ? AND unit = ?",
+            (job_id, unit),
+        )])
+
+    def begin_unit(self, job_id: str, unit: int):
+        """Durably reserve one attempt before inference/assembly can crash."""
+        rows = self._execute(
+            "INSERT INTO ocr_job_attempts (job_id, unit, attempts)"
+            " SELECT ?, ?, 1 WHERE EXISTS"
+            " (SELECT 1 FROM ocr_jobs WHERE id = ? AND status IN (?, ?))"
+            " ON CONFLICT(job_id, unit) DO UPDATE SET attempts = attempts + 1"
+            " WHERE attempts < ? RETURNING attempts",
+            (job_id, unit, job_id, PENDING, PROCESSING, _MAX_UNIT_ATTEMPTS),
         )
+        if not rows:
+            stage = "result assembly" if unit == _ASSEMBLY_UNIT else f"page {unit + 1}"
+            raise RuntimeError(
+                f"OCR {stage} could not finish after {_MAX_UNIT_ATTEMPTS} attempts; "
+                "processing stopped after repeated interruptions"
+            )
 
     def units(self, job_id: str) -> dict[int, dict]:
         rows = self._execute("SELECT unit, result FROM ocr_job_units WHERE job_id = ?", (job_id,))
@@ -351,6 +382,7 @@ class _Store:
                 (status, result_path, error, time.time(), job_id),
             ),
             ("DELETE FROM ocr_job_units WHERE job_id = ?", (job_id,)),
+            ("DELETE FROM ocr_job_attempts WHERE job_id = ?", (job_id,)),
         ])
         for row in rows:
             _unlink(row["input_path"])
@@ -423,6 +455,12 @@ class _Store:
                 (PENDING, PROCESSING),
             )
             removed["unit_rows"] = cursor.rowcount
+            cursor = self._db.execute(
+                "DELETE FROM ocr_job_attempts WHERE job_id NOT IN"
+                " (SELECT id FROM ocr_jobs WHERE status IN (?, ?))",
+                (PENDING, PROCESSING),
+            )
+            removed["attempt_rows"] = cursor.rowcount
         self.restrict_permissions()
         return removed
 
@@ -444,7 +482,10 @@ class _Job:
         self.persistent = persistent
         self.targets = targets
         self.done: dict[int, object] = done or {}
-        self.units = deque(unit for unit in targets if unit not in self.done)
+        # Repeated requested pages share one checkpoint and attempt budget.
+        # Schedule each physical page once; targets retains output order and
+        # multiplicity, including when recovering a previously queued job.
+        self.units = deque(unit for unit in dict.fromkeys(targets) if unit not in self.done)
         self.inflight = 0
         self.error: BaseException | None = None
         self.created_at = created_at or time.time()
@@ -909,6 +950,8 @@ class OcrQueue:
         try:
             if first and job.persistent:
                 self.store.mark_processing(job.id)
+            if job.persistent:
+                self.store.begin_unit(job.id, unit)
             result = self._run_unit(job, unit)
             # Record before the job can be seen as finished, so a checkpoint
             # never lands after the job's rows were cleared.
@@ -979,6 +1022,8 @@ class OcrQueue:
         try:
             if job.error is not None:
                 raise job.error
+            if job.persistent:
+                self.store.begin_unit(job.id, _ASSEMBLY_UNIT)
             result = self._assemble(job)
             if not job.persistent:
                 job.result = result

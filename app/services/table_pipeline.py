@@ -21,15 +21,17 @@ def _native_text_needs_orientation(page) -> bool:
     """
     angle = math.radians(page.rotation)
     total = unresolved = 0
-    for block in page.get_text("dict", flags=0)["blocks"]:
-        for line in block.get("lines", []):
-            count = sum(sum(char.isalnum() for char in span["text"])
-                        for span in line.get("spans", []))
-            dx, dy = line["dir"]
-            displayed_x = dx * math.cos(angle) - dy * math.sin(angle)
-            total += count
-            if displayed_x < 0.9:
-                unresolved += count
+    for span in page.get_texttrace():
+        # Searchable scans may contain invisible OCR overlays. Their direction
+        # is not the direction of the printed table the image reader will see.
+        if span["type"] == 3 or span["opacity"] == 0:
+            continue
+        count = sum(chr(char[0]).isalnum() for char in span["chars"])
+        dx, dy = span["dir"]
+        displayed_x = dx * math.cos(angle) - dy * math.sin(angle)
+        total += count
+        if displayed_x < 0.9:
+            unresolved += count
     return unresolved >= 24 and unresolved >= 0.8 * total
 
 
@@ -43,15 +45,14 @@ def read_page(source, index: int, params: dict) -> dict:
         try:
             with rapid_ocr.FITZ_LOCK, rapid_ocr.open_source(source) as doc:
                 page = doc[index]
-                if strategy == "pymupdf" or text_layer_quality(page)["accepted"]:
-                    if _native_text_needs_orientation(page):
-                        result = {
-                            "page_index": index, "tables": [], "source": "native_pdf",
-                            "status": "unsupported", "reason": "native_text_orientation_unresolved",
-                        }
-                    else:
-                        tables = pdf_service._extract_tables_pymupdf(doc, index)
-                    if result is None and (tables or strategy == "pymupdf"):
+                if _native_text_needs_orientation(page):
+                    result = {
+                        "page_index": index, "tables": [], "source": "native_pdf",
+                        "status": "unsupported", "reason": "native_text_orientation_unresolved",
+                    }
+                elif strategy == "pymupdf" or text_layer_quality(page)["accepted"]:
+                    tables = pdf_service._extract_tables_pymupdf(doc, index)
+                    if tables or strategy == "pymupdf":
                         blank = (not page.get_text().strip() and not page.get_images()
                                  and not page.get_drawings())
                         result = {

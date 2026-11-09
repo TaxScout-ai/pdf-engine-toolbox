@@ -133,3 +133,31 @@ def test_small_vertical_margin_label_does_not_reject_upright_table():
         doc[0].insert_text((390, 480), 'COPY FOR RECIPIENT', rotate=90, fontsize=8)
         assert not table_pipeline._native_text_needs_orientation(doc[0])
         assert table_pipeline.read_page(doc.tobytes(), 0, {'strategy': 'pymupdf'})['status'] == 'complete'
+
+
+@pytest.mark.parametrize('invisible', ['render_mode', 'zero_opacity'])
+def test_invisible_rotated_text_does_not_reject_visible_upright_table(invisible):
+    import fitz
+    with fitz.open(stream=_oriented_native_table(0), filetype='pdf') as doc:
+        kwargs = {'render_mode': 3} if invisible == 'render_mode' else {'fill_opacity': 0}
+        doc[0].insert_text((390, 480), 'HIDDEN OCR TEXT ' * 30, rotate=90, fontsize=1, **kwargs)
+        assert not table_pipeline._native_text_needs_orientation(doc[0])
+        assert table_pipeline.read_page(doc.tobytes(), 0, {'strategy': 'pymupdf'})['status'] == 'complete'
+
+
+def test_visible_sideways_text_on_raster_background_cannot_bypass_abstention(monkeypatch):
+    import fitz
+    from app.services.ocr_preprocessing import text_layer_quality
+    monkeypatch.setattr(settings, 'table_fallback', 'docling')
+    fallback = Mock(side_effect=AssertionError('unqualified image fallback must not run'))
+    monkeypatch.setattr(table_docling, 'read_page_result', fallback)
+    monkeypatch.setattr(table_ocr, 'read_page_result', fallback)
+    with fitz.open(stream=_oriented_native_table(90), filetype='pdf') as doc:
+        pix = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 20, 20), False)
+        pix.clear_with(255)
+        doc[0].insert_image(doc[0].rect, pixmap=pix, overlay=False)
+        assert not text_layer_quality(doc[0])['accepted']
+        result = table_pipeline.read_page(doc.tobytes(), 0, {'strategy': 'auto'})
+        assert result['status'] == 'unsupported'
+        assert result['reason'] == 'native_text_orientation_unresolved'
+        fallback.assert_not_called()

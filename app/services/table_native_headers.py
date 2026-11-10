@@ -12,7 +12,10 @@ import fitz
 from app.services.table_native_rows import _rect, _compact
 
 
-def recover_headers(page, cells, columns):
+def recover_headers(page, cells, columns, table_bbox=None):
+    table_bounds = _rect(table_bbox)
+    if table_bounds is None:
+        return cells
     headers = [c for c in cells if c['row_index'] == 0]
     body = [c for c in cells if c['row_index'] != 0]
     if (page.rotation or not 4 <= columns <= 32 or not 1 <= len(body) <= 1000 or
@@ -70,24 +73,38 @@ def recover_headers(page, cells, columns):
     edges = [0] + [(a.x1+b.x0)/2 for a, b in zip(boxes, boxes[1:])] + [page.rect.width]
     witnesses = [set() for _ in groups]
     row_lines = {}
+    covered = Counter(tuple(w) for w in selected)
     for c in body:
-        if not c['text'].strip():
-            continue
         b = _rect(c.get('bbox'))
-        if b is None or b.y0 < band.y1:
+        if b is None:
             return cells
-        if c['column_span'] != 1:
-            continue  # Shared security/context rows stay exactly as supplied.
-        if c['row_span'] != 1:
-            return cells
-        col = c['column_index']
         source = [w for w in words if b.contains(fitz.Point((w[0]+w[2])/2, (w[1]+w[3])/2))]
-        if (not source or any(not edges[col] < (w[0]+w[2])/2 < edges[col+1] for w in source) or
+        if not c['text'].strip():
+            if source or c['raw_text'].strip():
+                return cells
+            continue
+        if b.y0 < band.y1 or c['row_span'] != 1:
+            return cells
+        col, span = c['column_index'], c['column_span']
+        # Spanning context is preserved, but dates or monetary values must have
+        # individual columns; exact concatenated text cannot prove attribution.
+        if span != 1 and (span < columns - 1 or not re.search(r'[A-Za-z]{2}', c['raw_text']) or
+                          re.search(r'\d[\d,]*\.\d+|\d{1,2}/\d{1,2}/\d{2,4}|[$€£]', c['raw_text'])):
+            return cells
+        if (not source or any(not edges[col] < (w[0]+w[2])/2 < edges[col+span] for w in source) or
                 _compact(' '.join(w[4] for w in sorted(source, key=lambda w: (round(w[1], 1), w[0]))))
                 != _compact(c['raw_text'])):
             return cells
-        witnesses[col].add(c['row_index'])
+        covered.update(tuple(w) for w in source)
+        if span == 1:
+            witnesses[col].add(c['row_index'])
         row_lines.setdefault(c['row_index'], []).extend(source)
+    # Account for every printed word inside the detected table, including blank,
+    # omitted and shared context cells. An overlap must not hide dropped rows.
+    expected = Counter(tuple(w) for w in words
+                       if table_bounds.contains(fitz.Point((w[0]+w[2])/2, (w[1]+w[3])/2)))
+    if covered != expected:
+        return cells
     previous_bottom = None
     for row in sorted(row_lines):
         evidence = row_lines[row]

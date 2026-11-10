@@ -10,6 +10,7 @@ from app.services.table_native_headers import recover_headers
 
 
 HEADERS = ['1c- Date sold', 'Quantity', '1d- Proceeds', '1b- Date acquired', '1e- Cost basis']
+TABLE_BBOX = dict(x0=10, y0=30, x1=590, y1=110)
 VALUES = [['01/01/25', '2', '120.00', '01/01/24', '100.00'],
           ['02/01/25', '3', '150.00', '02/01/24', '110.00']]
 
@@ -43,7 +44,7 @@ def fixture():
 def test_source_headers_recover_without_body_or_input_mutation():
     doc, cells = fixture()
     before = deepcopy(cells)
-    result = recover_headers(doc[0], cells, 5)
+    result = recover_headers(doc[0], cells, 5, TABLE_BBOX)
     assert result is not cells
     assert cells == before
     assert result[5:] == before[5:]
@@ -54,10 +55,23 @@ def test_source_headers_recover_without_body_or_input_mutation():
 
 @pytest.mark.parametrize('change', ['missing_word', 'extra_word', 'missing_geometry', 'header_rowspan',
                                   'body_column', 'body_text', 'body_row', 'body_rowspan', 'no_overlap',
-                                  'missing_date_marker', 'rotated', 'hidden', 'extra_source'])
+                                  'missing_date_marker', 'rotated', 'hidden', 'extra_source',
+                                  'blank_date', 'omitted_quantity', 'fabricated_span', 'unmapped_context',
+                                  'duplicate_body_geometry'])
 def test_uncertain_source_or_grid_does_not_bypass_overlap_validation(change):
     doc, cells = fixture()
-    if change == 'missing_word': cells[3]['raw_text'] = ''
+    if change == 'blank_date': cells[5]['text'] = cells[5]['raw_text'] = ''
+    elif change == 'omitted_quantity': cells.pop(6)
+    elif change == 'fabricated_span':
+        cells[5]['column_span'] = 2
+        cells[5]['raw_text'] = cells[5]['text'] = '12/31/99 999'
+        cells[5]['bbox']['x1'] = cells[6]['bbox']['x1']
+        cells.pop(6)
+    elif change == 'unmapped_context': doc[0].insert_text((30,87), 'UNMAPPED SECURITY', fontsize=5)
+    elif change == 'duplicate_body_geometry':
+        cells[11]['bbox'] = deepcopy(cells[6]['bbox'])
+        cells[11]['text'] = cells[11]['raw_text'] = cells[6]['raw_text']
+    elif change == 'missing_word': cells[3]['raw_text'] = ''
     elif change == 'extra_word': cells[2]['raw_text'] += ' OTHER'
     elif change == 'missing_geometry': cells[2]['bbox'] = None
     elif change == 'header_rowspan': cells[2]['row_span'] = 2
@@ -71,7 +85,7 @@ def test_uncertain_source_or_grid_does_not_bypass_overlap_validation(change):
     elif change == 'rotated': doc[0].set_rotation(90)
     elif change == 'hidden': doc[0].insert_text((30,200), 'HIDDEN', render_mode=3)
     elif change == 'extra_source': doc[0].insert_text((100,50), 'EXTRA', fontsize=7)
-    assert recover_headers(doc[0], cells, 5) is cells
+    assert recover_headers(doc[0], cells, 5, TABLE_BBOX) is cells
 
 
 def as_document(cells):
@@ -97,3 +111,13 @@ def test_mapper_requires_original_source_and_still_rejects_body_overlaps():
     model.tables[0].data.table_cells.append(model.tables[0].data.table_cells[7])
     with pytest.raises(TableStructureError, match='Overlapping'):
         map_document(model,4,native_page=pdf[0])
+
+
+def test_source_exact_spanning_financial_cells_are_not_context():
+    doc, cells = fixture()
+    # Even true source text cannot establish separate columns after merging.
+    cells[5]['column_span'] = 2
+    cells[5]['raw_text'] = cells[5]['text'] = '01/01/25 2'
+    cells[5]['bbox']['x1'] = cells[6]['bbox']['x1']
+    cells.pop(6)
+    assert recover_headers(doc[0], cells, 5, TABLE_BBOX) is cells

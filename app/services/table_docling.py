@@ -88,6 +88,9 @@ def map_document(document, page_index: int, *, strict: bool = True, native_page=
             provenance = item.prov[0]
             page = document.pages[provenance.page_no]
             width, height = page.size.width, page.size.height
+            table_box = provenance.bbox.to_top_left_origin(height)
+            table_bounds = pdf_bbox([table_box.l, table_box.t, table_box.r, table_box.b],
+                                    (0, 0), (1, 1), width, height)
             data = item.data
             if data.num_rows <= 0 or data.num_cols <= 0 or data.num_rows * data.num_cols > MAX_CELLS:
                 raise TableStructureError("Invalid table dimensions")
@@ -111,7 +114,7 @@ def map_document(document, page_index: int, *, strict: bool = True, native_page=
                 })
             if native_page is not None:
                 from app.services.table_native_headers import recover_headers
-                cells = recover_headers(native_page, cells, data.num_cols)
+                cells = recover_headers(native_page, cells, data.num_cols, table_bounds)
             occupied = set()
             for cell in cells:
                 r, c = cell['row_index'], cell['column_index']
@@ -121,8 +124,7 @@ def map_document(document, page_index: int, *, strict: bool = True, native_page=
                     raise TableStructureError("Overlapping table cells")
                 occupied.update(slots)
                 rows[r][c] = cell['text']
-            b = provenance.bbox.to_top_left_origin(height)
-            bbox = pdf_bbox([b.l, b.t, b.r, b.b], (0, 0), (1, 1), width, height)
+            bbox = table_bounds
             if bbox is None:
                 raise TableStructureError("Invalid table geometry")
             tables.append({

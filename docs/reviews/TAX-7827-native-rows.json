@@ -1,0 +1,161 @@
+{
+  "issue": "TAX-7827",
+  "pr": 27,
+  "reviewed_source_commit": "b13394b0de083964781fd50a8dab440b73fa3a45",
+  "scope": "Native source-backed transaction recovery in the optional Docling path; no default-path or production flag change",
+  "extra_round_authorization": "Founder explicitly approved one additional narrow pass after the three-round cap: Да, один узкий проход",
+  "checker": {
+    "verdict": "PASS",
+    "review_kind": "One founder-approved additional narrow independent pass beyond prior cap",
+    "authorization": {
+      "founder_quote": "Да, один узкий проход",
+      "scope": "Only delta47e6ff5..b13394b: physical adjacent CUSIP text-object coalescing and regression; no further review rounds authorized."
+    },
+    "reviewed_head": "b13394b0de083964781fd50a8dab440b73fa3a45",
+    "base": "47e6ff545b8699df2eca239d54cc8c07e6e78588",
+    "created_at": "2026-11-10T05:41:34.101672+00:00",
+    "files": [
+      "app/services/table_native_rows.py",
+      "tests/test_native_transaction_rows.py"
+    ],
+    "diff_sha256": "61dca86065e9b7a4f6da4c11d4f11b6264829fd9e6764d223811a24e0341496e",
+    "findings": [],
+    "conclusion": "Original F048 recovery restored; preceding terminal-CUSIP grammar, vertical shared-block coverage, no internal separator, one valid/one total CUSIP marker and full-row checks remain. Existing unsafe-header/blank-information protections retained.",
+    "checks": {
+      "focused_tests": "23 passed,1 existing deprecation warning in3.68s (entire native transaction row regression file only).",
+      "frozen_F048": "Original source and frozen Docling mapping now produce7rows, unresolved0, exactly1sharedsecuritycell withrow_span2; no overlapping grid spans or inputmutation.",
+      "coalescing_boundaries": "Adjacent same-baseline compatible-height text objects join. Different baseline, excessive gap, overlap and incompatible height do not join. Trailing description on same baseline fails terminal-CUSIP fullmatch.",
+      "prior_negative_controls": "Focused tests cover restriction hidden by blank cell, unrelated hidden/missing header with contradictory ordering, line separator, malformed second CUSIP, description after CUSIP, identifier on only one transaction, shifted body columns and ambiguous dates/amounts.",
+      "no_scope_expansion": true
+    },
+    "prior_evidence_retained": [
+      "checker-round1.json (historical blockers)",
+      "checker-round2.json (PASS, limitations retained)",
+      "checker-round3.json (historical F048 regression; resolved by this exact delta)"
+    ],
+    "evidence_sha256": {
+      "tests-extra-approved.log": "b6cff5fae247de6d897be741a059414a1c211c090d2a10ae36383253758ea8aa",
+      "probes-extra-approved.json": "97f0ab37b6726b142384a013c122282cc55e95365cec9024ecb453d8b8914696",
+      "checker-round2.json": "89095ae5e35aabb855c785367767470dce5193c20d673975ad57650df5b3b04a",
+      "checker-round3.json": "ccc8bb2574f082c5e6aa8ae61d768c242a5ce78a2b63b835f58353847497aeb5"
+    },
+    "source_sha256": {
+      "app/services/table_native_rows.py": "56174f806f897576198b82130ed52e76696a63fd23f7cc215059ea25a8883f9c",
+      "tests/test_native_transaction_rows.py": "2d3a5d4e16df56f15bfc371eff2a3af93082ff12689fb23ecb2e9de7c0a53401"
+    },
+    "clean_worktree": true,
+    "source_edits": false,
+    "production_actions": false,
+    "model_reruns": false,
+    "holdout_predictions_read": false,
+    "limitations": [
+      "Narrow delta approval, not general financial-table correctness or financial source/fact approval.",
+      "F048 replay uses frozen model mapping with exact original PDF; no new inference, performance, capacity or production validation.",
+      "Previous source-profile limits remain; no additional round initiated."
+    ]
+  },
+  "adversarial": {
+    "issue": "TAX-7827",
+    "pr": 27,
+    "review_type": "One explicitly approved additional narrow independent pass beyond three-round cap",
+    "authorization": {
+      "founder_quote": "Да, один узкий проход",
+      "provided_by": "Parent relayed explicit founder authorization in task message",
+      "scope": "47e6ff5..b13394b physical same-line CUSIP fragment coalescing only, prior probes reused; no expansive audit or subsequent rounds"
+    },
+    "reviewed_at": "2026-11-10T05:42:09.997778+00:00",
+    "verdict": "CLEAN",
+    "source_sha": "b13394b0de083964781fd50a8dab440b73fa3a45",
+    "base_sha": "47e6ff545b8699df2eca239d54cc8c07e6e78588",
+    "tree_sha": "914dd236209f1cd32f83c8855f35fc470c863cc8",
+    "working_tree_clean_at_completion": true,
+    "diff_sha256": "61dca86065e9b7a4f6da4c11d4f11b6264829fd9e6764d223811a24e0341496e",
+    "findings": [],
+    "resolved_final_blocker": {
+      "id": "NATIVE-ROW-ADV-5",
+      "proof": "Exact committed implementation and committed fixture replay restores original F048 PDF/frozen Docling result to one table,7rows,unresolved0. Terminal CUSIP label and identifier may come from separate native text-object groups on the same physical line."
+    },
+    "independent_checks": {
+      "exact_commit_runner": "extra-exact-commit-replay.py",
+      "original_adapter_cases": "Shifted body; second unread CUSIP; missing unrelated header inversion; hidden-glyph inversion all remain unsupported with zero tables. Original positive fixture remains complete with4rows.",
+      "shared_security_cases": "New-security text after CUSIP, sole one-row CUSIP and identity failing to cover third transaction baseline all remain withheld. Valid description plus terminal CUSIP still recovers.",
+      "coalescing_controls": {
+        "same_printed_line": "PASS",
+        "separate_baselines": "PASS,not coalesced",
+        "distant_column": "PASS,not coalesced",
+        "different_text_height": "PASS,not coalesced",
+        "overlapping_text": "PASS,not coalesced",
+        "following_same_line_security": "PASS,preserved text prevents terminal CUSIP fullmatch"
+      },
+      "focused_test_result": "23passed,1 existing deprecation warning,2.36s"
+    },
+    "code_review": [
+      "New helper only changes the security branch positive line grammar. Dates, numeric columns, header corridors, body ordering, span ownership, source-word checks and quarantine behavior are unchanged.",
+      "Coalescing requires near-identical vertical centers/heights, nonoverlapping left-to-right boxes and a bounded horizontal gap. It concatenates all text and union bounds; it neither drops text nor substitutes values.",
+      "Original exact source-text match and single-CUSIP-marker checks still apply. Terminal fullmatch remains mandatory, as do description presence, coverage of all transaction baselines and separator rejection.",
+      "No new model, global Docling activation, credentials, network calls or fact approval introduced."
+    ],
+    "limits": [
+      "Approval is scoped code review, not deployment acceptance, whole-document accuracy or independent CPA adjudication.",
+      "Expensive converter/map outputs are stubbed for synthetic adapter probes; F048 replay uses unchanged frozen model output and original PDF. No new model inference or production actions.",
+      "No full-corpus rerun in this pass. Previous benchmark gains must be bound to their own exact-source replay evidence.",
+      "Only requested extra pass performed. Prior receipts preserved; no subsequent review round implied."
+    ],
+    "source_files_sha256": {
+      "app/services/table_native_rows.py": "56174f806f897576198b82130ed52e76696a63fd23f7cc215059ea25a8883f9c",
+      "tests/test_native_transaction_rows.py": "2d3a5d4e16df56f15bfc371eff2a3af93082ff12689fb23ecb2e9de7c0a53401"
+    },
+    "evidence_sha256": {
+      "extra-two-security-names.pdf": "bd7473dca5e4e2f26fc09766628c251b65d981546e05b77cb448e589e516af1a",
+      "extra-second-unread-security.pdf": "146c7c19653d01c071b2d76fd409df4d1896cd55cdde5773ac2baf38039d0c0b",
+      "extra-coalescing-controls.json": "68a2605a37448470919d0d2b3d3b38b9e78d8505abe58febaabc8fa91a69124f",
+      "extra-final-results.json": "8053abc32d4b2c136c63608059b30f6c454438e38a9b390b8024142c95b0504b",
+      "extra-final-probes.py": "a9cb905ec96d062e1acc1439307c9dd276c1d0e13fbbfff54f847d28c39a7774",
+      "extra-exact-commit-replay.py": "2afd29a7e04140f9d3914d5a1fc04cedcf17b2fb4a73fa1957be7dfacbc0c943",
+      "extra-adapter-probes.py": "a17650bec32db6fe9583b01537b8a6c2e4925d80b17d5dc4337826072c9db4d9",
+      "extra-probe-results.json": "f70cf7c6ff61fed7a078b1ccc5d75588fbd9d88bca5b6695faadc715870e0b23",
+      "extra-focused-tests.log": "c37cd11a58b956867cf0e6ccb8ccb11259a71a44a5f0852c6f5d74fc85b03dee",
+      "extra-frozen-fixtures.py": "2d3a5d4e16df56f15bfc371eff2a3af93082ff12689fb23ecb2e9de7c0a53401",
+      "extra-adapter-results.json": "d2bd573b88c6d196cf9d1074249901ae32e19a6edbc19f6131299b60d9dd9ca1",
+      "extra-probes.py": "40624ad6667f7a60112598bbb85ee49f0cecf792c819cf998ecd0a5c4c6107ca",
+      "extra-shifted-body.pdf": "1e8c33290f77e0460004722306f009f14ba5247e9b8085dba49b319fbdc06a82"
+    },
+    "original_inputs_sha256": {
+      "corpus/F048.pdf": "9e16fa41c884d44ce22e54c841f138839fc33d4fa11e0554dc3a1aaa42e57019",
+      "docling2142-engine-results/F048.json": "cd28ea1863a50fec9cb1dab17bdd6954ce4f2cfc4d78a5d59ba68a75c1d12886"
+    }
+  },
+  "qualification": {
+    "targeted_tests": {
+      "passed": 102,
+      "skipped": 1
+    },
+    "development_money_cells": {
+      "labelled": 457,
+      "exact": 420,
+      "missing": 32,
+      "wrong": 5
+    },
+    "independent_holdout": {
+      "source_documents": 4,
+      "labelled_money_cells": 199,
+      "scalar_evaluator_cells": 196,
+      "exact": 161,
+      "missing": 33,
+      "wrong": 2,
+      "separate_W_qualifier_checks": {
+        "checked": 3,
+        "full_text_and_geometry_matches": 3
+      },
+      "candidate_improves_over_raw_docling": false
+    },
+    "production_rollout_approved": false,
+    "production_fallback": "none",
+    "limitations": [
+      "Narrow final delta approval reuses earlier independent review findings and fixes; not general financial-table qualification.",
+      "Known holdout column merges, missing table structure and scalar-cell mismatches remain.",
+      "No owner, tax-year, current-document or tax-fact approval established by table extraction.",
+      "TAX-7827 stays open; enabling fallback requires separate accuracy and resource qualification."
+    ]
+  }
+}

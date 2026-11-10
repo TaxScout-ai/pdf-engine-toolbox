@@ -250,7 +250,8 @@ TAX-9096 such a page passed the render limit and was refused as "OCR failed".
 An SSN or EIN in exact group shape inside a longer digit run is an identifier
 too: a label read with confusions joins the number ("TaxID-123-45-6789" reads
 as one 11-digit run) and was sent whole before TAX-9096; in a text layer, a
-dash after a letter ("ID-123-45-6789") no longer hides the number. The check pass knows the module's own black
+dash before the number ("ID-", "W2-") no longer hides it; an identifier shape
+inside a longer dashed number is masked as well. The check pass knows the module's own black
 boxes: they do not darken the background estimate, so the paper strip between
 boxes on neighbouring table rows is not read as light print on a dark fill.
 Amounts, dates, ZIP+4 and phone numbers are not

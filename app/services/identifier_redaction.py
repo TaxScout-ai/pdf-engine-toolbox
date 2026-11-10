@@ -35,9 +35,10 @@ import structlog
 log = structlog.get_logger()
 
 # 123-45-6789 / 123 45 6789: an SSN or ITIN. ZIP+4 (12345-6789) is 5-4.
-# A dash before it is allowed after a letter: a label joined to the number
-# ("ID-123-45-6789", TAX-9096) is not a longer number.
-_NOT_AFTER_NUMBER = r"(?:(?<![\d-])|(?<=[A-Za-z]-))"
+# No digit right before it. A dash before it may follow a label ("ID-",
+# "(SSN)-", "W2-"; TAX-9096) as well as a longer number; an identifier shape
+# inside a longer dashed number is masked too — over-masking, never a leak.
+_NOT_AFTER_NUMBER = r"(?<!\d)"
 _SSN = re.compile(_NOT_AFTER_NUMBER + r"(\d{3})([- ])(\d{2})\2(\d{4})(?![\d-])")
 # 12-3456789: an EIN.
 _EIN = re.compile(_NOT_AFTER_NUMBER + r"(\d{2})-(\d{7})(?![\d-])")
@@ -46,7 +47,7 @@ _EIN = re.compile(_NOT_AFTER_NUMBER + r"(\d{2})-(\d{7})(?![\d-])")
 _LABELED_BARE = re.compile(
     r"\b(?:SSN|TIN|EIN|FEIN|ITIN|social\s+security(?:\s+number)?|"
     r"(?:taxpayer|employer|payer'?s?|recipient'?s?|borrower'?s?|student'?s?)\s+"
-    r"(?:identification|id)(?:\s+(?:number|no\.?))?|identification\s+number)\b"
+    r"(?:identification|id)(?:\s+(?:number|no\.?))?|identification\s+number)(?![A-Za-z])"
     r"[^\d\n]{0,40}(\d{9})(?!\d)",
     re.IGNORECASE,
 )
@@ -353,8 +354,8 @@ def _matches(line: str, ocr: bool = False) -> Iterable[tuple[int, int, str, str]
 
 
 def _embedded_identifiers(text: str, start: int, end: int):
-    """Identifiers in exact SSN (3-2-4) or EIN (2-7) group shape inside a
-    longer digit run (TAX-9096).
+    """Identifiers in exact SSN (3-2-4), EIN (2-7) or bare (9) group shape
+    inside a longer digit run (TAX-9096).
 
     A label read with confusions joins the number: "TaxID-123-45-6789" reads
     "Tax10-123-45-6789", one 11-digit run that is neither an identifier nor
@@ -363,13 +364,21 @@ def _embedded_identifiers(text: str, start: int, end: int):
     """
     groups = [(m.start() + start, m.end() + start)
               for m in re.finditer(r"\d+", text[start:end])]
-    for shape, kind in (((3, 2, 4), "ssn"), ((2, 7), "ein")):
+    for shape, kind in (((3, 2, 4), "ssn"), ((2, 7), "ein"), ((9,), "tin")):
         n = len(shape)
         for i in range(len(groups) - n + 1):
             window = groups[i:i + n]
-            if tuple(e - s for s, e in window) == shape:
-                s0, e0 = window[0][0], window[-1][1]
-                yield s0, e0, kind, re.sub(r"\D", "", text[s0:e0])
+            lengths = tuple(e - s for s, e in window)
+            # The first group may be longer: a label read as digits joined to
+            # it with no separator ("Tax10" + "123-45-6789"). Its own digits
+            # are the last of that group. A lone 9-digit group must be exact.
+            if lengths[1:] != shape[1:] or not (
+                lengths[0] == shape[0] or (n > 1 and lengths[0] > shape[0])
+            ):
+                continue
+            s0 = window[0][1] - shape[0]
+            e0 = window[-1][1]
+            yield s0, e0, kind, re.sub(r"\D", "", text[s0:e0])
 
 
 def _lines(words: list[Word]) -> list[list[Word]]:

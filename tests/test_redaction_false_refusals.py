@@ -406,3 +406,35 @@ def test_an_ssn_joined_to_a_label_in_a_text_layer_is_redacted():
     page.insert_text((72, 100), "Employee ID-912-34-5678 and EIN-00-1234567", fontsize=11)
     result = ir.redact_identifiers(doc.tobytes(), ocr=lambda *_: {})
     assert sorted(r["kind"] for r in result["redactions"]) == ["ein", "ssn"]
+
+
+@pytest.mark.parametrize("label", ["TaxID", "ID", "TaxID ", "ID-"])
+def test_an_identifier_joined_to_a_label_without_a_separator_is_found(label):
+    """Round 2: "ID" read as "10" and run into the SSN, or before nine bare digits."""
+    for number in ("912-34-5678", "912345678"):
+        text = ir.normalize_confusions(f"{label}{number}")
+        found = list(ir._matches(text, ocr=True))
+        if not found:
+            # Nine bare digits run into "10" with no separator: one block of
+            # eleven, which is never sent — the page is refused.
+            assert number == "912345678" and ir.suspect_runs(f"{label}{number}"), label
+            continue
+        assert found[0][3] == number.replace("-", "")
+
+
+@pytest.mark.parametrize("label", ["Employee (SSN)-", "Employee SSN:-", "Employee SSN#-",
+                                   "Employee TIN -", "Employee W2-", "SSN"])
+def test_a_text_layer_identifier_after_any_label_is_redacted(label):
+    for number in ("912-34-5678", "912345678") if label == "SSN" else ("912-34-5678",):
+        doc = fitz.open()
+        doc.new_page(width=612, height=792).insert_text((72, 100), f"{label}{number}",
+                                                       fontsize=11)
+        result = ir.redact_identifiers(doc.tobytes(), ocr=lambda *_: {})
+        assert result["redactions"], label
+
+
+def test_a_longer_number_is_still_not_an_identifier_in_a_text_layer():
+    doc = fitz.open()
+    doc.new_page(width=612, height=792).insert_text(
+        (72, 100), "Ref 2025-123-45-678901 and 1-12-3456789-0", fontsize=11)
+    assert ir.redact_identifiers(doc.tobytes(), ocr=lambda *_: {})["redactions"] == []

@@ -1,0 +1,193 @@
+{
+  "issue": "TAX-9522",
+  "parent": "TAX-7827",
+  "pr": 29,
+  "reviewed_source_commit": "30b80e4e2fd5614241a33a050907a11e3f5b1e21",
+  "scope": "Conservative native-source repair of overlapping 1099-B headings in the optional Docling path",
+  "checker": {
+    "schema_version": 1,
+    "issue": "TAX-9522",
+    "round": 3,
+    "reviewer": "independent_checker",
+    "verdict": "PASS",
+    "reviewed_sha": "30b80e4e2fd5614241a33a050907a11e3f5b1e21",
+    "previous_sha": "e51b893c08d713e8dd3f7e66bffe7fe01bab5e83",
+    "created_at": "2026-11-10T21:20:00.309776+00:00",
+    "scope": "Bounded final context-admission delta, preserving prior source/integration review evidence; no additional review round or unrelated holdout work.",
+    "source_sha256": {
+      "app/services/table_native_headers.py": "9edd668c4dcd3ca66cd738918ead9eb37296d387dc4a3b107dc1eab58b075863",
+      "app/services/table_docling.py": "2df7d1cf8b0e98a2a098e4cf8651e9229c91d2c73686fde322e4bc1d880773d4",
+      "tests/test_native_table_headers.py": "0fdc0663977a66435d7d7fa15b87b5b77683e9a835b2c4b0b953d5d13818a66e"
+    },
+    "diff_sha256": "abd49ce81202beabf4e6454b7b557a122395f2ccc0953b714e3b77b940523df1",
+    "prior_receipts": [
+      "/home/taxscout/.codex/artifacts/TAX-7827-structure-20261110/checker/checker-round1.json",
+      "/home/taxscout/.codex/artifacts/TAX-7827-structure-20261110/checker/checker-round2.json"
+    ],
+    "findings": [],
+    "resolved_findings": [
+      "R1-1: blank/omitted native words are withheld; source region coverage retained.",
+      "R1-2: fabricated spanning context is withheld; exact source text and geometry required.",
+      "R2-1: merged plain-integer total and Various transaction rows both withheld by actual mapper/refiner, with 0 tables and 1 unresolved."
+    ],
+    "observations": [
+      "Positive context admission is limited to the explicit security-heading or transaction-summary grammar; generic alphabetic spanning rows no longer qualify.",
+      "Spanning source words must also form a physically continuous line with bounded gaps; separated amount columns with an appended security marker are rejected by regression.",
+      "Exact native coverage, body source verification, row order, header proof and downstream overlap validation remain in place.",
+      "Adapter is byte-identical to round2; original source/page handling and native row refinement unchanged."
+    ],
+    "independent_tests": {
+      "command": "/home/taxscout/.codex/artifacts/TAX-7070/docling-venv/bin/python -m pytest -q tests/test_native_table_headers.py tests/test_native_transaction_rows.py tests/test_table_evidence.py",
+      "result": "68 passed, 1 dependency deprecation warning in 2.16s",
+      "log": "/home/taxscout/.codex/artifacts/TAX-7827-structure-20261110/checker/round3-tests.log",
+      "probe_result": "Seven replay cases: unchanged baseline retained; four round1 failure cases and both round2 integer-span cases withheld. Supported security and transaction-summary positives included in focused suite."
+    },
+    "artifact_sha256": {
+      "round3-tests.log": "9d7dae538947bf8e6fc0f732d2e4f45e38d931e4ad68c719ebdbc9270cda3aca",
+      "header-probes.py": "0726057774ece68a4c18588de4f1fe5dbd172636d1d7a349ed47e896b74f8924",
+      "header-probes-round3.json": "6c0d1e274981ea7706b6a4bd6cec8957c1cb7b844e0cb7448b3a18c9f673c3dc",
+      "header-spanning-integers.py": "b41a651caab495f48d9c4d991eb508ef02e589d7f92c26541dc95bc8f37d1efd",
+      "header-spanning-integers-round3.json": "3cd2dc36261f92cd72a15bdd0e0fa0a6f4bcd76d68592d187bcaee37d7f50852"
+    },
+    "limitations": [
+      "PASS applies to this bounded header-recovery change, not general financial table correctness, source eligibility or production approval.",
+      "Parent 128-test/model/corpus evidence was not independently rerun during this bounded delta check.",
+      "H005/H006 frozen source labels unchanged; H006 is orientation robustness only. No model prediction files read for this review.",
+      "No repository edits, production actions or model inference."
+    ],
+    "working_tree_clean_at_review": true
+  },
+  "adversarial": {
+    "issue": "TAX-9522",
+    "review": "final planned bounded adversarial logic round 3",
+    "verdict": "CLEAN",
+    "reviewed_at_utc": "2026-11-10T21:21:02.334103+00:00",
+    "source_sha": "30b80e4e2fd5614241a33a050907a11e3f5b1e21",
+    "tree_sha": "0f50eac217100e1e08f002020f56c32db8db13e5",
+    "delta_base_sha": "e51b893c08d713e8dd3f7e66bffe7fe01bab5e83",
+    "scope_file_sha256": {
+      "app/services/table_native_headers.py": "9edd668c4dcd3ca66cd738918ead9eb37296d387dc4a3b107dc1eab58b075863",
+      "app/services/table_docling.py": "2df7d1cf8b0e98a2a098e4cf8651e9229c91d2c73686fde322e4bc1d880773d4",
+      "tests/test_native_table_headers.py": "0fdc0663977a66435d7d7fa15b87b5b77683e9a835b2c4b0b953d5d13818a66e"
+    },
+    "scope_delta_sha256": "abd49ce81202beabf4e6454b7b557a122395f2ccc0953b714e3b77b940523df1",
+    "working_tree_clean": true,
+    "findings": [],
+    "resolved_findings": [
+      {
+        "id": "HEADER-ADV-1",
+        "confirmation": "Invented body-span date/amount and source-exact cross-field merge all remain unsupported."
+      },
+      {
+        "id": "HEADER-ADV-2",
+        "confirmation": "Blank/absent printed amount, blank date, and unmodeled between-row security text remain unsupported."
+      },
+      {
+        "id": "HEADER-ADV-3",
+        "confirmation": "Original integer-money/hyphenated-date and VARIOUS-date merged transaction probes now unsupported; decimal counterpart also remains unsupported."
+      }
+    ],
+    "reviewed_behavior": [
+      "Shared spans require the explicit full CUSIP-plus-Symbol heading or exact printed transaction-summary sentence.",
+      "Source word continuity rejects the tested separate physical value columns even when their concatenation includes the security grammar.",
+      "All body source matching, exact native-word coverage, blank-cell checks and physical row order protections from round 2 remain in place.",
+      "No table_docling integration change occurred in this final delta; no new rollout switch or general fact-approval behavior was added."
+    ],
+    "validation": {
+      "focused_committed_suite": "26 passed in 0.20s; tests/test_native_table_headers.py",
+      "independent_actual_adapter_probes": 19,
+      "positive_controls": 4,
+      "negative_controls": 15,
+      "positive_results": "Original two-/three-transaction controls and both recognized context grammars return complete; transaction rows remain unchanged.",
+      "additional_negative_controls": "Short CUSIP, appended second context, summary tail and separately positioned values with a security marker all return unsupported.",
+      "runtime_scope": "Actual read_page_result/map_document/refine_native_tables on genuine generated native PDFs; only model inference is stubbed to inject controlled Docling structures. No external calls, OCR inference, production or source modifications.",
+      "parent_reported_not_recounted_as_independent_validation": "128 broader tests plus one optional skip, H002/H005 raw-model replay and unchanged archived non-overlap pages were reported by parent; this receipt independently covers the bounded code delta and adversarial controls."
+    },
+    "claim_limits": [
+      "CLEAN applies to this bounded header-repair review, not universal table accuracy or deployment acceptance.",
+      "No expansion into historical holdout/model limitations; H006 direct model behavior is not asserted to bypass application orientation abstention.",
+      "This completes the third planned logic-review round."
+    ],
+    "evidence_sha256": {
+      "probes.py": "41d68c41204f6ee844b92173c65d37f968bbf47180e5051eaf11c4a77b776218",
+      "blank_date_over_printed_date.pdf": "c2b30983f8e5fb753e81a452efec71aa0c14dbf36a046c6eee196bebbdecdeed",
+      "source-hashes.json": "126453bffa6b93fe74aa485529ef0b72512c185a08f17a1907ebf7b76a16150b",
+      "spanned_decimal_transaction.pdf": "def4649a49c6751645bfc2619d8696b03d4e1dd4f11ebe4fae1c087da52a03cd",
+      "unmodeled_restriction.pdf": "736aedc0e04f43722412751df52e683bfdd6c2343508661c794c80d250b0b6ee",
+      "three_row_positive.pdf": "d544aadb9f9383649b66133a7b2e7fa3a3375da3134929a0a735644fe675db83",
+      "span-boundary.log": "a0e6530ab52ee131eb5100de1a041b87145f6023f30c3cfdd2672feb343eea72",
+      "span-boundary.py": "7d5bae3fe48cb6669839efb48c80fac787ff74018d5d811e54f4bf78f52fc4bd",
+      "reviewed-delta.diff": "abd49ce81202beabf4e6454b7b557a122395f2ccc0953b714e3b77b940523df1",
+      "frozen-table_docling.py": "2df7d1cf8b0e98a2a098e4cf8651e9229c91d2c73686fde322e4bc1d880773d4",
+      "ordinary_wrong_body_text.pdf": "682ddffb958e069df324bdc13be23718c6ed027be2016b135c496780debc4577",
+      "frozen-table_native_headers.py": "9edd668c4dcd3ca66cd738918ead9eb37296d387dc4a3b107dc1eab58b075863",
+      "three-row-results.json": "5a3c4055ccc9932e45994daac9828202880cca3b66a677739bc76a5e84e85f01",
+      "probes.log": "51eb01e5a6091bc3a02c084acd4597b6d4504db279e94698f08613587db9eb92",
+      "positive.pdf": "04499771a346b99ba11c7390cff44030100055ceb0be80499e267b8e609bd927",
+      "forged_spanning_body.pdf": "32ae8ade44dc21399b8a88b7ce0b50979dd99cd95132714b5c4d58cc842078ec",
+      "probe-results.json": "51eb01e5a6091bc3a02c084acd4597b6d4504db279e94698f08613587db9eb92",
+      "blank_cost_over_printed_amount.pdf": "1277ff7f750558272c918413d3909890875716f6ad409d7d3ccfac79a32d3d96",
+      "spanned_various_transaction.pdf": "28bdb3f765f5a9f22c0b42e2a67e7356656d5e3e813d4c1051b58e80dc581dfa",
+      "spanned_integer_transaction.pdf": "b967f38090d3fd43ae6b93b8b5981374d3b0a2acc8e6ff2ae65e1160333083fe",
+      "three-row-probes.py": "b80823237bcfe8d263b912a3be1dc9e840d19fac769b0c973db5e76cd5049a37",
+      "frozen-test_native_table_headers.py": "0fdc0663977a66435d7d7fa15b87b5b77683e9a835b2c4b0b953d5d13818a66e",
+      "real_spanning_body.pdf": "5107a414f0871cfb60c75a9a3339bb44fc54ccd803803858a3d008e57e6e8919",
+      "forged_spanning_cost.pdf": "67e0c594a34e04ca8f16d4bdd585bebbf738a84ef1fff0e51228fde4d6519276",
+      "missing_cost_cell.pdf": "c566401eec16a8178afb4369984cf9415ef0daf7b4280fc548a66175b5cce021",
+      "three-row-probes.log": "5a3c4055ccc9932e45994daac9828202880cca3b66a677739bc76a5e84e85f01",
+      "span-boundary-results.json": "a0e6530ab52ee131eb5100de1a041b87145f6023f30c3cfdd2672feb343eea72",
+      "write-receipt.py": "b3a94e94b204b2e43f3329b1c70989a95688b70adb6a1a1381d30b2ba36b4bdb",
+      "context-controls-results.json": "029e7cfda52b0e3bd4c54a6f4c624ca626174b3669fb8ab6d1608c6d5b71340e",
+      "context-controls.py": "b2f67b8d651af87a25dec6d18b6c5c7e6ec8541d1e5f4287b29f9b537f5c726d"
+    }
+  },
+  "validation": {
+    "suite": "128 passed in focused suite; initially skipped real-model scan test separately passed with pinned cached RapidOCR/RapidTable weights in 4.52 s (129 tests total)",
+    "old_development_pages": {
+      "count": 40,
+      "result": "Previously mapped nonoverlapping outputs byte-equivalent after helper; no fresh inference and no full-source completeness claim"
+    },
+    "development_H002": {
+      "money_correct": 32,
+      "money_total": 32,
+      "contained_source_boxes": 32,
+      "seconds": 13.932,
+      "path": "Actual auto pipeline with local Docling fallback enabled"
+    },
+    "blind_content_holdout_H005": {
+      "money_correct": 19,
+      "money_total": 19,
+      "contained_source_boxes": 19,
+      "seconds": 4.874,
+      "labelled_rows": 5,
+      "path": "Actual auto pipeline with local Docling fallback enabled"
+    },
+    "orientation_H006": {
+      "status": "unsupported",
+      "reason": "native_text_orientation_unresolved",
+      "seconds": 0.004,
+      "note": "Financially duplicate H001; not independent-content accuracy evidence. Direct Docling results are poor; normal pipeline safely abstains."
+    },
+    "model_profile": "Docling 2.142.0 TableFormer ACCURATE, cell matching enabled, RapidOCR PP-OCRv6 small CPU ONNX; cached weights, offline, one intra-op thread",
+    "peak_process_rss_mib": 1515.09,
+    "timing_limit": "Single sequential local run, not concurrency/capacity or production benchmark"
+  },
+  "rollout": {
+    "availability_after_merge": "nobody in production",
+    "production_table_fallback": "none",
+    "config_changed": false,
+    "next_review": "2026-11-13",
+    "parent_remains_open": true
+  },
+  "limits": [
+    "No universal table accuracy claim. Original H001 merged final column and H004 value/summary failures remain.",
+    "No automatic CPA approval, tax-owner/year inference or source-eligibility promotion.",
+    "Model readiness, combined load and production image qualification are separate release requirements."
+  ],
+  "artifact_sha256": {
+    "final-replay-report.json": "b9a123c12caed0e4646618b648cf84e6973b918bcd89e61cfc5db6173e96f4cd",
+    "pipeline-final/score.json": "db88e9babde35c68fd1cf049a3b54cedb77bb65d5740b1dce77f36f6f74f722d",
+    "pipeline-final/holdout-default-path-receipt.json": "2b491e30bd8a21281abf8661a5800fa5a019643f439da4fcc82cf010d41215ff",
+    "checker/holdout-source/labels-H005-H006.private.json": "5a7a1037d8cee3ffd0314d4d434e8f3573435f7832f7efa21d9ebfe3f36405b0"
+  }
+}

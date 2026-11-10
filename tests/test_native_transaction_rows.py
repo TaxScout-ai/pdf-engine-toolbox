@@ -164,3 +164,51 @@ def test_duplicate_printed_box_label_does_not_qualify_as_two_date_roles():
     headers = [dict(text=h, column_index=i) for i, h in enumerate(HEADERS)]
     headers[3]['text'] = 'Date Sold (Box 1b)'
     assert _profile(headers) is None
+
+
+def test_blank_information_box_cannot_conceal_a_printed_restriction():
+    doc, table = fixture(annotation=True)
+    table['cells'].append(dict(page_index=7, row_index=1, column_index=9,
+                              row_span=1, column_span=1, text='', raw_text='', is_header=False,
+                              bbox=dict(x0=1160, y0=90, x1=1290, y1=130)))
+    assert run(table, doc) == ([], 1)
+
+
+@pytest.mark.parametrize('unrelated', ['hidden', 'missing_header'])
+def test_unrelated_missing_or_hidden_text_cannot_erase_known_header_conflict(unrelated):
+    doc, table = fixture(hidden=unrelated == 'hidden')
+    for c in table['cells']:
+        if c['column_index'] in (2, 3):
+            c['column_index'] = 5 - c['column_index']
+    if unrelated == 'missing_header':
+        table['cells'] = [c for c in table['cells'] if not (c['is_header'] and c['column_index'] == 9)]
+    assert run(table, doc) == ([], 1)
+
+
+def test_shared_security_cannot_cross_a_printed_transaction_separator():
+    doc, table = fixture()
+    doc[0].draw_line((0, 106), (1290, 106))
+    assert run(table, doc) == ([], 1)
+
+
+def test_unresolved_second_security_is_not_a_shared_description():
+    values = deepcopy(VALUES)
+    values[0] = ['CUSIP: 111111111', 'CUSIP: UNKNOWN']
+    doc, table = fixture(values=values)
+    assert run(table, doc) == ([], 1)
+
+
+def test_ordered_body_columns_shifted_under_different_headers_are_rejected():
+    doc, table = fixture()
+    # Shift both source glyphs and claimed source boxes, preserving body order.
+    source = fitz.open()
+    source.insert_pdf(doc)
+    shifted = fitz.open()
+    page = shifted.new_page(width=1430, height=200)
+    page.show_pdf_page(fitz.Rect(0, 0, 1300, 80), source, 0, clip=fitz.Rect(0, 0, 1300, 80))
+    page.show_pdf_page(fitz.Rect(128, 80, 1428, 140), source, 0, clip=fitz.Rect(0, 80, 1300, 140))
+    for c in table['cells']:
+        if c['row_index'] == 1:
+            c['bbox']['x0'] += 128
+            c['bbox']['x1'] += 128
+    assert run(table, shifted) == ([], 1)

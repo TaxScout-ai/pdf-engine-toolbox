@@ -151,7 +151,12 @@ def read_page_result(source, index: int) -> dict:
                 result["reason"] = "fallback_conversion_incomplete"
                 return result
             tables = map_document(converted.document, index, strict=False)
-        if tables.unresolved_tables:
+        unresolved = tables.unresolved_tables
+        from app.services.table_native_rows import refine_native_tables
+        with rapid_ocr.FITZ_LOCK, rapid_ocr.open_source(data) as original:
+            tables, native_unresolved = refine_native_tables(original[0], tables)
+        unresolved += native_unresolved
+        if unresolved:
             result.update(tables=tables, status="unsupported", reason="fallback_invalid_table_structure")
         elif tables:
             result.update(tables=tables, status="complete", reason=None)

@@ -242,7 +242,13 @@ digits (`I l | O o D S s B Z G q`, so "I23-45-678S" is an SSN). Any run of
 exactly nine digits with any separators — spaces, dashes, dot leaders — is an
 identifier, as is a group continued on the line below ("123-45-" / "6789").
 Everything but the last four digits is blacked out. A rotated reading is
-blacked out whole. Amounts, dates, ZIP+4 and phone numbers are not
+blacked out whole. An image saved without a usable DPI (a photo, or a scan
+saved at 72 DPI) is placed on a page sized so the OCR render is the image at
+its own pixel size; before TAX-9096 such a page passed the render limit and
+was refused as "OCR failed". The check pass knows the module's own black
+boxes: they do not darken the background estimate, so the paper strip between
+boxes on neighbouring table rows is not read as light print on a dark fill.
+Amounts, dates, ZIP+4 and phone numbers are not
 identifiers.
 
 **When a page is refused** (the document goes to manual review instead of
@@ -250,7 +256,11 @@ being returned):
 - OCR failed on a page;
 - a reading is one or two digits off an identifier's shape (7–11 digits in
   3-2-4, 2-7 or one block), or is a comb field read digit by digit — a
-  misread identifier looks like this;
+  misread identifier looks like this. Exception (TAX-9096): when the run is
+  the digits of a lettered reference number joined to it ("NW-2025-004417", a
+  W-2 control number; not a label such as "SSN-" or "TIN/"), the whole run,
+  last four digits included, is blacked out instead, and the check refuses
+  the page if any near-identifier run is still readable over that box;
 - print that no reading covers could hold an identifier: a run of 4+ marks on
   a line (horizontal or vertical), a run about nine digits long, or digit-sized
   printed marks anywhere on the page summing to nine or more, whatever the

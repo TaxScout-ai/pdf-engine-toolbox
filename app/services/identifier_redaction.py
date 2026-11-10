@@ -23,7 +23,9 @@ is never returned.
 
 from __future__ import annotations
 
+import math
 import re
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Callable, Iterable
 
@@ -57,6 +59,11 @@ _MIN_AVG_TOKEN_LEN = 3.0
 # text layer does not carry (a scanner app's text layer over a photo), so it is
 # OCRed too.
 _IMAGE_COVERAGE_FOR_OCR = 0.5
+
+
+# The black boxes this module drew, per page, while the check pass reads the
+# redacted document (TAX-9096). Set only around that call.
+_OWN_FILLS: ContextVar[dict[int, list[fitz.Rect]]] = ContextVar("own_fills", default={})
 
 
 class RedactionIncompleteError(Exception):
@@ -190,13 +197,17 @@ def suspect_runs(text: str) -> list[str]:
     by box, however many boxes were missed); "OMB No. 1545-0029" (4,4),
     "2025-0417" or a 12-digit account number do not.
     """
-    text = normalize_confusions(text)
+    return [digits for _, _, digits in _suspect_spans(normalize_confusions(text))]
+
+
+def _suspect_spans(normalized: str) -> list[tuple[int, int, str]]:
+    """(start, end, digits) of the suspect runs in confusion-normalized text."""
     suspects = []
-    for start, end, digits in _digit_runs(text):
-        groups = tuple(len(g) for g in re.findall(r"\d+", text[start:end]))
+    for start, end, digits in _digit_runs(normalized):
+        groups = tuple(len(g) for g in re.findall(r"\d+", normalized[start:end]))
         if len(groups) >= 4 and max(groups) <= 2 and len(digits) != 9:
             # A comb field read digit by digit, some boxes missed or misread.
-            suspects.append(digits)
+            suspects.append((start, end, digits))
             continue
         if not _SUSPECT_DIGITS <= len(digits) <= 11 or len(digits) == 9:
             continue
@@ -204,8 +215,109 @@ def suspect_runs(text: str) -> list[str]:
             len(groups) == len(shape) and sum(abs(a - b) for a, b in zip(groups, shape)) <= 2
             for shape in _ID_GROUPS
         ):
-            suspects.append(digits)
+            suspects.append((start, end, digits))
     return suspects
+
+
+# A reference number's lettered prefix, joined to its digits in one token:
+# "NW-2025-004417" (a W-2 control number), "CA-POL-2025-…", "INV/…". Labels that
+# name an identifier never make a reference ("SSN-123-45-678" still refuses).
+# Each part starts with a letter: confusion normalization may have turned an
+# "O" inside it into "0" ("CA-POL-" reads "CA-P0L-").
+_REFERENCE_PREFIX = re.compile(
+    r"(?:^|\s)([A-Za-z][A-Za-z0-9]+(?:[-/][A-Za-z][A-Za-z0-9]+)*)[-/]$"
+)
+_IDENTIFIER_LABELS = frozenset({
+    "SSN", "SS", "SSA", "TIN", "EIN", "FEIN", "ITIN", "ATIN", "PTIN", "ID", "NO", "NUM",
+    "NBR", "NUMBER", "TAXID", "TAX", "SOC", "SEC",
+})
+
+
+_DIGIT_AS_LETTER = str.maketrans("105826", "IOSBZG")
+
+
+def _is_reference(normalized: str, start: int) -> bool:
+    """A suspect run that is the digits of a lettered reference number.
+
+    The prefix must be printed letters, at least one of them not an OCR
+    confusion of a digit (normalization already turned those into digits in a
+    numeric token), and no part of it an identifier label.
+    """
+    m = _REFERENCE_PREFIX.search(normalized[:start])
+    if not m:
+        return False
+    # Labels are compared as printed: normalization may have read "TIN" as "T1N".
+    parts = re.split(r"[-/]", m.group(1).translate(_DIGIT_AS_LETTER).upper())
+    if any(p in _IDENTIFIER_LABELS for p in parts):
+        return False
+    return any(c.isalpha() and c not in _CONFUSABLE for c in m.group(1))
+
+
+def reference_runs(words: list[Word], page_index: int, page: fitz.Page | None) -> list[Found]:
+    """Suspect runs that belong to a lettered reference number, as boxes to black
+    out WHOLE — last four digits included (TAX-9096).
+
+    Before TAX-9096 such a run refused the page like any other near-identifier
+    run, and every scanned W-2 with a control number such as "NW-2025-004417"
+    was refused. A reference number is almost never an identifier, but as an
+    OCR reading it cannot be proven not to be one, so none of its digits
+    reach the model: the run is masked, not trusted. Bare suspect runs
+    ("123-45-678") still refuse.
+    """
+    found: list[Found] = []
+    for line in _search_groups(words, True):
+        text, spans = "", []
+        for w in line:
+            if text:
+                text += " "
+            start = len(text)
+            text += w.text
+            spans.append((start, len(text), w))
+        normalized = normalize_confusions(text)
+        for start, end, _digits in _suspect_spans(normalized):
+            if not _is_reference(normalized, start):
+                continue
+            rects = []
+            for s, e, w in spans:
+                lo, hi = max(start, s), min(end, e)
+                if lo >= hi:
+                    continue
+                if w.rect.height > 1.5 * w.rect.width and len(w.text) >= 4:
+                    rects.append(fitz.Rect(w.rect) + (-2, -2, 2, 2))
+                    continue
+                rect = _part_rect(w, lo - s, hi - s, page, "ocr")
+                pad = max(1.5, 0.3 * rect.height)
+                rise = 0.15 * rect.height
+                rects.append(fitz.Rect(rect.x0 - pad, rect.y0 - rise,
+                                       rect.x1 + pad, rect.y1 + rise))
+            if rects:
+                found.append(Found(page_index, "reference", "", "ocr", tuple(rects)))
+    return found
+
+
+def _suspect_touches(words: list[Word], boxes: list[fitz.Rect]) -> bool:
+    """A near-identifier run whose words overlap one of the boxes."""
+    for group in _search_groups(words, True):
+        text, spans = "", []
+        for w in group:
+            if text:
+                text += " "
+            spans.append((len(text), len(text) + len(w.text), w))
+            text += w.text
+        for start, end, _ in _suspect_spans(normalize_confusions(text)):
+            if any(s < end and start < e and any(w.rect.intersects(b) for b in boxes)
+                   for s, e, w in spans):
+                return True
+    return False
+
+
+def bare_suspect_runs(words: list[Word]) -> list[str]:
+    """Suspect runs on a page that are not part of a lettered reference number."""
+    out = []
+    for group in _search_groups(words, True):
+        normalized = normalize_confusions(" ".join(w.text for w in group))
+        out.extend(d for s, _, d in _suspect_spans(normalized) if not _is_reference(normalized, s))
+    return out
 
 
 def _matches(line: str, ocr: bool = False) -> Iterable[tuple[int, int, str, str]]:
@@ -652,7 +764,11 @@ def unread_text(
             gray = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width)
             gray = gray.copy()
             sx, sy = pix.width / page.rect.width, pix.height / page.rect.height
-    background = cv2.medianBlur(gray, _BACKGROUND_WINDOW)
+    # Our own black boxes do not darken the background (TAX-9096); they stay
+    # black in `gray`, so the solid-area removal below still drops them.
+    paper = gray.copy()
+    _erase_own_fills(paper, _OWN_FILLS.get().get(page_index, []), sx, sy)
+    background = cv2.medianBlur(paper, _BACKGROUND_WINDOW)
     contrast = np.abs(background.astype(np.int16) - gray)
     marks = ((background.astype(np.int16) - gray) > _MARK_CONTRAST).astype(np.uint8)
     kernel = np.ones((_SOLID_KERNEL, _SOLID_KERNEL), np.uint8)
@@ -731,6 +847,45 @@ def unread_text(
     }
 
 
+def _erase_own_fills(gray, rects, sx: float, sy: float) -> None:
+    """Paint this module's own black boxes, in place, in the paper tone around them.
+
+    Used for the background estimate only. A box carries no print: its pixels
+    and the image under it were blanked. Counted in the background, two boxes
+    on neighbouring table rows make the median background between them dark,
+    and the paper strip and rule between them read as light print on a dark
+    fill — an "unread identifier" of our own making (TAX-9096: 1095-A
+    covered-individual rows at 200 and 300 DPI). Marks are still taken from
+    the page as rendered, so print beside a box is tested as before, and a
+    dark fill that is not ours keeps its light-print test.
+    """
+    import cv2
+    import numpy as np
+
+    if not rects:
+        return
+    height, width = gray.shape
+    mask = np.zeros_like(gray, dtype=np.uint8)
+    boxes = []
+    for r in rects:
+        # Two pixels outward: the box edge is anti-aliased, and the image
+        # pixels blanked under it follow the scan's own (coarser) grid.
+        x0, y0 = max(0, int(r.x0 * sx) - 2), max(0, int(r.y0 * sy) - 2)
+        x1, y1 = min(width, int(r.x1 * sx) + 3), min(height, int(r.y1 * sy) + 3)
+        if x1 > x0 and y1 > y0:
+            mask[y0:y1, x0:x1] = 1
+            boxes.append((x0, y0, x1, y1))
+    ring_kernel = np.ones((9, 9), np.uint8)
+    fills = []
+    for x0, y0, x1, y1 in boxes:
+        own = np.zeros_like(mask)
+        own[y0:y1, x0:x1] = 1
+        ring = (cv2.dilate(own, ring_kernel) > 0) & (mask == 0)
+        fills.append(int(np.median(gray[ring])) if ring.any() else 255)
+    for (x0, y0, x1, y1), tone in zip(boxes, fills):
+        gray[y0:y1, x0:x1] = tone
+
+
 def text_like_marks(pdf_bytes: bytes, page_index: int, dpi: float) -> dict:
     """The unread-print test for a page OCR read no word from."""
     return unread_text(pdf_bytes, page_index, dpi, [])
@@ -784,7 +939,46 @@ def _as_pdf(data: bytes, media_type: str) -> bytes:
         return data
     image = fitz.open(stream=data, filetype=media_type.split("/")[-1])
     pdf = image.convert_to_pdf()
-    return pdf
+    return _fit_image_pages(pdf)
+
+
+def _fit_image_pages(pdf: bytes) -> bytes:
+    """Size each image page so OCR can render it (TAX-9096).
+
+    A page takes its size from the image's DPI. A photo or a scan saved with
+    no DPI, or with 72 DPI, becomes a page of several feet; rendered at the
+    OCR DPI it passed the render pixel limit, OCR "failed" and the image was
+    refused — every phone photo among them. Such a page is resized so the
+    OCR render is the image at its own pixel size (smaller only when the image
+    itself is over the limit). An image whose page renders within the limit
+    keeps its size, so its reading does not change.
+    """
+    from app.services.rapid_ocr import MAX_DPI, MAX_RENDER_PIXELS
+
+    zoom = MAX_DPI / 72
+    doc = fitz.open(stream=pdf, filetype="pdf")
+    pages = list(doc)
+    if all(
+        math.ceil(p.rect.width * zoom) * math.ceil(p.rect.height * zoom) <= MAX_RENDER_PIXELS
+        for p in pages
+    ):
+        return pdf
+    out = fitz.open()
+    for page in pages:
+        infos = page.get_image_info(xrefs=True)
+        if len(infos) != 1 or not infos[0].get("xref"):
+            raise RedactionIncompleteError("an image page could not be prepared for OCR")
+        info = infos[0]
+        rect = page.rect
+        if math.ceil(rect.width * zoom) * math.ceil(rect.height * zoom) > MAX_RENDER_PIXELS:
+            width, height = info["width"], info["height"]
+            # 1:1 with the image's pixels, never past the limit (1 px margin).
+            scale = min(1.0, math.sqrt(MAX_RENDER_PIXELS / ((width + 1) * (height + 1))))
+            rect = fitz.Rect(0, 0, width * scale / zoom, height * scale / zoom)
+        target = out.new_page(width=rect.width, height=rect.height)
+        # The image itself, placed on the page: redaction blanks its pixels.
+        target.insert_image(target.rect, stream=doc.extract_image(info["xref"])["image"])
+    return out.tobytes()
 
 
 def _scan(doc: fitz.Document, pdf_bytes: bytes, ocr: OcrWords) -> tuple[list[Found], list[int]]:
@@ -797,10 +991,9 @@ def _scan(doc: fitz.Document, pdf_bytes: bytes, ocr: OcrWords) -> tuple[list[Fou
     if ocr_pages:
         suspect: dict[int, list[str]] = {}
         for i, words in ocr(pdf_bytes, ocr_pages).items():
-            for group in _search_groups(words, True):
-                text = " ".join(w.text for w in group)
-                if suspect_runs(text):
-                    suspect.setdefault(i, []).extend(suspect_runs(text))
+            if bare := bare_suspect_runs(words):
+                suspect.setdefault(i, []).extend(bare)
+            found.extend(reference_runs(words, i, doc[i]))
             for hit in find_identifiers(i, words, "ocr", doc[i]):
                 # A word and its recognized line can both carry the identifier;
                 # both boxes are redacted, reported once.
@@ -854,11 +1047,36 @@ def redact_identifiers(
     # every page that needed it the first time.
     check_doc = fitz.open(stream=redacted, filetype="pdf")
     remaining: list[Found] = []
+    suspect_left: list[int] = []
     for i, page in enumerate(check_doc):
         remaining.extend(find_identifiers(i, text_layer_words(page), "text_layer", page))
     if ocr_pages:
-        for i, words in ocr(redacted, ocr_pages).items():
+        # The unread-print test of the check pass knows our own black boxes
+        # (TAX-9096): they carry no print, and two boxes on neighbouring table
+        # rows must not turn the paper strip between them into "light print on
+        # a dark fill".
+        fills = {}
+        for f in found:
+            fills.setdefault(f.page, []).extend(r + (0, -2, 0, 2) for r in f.rects)
+        token = _OWN_FILLS.set(fills)
+        try:
+            check = ocr(redacted, ocr_pages)
+        finally:
+            _OWN_FILLS.reset(token)
+        for i, words in check.items():
             remaining.extend(find_identifiers(i, words, "ocr"))
+            # A reference number masked whole must not be readable in the
+            # output: no near-identifier run may touch one of its boxes. (Other
+            # print was judged on the first reading; a second reading of an
+            # untouched "OMB No. 1545-0008" as "545 0008" is not a new risk.)
+            masked = [r for f in found if f.page == i and f.kind == "reference" for r in f.rects]
+            if masked and _suspect_touches(words, masked):
+                suspect_left.append(i)
+    if suspect_left:
+        raise RedactionIncompleteError(
+            f"page(s) {sorted(set(suspect_left))} still show digit runs that may be a "
+            "misread identifier after redaction"
+        )
     if remaining:
         pages = sorted({f.page for f in remaining})
         raise RedactionIncompleteError(
@@ -868,7 +1086,9 @@ def redact_identifiers(
     return {
         "pdf_bytes": redacted,
         "redactions": [
-            {"page": f.page, "kind": f.kind, "last4": f.last4, "source": f.source} for f in found
+            {"page": f.page, "kind": f.kind, "last4": f.last4, "source": f.source}
+            for f in found if f.kind != "reference"
         ],
+        "masked_references": sum(f.kind == "reference" for f in found),
         "ocr_pages": ocr_pages,
     }

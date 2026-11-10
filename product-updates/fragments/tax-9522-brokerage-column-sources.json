@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "id": "tax-9522-brokerage-column-sources",
+  "audience": "design_partners",
+  "category": "fix",
+  "customerVisible": true,
+  "title": "Keep brokerage amounts under the correct column headings",
+  "summary": "The optional financial table reader can recover overlapping brokerage column headings when the original PDF proves their layout.",
+  "bodyMarkdown": "## What changed\n\nThe optional financial table reader uses the original PDF to recover overlapping 1099-B column headings when the printed words and transaction rows agree. Amounts and transaction rows remain unchanged.\n\n## Why it matters\n\nThis can recover a table that previously required manual review without guessing whether an amount is proceeds or cost basis. Ambiguous layouts still require review; recovered headings do not approve tax facts.\n\n## Where to find it\n\nUse Extract Tables in the PDF toolbox when the optional financial table reader is enabled. General rollout remains under qualification.",
+  "fromFeedback": false,
+  "channels": {
+    "widget": true,
+    "inApp": true,
+    "email": false
+  },
+  "cta": null,
+  "email": null,
+  "screenshot": {
+    "required": false,
+    "captureInstructions": null,
+    "altText": null
+  },
+  "relatedLinearIssueIds": [
+    "TAX-9522",
+    "TAX-7827"
+  ]
+}

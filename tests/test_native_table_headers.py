@@ -121,3 +121,25 @@ def test_source_exact_spanning_financial_cells_are_not_context():
     cells[5]['bbox']['x1'] = cells[6]['bbox']['x1']
     cells.pop(6)
     assert recover_headers(doc[0], cells, 5, TABLE_BBOX) is cells
+
+
+@pytest.mark.parametrize('context', [
+    'EXAMPLE COMPANY / CUSIP: 123456789 / Symbol: TEST',
+    '2 transactions for 03/28/25. Total proceeds and cost reported to the IRS.',
+])
+def test_source_proven_full_width_context_is_preserved(context):
+    doc, cells = fixture()
+    page = doc[0]
+    page.insert_text((20, 125), context, fontsize=7)
+    words = [w for w in page.get_text('words') if w[1] > 110]
+    cell = dict(cells[-1], row_index=3, column_index=0, column_span=5,
+                raw_text=context, text=context,
+                bbox=dict(x0=min(w[0] for w in words), y0=min(w[1] for w in words),
+                          x1=max(w[2] for w in words), y1=max(w[3] for w in words)))
+    cells.append(cell)
+    result = recover_headers(page, cells, 5, dict(TABLE_BBOX, y1=140))
+    assert result is not cells
+    assert result[-1] == cell
+    cells[-1]['raw_text'] += ' 999.00'
+    cells[-1]['text'] = cells[-1]['raw_text']
+    assert recover_headers(page, cells, 5, dict(TABLE_BBOX, y1=140)) is cells

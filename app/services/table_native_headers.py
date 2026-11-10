@@ -88,9 +88,14 @@ def recover_headers(page, cells, columns, table_bbox=None):
         col, span = c['column_index'], c['column_span']
         # Spanning context is preserved, but dates or monetary values must have
         # individual columns; exact concatenated text cannot prove attribution.
-        if span != 1 and (span < columns - 1 or not re.search(r'[A-Za-z]{2}', c['raw_text']) or
-                          re.search(r'\d[\d,]*\.\d+|\d{1,2}/\d{1,2}/\d{2,4}|[$€£]', c['raw_text'])):
-            return cells
+        if span != 1:
+            summary_note = re.fullmatch(
+                r'\d+ transactions for \d{2}/\d{2}/\d{2}\. '
+                r'Total proceeds and cost reported to the IRS\.', c['raw_text'])
+            if (span < columns - 1 or not re.search(r'[A-Za-z]{2}', c['raw_text']) or
+                    (not summary_note and re.search(
+                        r'\d[\d,]*\.\d+|\d{1,2}/\d{1,2}/\d{2,4}|[$€£]', c['raw_text']))):
+                return cells
         if (not source or any(not edges[col] < (w[0]+w[2])/2 < edges[col+span] for w in source) or
                 _compact(' '.join(w[4] for w in sorted(source, key=lambda w: (round(w[1], 1), w[0]))))
                 != _compact(c['raw_text'])):

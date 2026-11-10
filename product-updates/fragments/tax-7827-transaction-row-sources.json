@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "id": "tax-7827-transaction-row-sources",
+  "audience": "design_partners",
+  "category": "fix",
+  "customerVisible": true,
+  "title": "Keep brokerage transactions connected to their source rows",
+  "summary": "The optional financial table reader keeps dates and amounts together when the original PDF proves that two brokerage transactions were combined.",
+  "bodyMarkdown": "## What changed\n\nThe optional financial table reader can separate combined 1099-B transactions when the original PDF supports both dates, each amount and a shared security description. Shared descriptions remain one source cell spanning the transactions.\n\n## Why it matters\n\nTables with contradictory column ordering or unresolved transaction rows are withheld for review instead of offered for export. This does not automatically approve tax facts.\n\n## Where to find it\n\nUse Extract Tables in the PDF toolbox. Availability depends on the optional financial table reader being enabled; general rollout remains under qualification.",
+  "fromFeedback": false,
+  "channels": {"widget": true, "inApp": true, "email": false},
+  "cta": null,
+  "email": null,
+  "screenshot": {"required": false, "captureInstructions": null, "altText": null},
+  "relatedLinearIssueIds": ["TAX-7827"]
+}

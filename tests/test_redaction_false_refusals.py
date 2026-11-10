@@ -66,10 +66,21 @@ def _ocr(words, source, check_reads=None):
         out = []
         for text, rect in words:
             if len(calls) == 1:
-                out.append(ir.Word(text, rect))
+                out.append((text, rect))
             else:
-                out.extend(ir.Word(t, r) for t, r in (check_reads or default)(text, rect))
-        return {0: out}
+                out.extend((check_reads or default)(text, rect))
+        # Through the engine's own reader of OCR results, so the unread-print
+        # test runs on every page as it does in production.
+        result = {
+            "pages": [{
+                "page_index": 0,
+                "status": "complete",
+                "words": [{"text": t, "bbox": {"x": r.x0, "y": r.y0, "w": r.width,
+                                               "h": r.height}} for t, r in out],
+            }],
+            "provenance": {"render_dpi": 216},
+        }
+        return ir._words(result, pdf_bytes)
 
     return ocr
 
@@ -178,6 +189,14 @@ def test_boxes_on_neighbouring_rows_do_not_read_as_unread_print():
     scan, words, source = _scan(_covered_individuals)
     result = ir.redact_identifiers(scan, ocr=_ocr(words, source))
     assert [r["kind"] for r in result["redactions"]] == ["ssn"] * len(SSNS)
+
+
+def test_without_knowing_our_boxes_the_same_page_was_refused(monkeypatch):
+    """The regression, end to end through the unread-print test."""
+    monkeypatch.setattr(ir, "_erase_own_fills", lambda *a, **k: None)
+    scan, words, source = _scan(_covered_individuals)
+    with pytest.raises(ir.RedactionIncompleteError, match="OCR did not read"):
+        ir.redact_identifiers(scan, ocr=_ocr(words, source))
 
 
 def _redacted_table(extra=None) -> tuple[bytes, list[ir.Word], dict[int, list[fitz.Rect]]]:
@@ -314,3 +333,76 @@ def test_an_identifier_on_a_resized_image_page_is_blacked_out():
     assert [r["kind"] for r in result["redactions"]] == ["ssn"]
     prefix = fitz.Rect(rect.x0, rect.y0, rect.x0 + rect.width * 6 / 11, rect.y1)
     assert _dark(result["pdf_bytes"], prefix + (1, 0, -1, 0))
+
+
+
+def test_a_huge_photo_sends_only_what_ocr_read():
+    """No full-resolution image behind a downscaled OCR render."""
+    from app.services.rapid_ocr import MAX_DPI, MAX_RENDER_PIXELS
+
+    pdf = ir._as_pdf(_png(4000, 6000), "image/png")
+    with fitz.open(stream=pdf, filetype="pdf") as doc:
+        [info] = doc[0].get_image_info()
+        zoom = MAX_DPI / 72
+        # The embedded image is the OCR render, pixel for pixel.
+        assert info["width"] == pytest.approx(doc[0].rect.width * zoom, abs=1)
+        assert info["height"] == pytest.approx(doc[0].rect.height * zoom, abs=1)
+        assert info["width"] * info["height"] <= MAX_RENDER_PIXELS
+
+
+def test_a_transparent_png_is_not_a_black_page():
+    import cv2
+    import numpy as np
+
+    rgba = np.zeros((3300, 2500, 4), np.uint8)  # fully transparent
+    cv2.putText(rgba, "W-2", (200, 400), cv2.FONT_HERSHEY_SIMPLEX, 8, (0, 0, 0, 255), 20)
+    ok, buf = cv2.imencode(".png", rgba)
+    assert ok
+    pdf = ir._as_pdf(buf.tobytes(), "image/png")
+    with fitz.open(stream=pdf, filetype="pdf") as doc:
+        pix = doc[0].get_pixmap(dpi=20, colorspace=fitz.csGRAY)
+    assert sum(pix.samples) / len(pix.samples) > 200  # paper, not a black page
+
+
+def test_a_phone_photo_keeps_its_orientation():
+    import io
+
+    from PIL import Image
+
+    image = Image.new("RGB", (3000, 2000), "white")
+    exif = Image.Exif()
+    exif[0x0112] = 6  # rotate 90 degrees to display
+    buf = io.BytesIO()
+    image.save(buf, "JPEG", exif=exif)
+    data = buf.getvalue()
+    shown = fitz.open(stream=fitz.open(stream=data, filetype="jpeg").convert_to_pdf(),
+                      filetype="pdf")[0].rect
+    with fitz.open(stream=ir._as_pdf(data, "image/jpeg"), filetype="pdf") as doc:
+        page = doc[0].rect
+    assert (page.width > page.height) == (shown.width > shown.height)
+
+
+@pytest.mark.parametrize("label", ["TaxID-", "ID-", "DOB-", "No."])
+def test_an_ssn_joined_to_a_label_is_redacted(label):
+    """Before TAX-9096 "TaxID-123-45-6789" read as one 11-digit run and was sent whole."""
+    reading = f"{label}912-34-5678"
+    scan, words, source = _scan(_w2("A-0417"))
+    words = [(reading if t == "912-34-5678" else t, r) for t, r in words]
+
+    def check(text, rect):
+        if text == reading:
+            return [(text[:len(label)] + "5678", rect)]
+        if sum(c.isdigit() for c in text) == 9:
+            return [(text[-4:], _part(source, rect, text[-4:]))]
+        return [(text, rect)]
+
+    result = ir.redact_identifiers(scan, ocr=_ocr(words, source, check))
+    assert "ssn" in [r["kind"] for r in result["redactions"]]
+
+
+def test_an_ssn_joined_to_a_label_in_a_text_layer_is_redacted():
+    doc = fitz.open()
+    page = doc.new_page(width=612, height=792)
+    page.insert_text((72, 100), "Employee ID-912-34-5678 and EIN-00-1234567", fontsize=11)
+    result = ir.redact_identifiers(doc.tobytes(), ocr=lambda *_: {})
+    assert sorted(r["kind"] for r in result["redactions"]) == ["ein", "ssn"]

@@ -35,9 +35,12 @@ import structlog
 log = structlog.get_logger()
 
 # 123-45-6789 / 123 45 6789: an SSN or ITIN. ZIP+4 (12345-6789) is 5-4.
-_SSN = re.compile(r"(?<![\d-])(\d{3})([- ])(\d{2})\2(\d{4})(?![\d-])")
+# A dash before it is allowed after a letter: a label joined to the number
+# ("ID-123-45-6789", TAX-9096) is not a longer number.
+_NOT_AFTER_NUMBER = r"(?:(?<![\d-])|(?<=[A-Za-z]-))"
+_SSN = re.compile(_NOT_AFTER_NUMBER + r"(\d{3})([- ])(\d{2})\2(\d{4})(?![\d-])")
 # 12-3456789: an EIN.
-_EIN = re.compile(r"(?<![\d-])(\d{2})-(\d{7})(?![\d-])")
+_EIN = re.compile(_NOT_AFTER_NUMBER + r"(\d{2})-(\d{7})(?![\d-])")
 # Nine bare digits shortly after a label naming an identifier. Unlabeled runs
 # (routing and account numbers) are not identifiers and stay readable.
 _LABELED_BARE = re.compile(
@@ -234,6 +237,7 @@ _IDENTIFIER_LABELS = frozenset({
 
 
 _DIGIT_AS_LETTER = str.maketrans("105826", "IOSBZG")
+_DIGIT_AS_LETTER_D = str.maketrans("105826", "IDSBZG")
 
 
 def _is_reference(normalized: str, start: int) -> bool:
@@ -246,10 +250,12 @@ def _is_reference(normalized: str, start: int) -> bool:
     m = _REFERENCE_PREFIX.search(normalized[:start])
     if not m:
         return False
-    # Labels are compared as printed: normalization may have read "TIN" as "T1N".
-    parts = re.split(r"[-/]", m.group(1).translate(_DIGIT_AS_LETTER).upper())
-    if any(p in _IDENTIFIER_LABELS for p in parts):
-        return False
+    # Labels are compared as printed: normalization may have read "TIN" as
+    # "T1N", and "0" stands for "O" or "D" ("TAXID" reads "TAX10").
+    for table in (_DIGIT_AS_LETTER, _DIGIT_AS_LETTER_D):
+        parts = re.split(r"[-/]", m.group(1).translate(table).upper())
+        if any(p in _IDENTIFIER_LABELS or p.endswith("ID") for p in parts):
+            return False
     return any(c.isalpha() and c not in _CONFUSABLE for c in m.group(1))
 
 
@@ -332,6 +338,8 @@ def _matches(line: str, ocr: bool = False) -> Iterable[tuple[int, int, str, str]
         for start, end, digits in _digit_runs(normalized):
             if len(digits) == 9:
                 yield start, end, _run_kind(normalized, start, end), digits
+            elif len(digits) > 9:
+                yield from _embedded_identifiers(normalized, start, end)
         return
     for m in _SSN.finditer(line):
         yield m.start(), m.end(), "ssn", m.group(1) + m.group(3) + m.group(4)
@@ -342,6 +350,26 @@ def _matches(line: str, ocr: bool = False) -> Iterable[tuple[int, int, str, str]
         label = m.group(0)
         kind = "ssn" if _SSN_LABEL.search(label) else "ein" if _EIN_LABEL.search(label) else "tin"
         yield m.start(1), m.end(1), kind, m.group(1)
+
+
+def _embedded_identifiers(text: str, start: int, end: int):
+    """Identifiers in exact SSN (3-2-4) or EIN (2-7) group shape inside a
+    longer digit run (TAX-9096).
+
+    A label read with confusions joins the number: "TaxID-123-45-6789" reads
+    "Tax10-123-45-6789", one 11-digit run that is neither an identifier nor
+    a near-identifier, and the whole SSN was sent. Any run of groups in an
+    identifier's exact shape inside a longer run is an identifier.
+    """
+    groups = [(m.start() + start, m.end() + start)
+              for m in re.finditer(r"\d+", text[start:end])]
+    for shape, kind in (((3, 2, 4), "ssn"), ((2, 7), "ein")):
+        n = len(shape)
+        for i in range(len(groups) - n + 1):
+            window = groups[i:i + n]
+            if tuple(e - s for s, e in window) == shape:
+                s0, e0 = window[0][0], window[-1][1]
+                yield s0, e0, kind, re.sub(r"\D", "", text[s0:e0])
 
 
 def _lines(words: list[Word]) -> list[list[Word]]:
@@ -948,36 +976,43 @@ def _fit_image_pages(pdf: bytes) -> bytes:
     A page takes its size from the image's DPI. A photo or a scan saved with
     no DPI, or with 72 DPI, becomes a page of several feet; rendered at the
     OCR DPI it passed the render pixel limit, OCR "failed" and the image was
-    refused — every phone photo among them. Such a page is resized so the
-    OCR render is the image at its own pixel size (smaller only when the image
-    itself is over the limit). An image whose page renders within the limit
-    keeps its size, so its reading does not change.
+    refused — every phone photo among them. Such a page is replaced by a
+    page whose image is the original page RENDERED at the image's own pixel
+    size, or smaller when that is over the limit: transparency is flattened
+    on white and the photo's orientation kept, as the original page shows
+    them. The new page is exactly what OCR reads at the OCR DPI (one image
+    pixel per render pixel), so the model is never sent detail that the
+    checks did not see. An image whose page renders within the limit keeps
+    its page, so its reading does not change.
     """
     from app.services.rapid_ocr import MAX_DPI, MAX_RENDER_PIXELS
 
     zoom = MAX_DPI / 72
+
+    def fits(rect: fitz.Rect) -> bool:
+        return math.ceil(rect.width * zoom) * math.ceil(rect.height * zoom) <= MAX_RENDER_PIXELS
+
     doc = fitz.open(stream=pdf, filetype="pdf")
-    pages = list(doc)
-    if all(
-        math.ceil(p.rect.width * zoom) * math.ceil(p.rect.height * zoom) <= MAX_RENDER_PIXELS
-        for p in pages
-    ):
+    if all(fits(p.rect) for p in doc):
         return pdf
     out = fitz.open()
-    for page in pages:
-        infos = page.get_image_info(xrefs=True)
-        if len(infos) != 1 or not infos[0].get("xref"):
+    for page in doc:
+        if fits(page.rect):
+            out.insert_pdf(doc, from_page=page.number, to_page=page.number)
+            continue
+        infos = page.get_image_info()
+        if len(infos) != 1:
             raise RedactionIncompleteError("an image page could not be prepared for OCR")
         info = infos[0]
-        rect = page.rect
-        if math.ceil(rect.width * zoom) * math.ceil(rect.height * zoom) > MAX_RENDER_PIXELS:
-            width, height = info["width"], info["height"]
-            # 1:1 with the image's pixels, never past the limit (1 px margin).
-            scale = min(1.0, math.sqrt(MAX_RENDER_PIXELS / ((width + 1) * (height + 1))))
-            rect = fitz.Rect(0, 0, width * scale / zoom, height * scale / zoom)
-        target = out.new_page(width=rect.width, height=rect.height)
-        # The image itself, placed on the page: redaction blanks its pixels.
-        target.insert_image(target.rect, stream=doc.extract_image(info["xref"])["image"])
+        box = fitz.Rect(info["bbox"])
+        # The image's own resolution on this page, whatever its orientation.
+        native = max(info["width"], info["height"]) / max(box.width, box.height, 1e-6)
+        # Render pixels at native resolution, capped one pixel short of the limit.
+        pixels = page.rect.width * native * page.rect.height * native
+        scale = native * min(1.0, math.sqrt(MAX_RENDER_PIXELS / (pixels * 1.01)))
+        pix = page.get_pixmap(matrix=fitz.Matrix(scale, scale), alpha=False)
+        target = out.new_page(width=pix.width / zoom, height=pix.height / zoom)
+        target.insert_image(target.rect, pixmap=pix)
     return out.tobytes()
 
 

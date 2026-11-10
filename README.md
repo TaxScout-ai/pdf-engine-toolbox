@@ -243,9 +243,14 @@ exactly nine digits with any separators — spaces, dashes, dot leaders — is a
 identifier, as is a group continued on the line below ("123-45-" / "6789").
 Everything but the last four digits is blacked out. A rotated reading is
 blacked out whole. An image saved without a usable DPI (a photo, or a scan
-saved at 72 DPI) is placed on a page sized so the OCR render is the image at
-its own pixel size; before TAX-9096 such a page passed the render limit and
-was refused as "OCR failed". The check pass knows the module's own black
+saved at 72 DPI) is replaced by its own render at its pixel size (smaller if
+over the render limit), transparency flattened on white and orientation kept;
+OCR reads that page pixel for pixel and it is what the model gets. Before
+TAX-9096 such a page passed the render limit and was refused as "OCR failed".
+An SSN or EIN in exact group shape inside a longer digit run is an identifier
+too: a label read with confusions joins the number ("TaxID-123-45-6789" reads
+as one 11-digit run) and was sent whole before TAX-9096; in a text layer, a
+dash after a letter ("ID-123-45-6789") no longer hides the number. The check pass knows the module's own black
 boxes: they do not darken the background estimate, so the paper strip between
 boxes on neighbouring table rows is not read as light print on a dark fill.
 Amounts, dates, ZIP+4 and phone numbers are not

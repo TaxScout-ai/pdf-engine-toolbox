@@ -143,3 +143,30 @@ def test_source_proven_full_width_context_is_preserved(context):
     cells[-1]['raw_text'] += ' 999.00'
     cells[-1]['text'] = cells[-1]['raw_text']
     assert recover_headers(page, cells, 5, dict(TABLE_BBOX, y1=140)) is cells
+
+
+@pytest.mark.parametrize('context', ['TOTAL 200 100', 'Various 2 120 Various 100'])
+def test_plain_integer_financial_values_cannot_be_shared_context(context):
+    doc, cells = fixture()
+    page = doc[0]
+    page.insert_text((20,125), context, fontsize=7)
+    words = [w for w in page.get_text('words') if w[1] > 110]
+    cells.append(dict(cells[-1],row_index=3,column_index=0,column_span=5,
+                      raw_text=context,text=context,
+                      bbox=dict(x0=min(w[0] for w in words),y0=min(w[1] for w in words),
+                                x1=max(w[2] for w in words),y1=max(w[3] for w in words))))
+    assert recover_headers(page,cells,5,dict(TABLE_BBOX,y1=140)) is cells
+
+
+def test_context_marker_does_not_hide_separate_physical_value_columns():
+    doc, cells = fixture()
+    page = doc[0]
+    for x, text in [(20,'TOTAL'),(150,'200'),(260,'100 / CUSIP: 123456789 / Symbol: TEST')]:
+        page.insert_text((x,125),text,fontsize=7)
+    words = [w for w in page.get_text('words') if w[1] > 110]
+    context = 'TOTAL 200 100 / CUSIP: 123456789 / Symbol: TEST'
+    cells.append(dict(cells[-1],row_index=3,column_index=0,column_span=5,
+                      raw_text=context,text=context,
+                      bbox=dict(x0=min(w[0] for w in words),y0=min(w[1] for w in words),
+                                x1=max(w[2] for w in words),y1=max(w[3] for w in words))))
+    assert recover_headers(page,cells,5,dict(TABLE_BBOX,y1=140)) is cells

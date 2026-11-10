@@ -92,14 +92,23 @@ def recover_headers(page, cells, columns, table_bbox=None):
             summary_note = re.fullmatch(
                 r'\d+ transactions for \d{2}/\d{2}/\d{2}\. '
                 r'Total proceeds and cost reported to the IRS\.', c['raw_text'])
-            if (span < columns - 1 or not re.search(r'[A-Za-z]{2}', c['raw_text']) or
-                    (not summary_note and re.search(
-                        r'\d[\d,]*\.\d+|\d{1,2}/\d{1,2}/\d{2,4}|[$€£]', c['raw_text']))):
+            security_note = re.fullmatch(
+                r'[^/]+ / CUSIP: [A-Z0-9]{9} / Symbol: [A-Z][A-Z0-9.-]{0,15}', c['raw_text'])
+            if span < columns - 1 or not (summary_note or security_note):
+                return cells
+            if security_note and re.search(
+                    r'\d[\d,]*\.\d+|\d{1,2}/\d{1,2}/\d{2,4}|[$€£]', c['raw_text']):
                 return cells
         if (not source or any(not edges[col] < (w[0]+w[2])/2 < edges[col+span] for w in source) or
                 _compact(' '.join(w[4] for w in sorted(source, key=lambda w: (round(w[1], 1), w[0]))))
                 != _compact(c['raw_text'])):
             return cells
+        if span != 1:
+            ordered_source = sorted(source, key=lambda w: w[0])
+            max_gap = median(w[3] - w[1] for w in source) * 1.5
+            if any(right[0] - left[2] > max_gap
+                   for left, right in zip(ordered_source, ordered_source[1:])):
+                return cells
         covered.update(tuple(w) for w in source)
         if span == 1:
             witnesses[col].add(c['row_index'])

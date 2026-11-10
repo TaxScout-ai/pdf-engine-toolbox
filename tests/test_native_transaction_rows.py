@@ -198,6 +198,20 @@ def test_unresolved_second_security_is_not_a_shared_description():
     assert run(table, doc) == ([], 1)
 
 
+def test_description_after_identifier_cannot_start_an_invented_shared_security():
+    values = deepcopy(VALUES)
+    values[0] = ['CUSIP: 111111111', 'NEW SECURITY: XYZ']
+    doc, table = fixture(values=values)
+    assert run(table, doc) == ([], 1)
+
+
+def test_identifier_on_one_transaction_cannot_be_assigned_to_another_row():
+    values = deepcopy(VALUES)
+    values[0] = ['CUSIP: 111111111']
+    doc, table = fixture(values=values)
+    assert run(table, doc) == ([], 1)
+
+
 def test_ordered_body_columns_shifted_under_different_headers_are_rejected():
     doc, table = fixture()
     # Shift both source glyphs and claimed source boxes, preserving body order.

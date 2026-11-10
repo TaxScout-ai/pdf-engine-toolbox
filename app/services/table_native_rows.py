@@ -169,6 +169,11 @@ def _split_row(cells, roles, words, page, headers):
         if role == 'security':
             if len(_CUSIP.findall(cell['text'])) != 1 or len(re.findall(r'\bCUSIP\b', cell['text'], re.I)) != 1:
                 return None
+            # Only the observed description-then-terminal-CUSIP grammar proves
+            # one shared block. Text after the identifier could start another
+            # security whose identifier was omitted; never guess ownership.
+            if len(lines) < 2 or not _CUSIP.fullmatch(lines[-1][1]):
+                return None
             shared.append(cell)
             continue
         validator = _date if role == 'date' else _number
@@ -185,6 +190,12 @@ def _split_row(cells, roles, words, page, headers):
     if baselines is None:
         return None
     count = len(baselines)
+    for cell in shared:
+        source_lines = _lines(cell, words)
+        top = min(b.y0 for b, _ in source_lines)
+        bottom = max(b.y1 for b, _ in source_lines)
+        if min(baselines) < top - 1 or max(baselines) > bottom + 1:
+            return None
     if any(_separates_group(page, _rect(c['bbox']), baselines) for c in shared):
         return None
     # Unrepresented text is never silently discarded. Source words in the

@@ -17,7 +17,7 @@ VALUES = [['EXAMPLE FUND', 'CUSIP: 111111111'], ['1.000', '2.000'],
           ['$0.00', '$0.00'], ['$10.00', '$5.00'], []]
 
 
-def fixture(*, values=None, shifts=None, annotation=False, hidden=False):
+def fixture(*, values=None, shifts=None, annotation=False, hidden=False, split_cusip=False):
     values = values or deepcopy(VALUES)
     shifts = shifts or {}
     doc = fitz.open()
@@ -27,7 +27,11 @@ def fixture(*, values=None, shifts=None, annotation=False, hidden=False):
         x = 10 + col * 128
         page.insert_text((x, 50), header, fontsize=5)
         for i, value in enumerate(values[col]):
+            if split_cusip and col == 0 and value.startswith('CUSIP: '):
+                value = 'CUSIP:'
             page.insert_text((x, 100 + i * 15 + shifts.get(col, 0)), value, fontsize=8)
+    if split_cusip:
+        page.insert_text((10 + fitz.get_text_length('CUSIP: ', fontsize=8), 115), '111111111', fontsize=8)
     page.insert_text((10, 160), 'TOTAL', fontsize=8)
     page.insert_text((10 + 4 * 128, 160), '$200.00', fontsize=8)
     words = page.get_text('words')
@@ -210,6 +214,16 @@ def test_identifier_on_one_transaction_cannot_be_assigned_to_another_row():
     values[0] = ['CUSIP: 111111111']
     doc, table = fixture(values=values)
     assert run(table, doc) == ([], 1)
+
+
+def test_separate_pdf_text_objects_on_same_printed_cusip_line_are_supported():
+    doc, table = fixture(split_cusip=True)
+    # The mapper's reading order is physical, not PDF stream object order.
+    security = next(c for c in table['cells'] if c['row_index'] == 1 and c['column_index'] == 0)
+    security['text'] = security['raw_text'] = 'EXAMPLE FUND CUSIP: 111111111'
+    result, unresolved = run(table, doc)
+    assert unresolved == 0 and result[0]['row_count'] == 4
+    assert next(c for c in result[0]['cells'] if c['row_index'] == 1 and c['column_index'] == 0)['row_span'] == 2
 
 
 def test_ordered_body_columns_shifted_under_different_headers_are_rejected():

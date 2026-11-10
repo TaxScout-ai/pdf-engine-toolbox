@@ -105,6 +105,21 @@ def _profile(headers):
     return roles
 
 
+def _security_lines(lines):
+    """PDF text-object boundaries are not printed line boundaries."""
+    physical = []
+    for box, text in lines:
+        if physical:
+            previous, prior_text = physical[-1]
+            same_baseline = (abs((previous.y0 + previous.y1 - box.y0 - box.y1) / 2) <= .5
+                             and abs(previous.height - box.height) <= 1)
+            if same_baseline and previous.x1 <= box.x0 <= previous.x1 + max(previous.height, box.height):
+                physical[-1] = (previous | box, prior_text + ' ' + text)
+                continue
+        physical.append((box, text))
+    return physical
+
+
 def _separates_group(page, bounds, baselines):
     for path in page.get_drawings():
         for item in path['items']:
@@ -167,6 +182,7 @@ def _split_row(cells, roles, words, page, headers):
         if not lines:
             return None
         if role == 'security':
+            lines = _security_lines(lines)
             if len(_CUSIP.findall(cell['text'])) != 1 or len(re.findall(r'\bCUSIP\b', cell['text'], re.I)) != 1:
                 return None
             # Only the observed description-then-terminal-CUSIP grammar proves

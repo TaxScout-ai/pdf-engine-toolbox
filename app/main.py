@@ -7,6 +7,7 @@ thumbnails, and final PDF assembly.
 Licensed under AGPL-3.0 (required by PyMuPDF dependency).
 """
 
+import asyncio
 import os
 import time
 from contextlib import asynccontextmanager
@@ -98,6 +99,13 @@ async def lifespan(app: FastAPI):
         # stop the service, but whoever set it has to know it does nothing.
         log.warning("ocr_backend_setting_ignored", ocr_backend=legacy_backend,
                     reason="Paddle was removed; RapidOCR serves every OCR operation")
+
+    # Optional heavy models must be ready before requests acquire the shared
+    # worker pool and start spending their HTTP deadline. Fail startup rather
+    # than accept work with a missing or incompatible offline pipeline.
+    if settings.table_fallback == "docling":
+        from app.services.table_docling import prepare
+        await asyncio.to_thread(prepare)
 
     # Resume OCR jobs that were queued or running before the restart. Engines
     # load lazily, one per OCR worker, on the first page that needs a model.

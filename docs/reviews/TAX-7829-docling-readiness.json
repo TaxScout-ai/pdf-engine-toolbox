@@ -1,0 +1,247 @@
+{
+  "issue": "TAX-7829",
+  "pr": 31,
+  "reviewed_source_commit": "b8b29a37d834fe8b4dfe634dd0b4e5e9861b8063",
+  "scope": "Prepare optional offline Docling pipeline before HTTP readiness and persistent OCR recovery. No table mapping, source matching, production flag or model changes.",
+  "checker": {
+    "verdict": "PASS",
+    "round": 1,
+    "issue": "TAX-7829",
+    "reviewed_commit": "b8b29a37d834fe8b4dfe634dd0b4e5e9861b8063",
+    "source_sha256": {
+      "app/main.py": "066d67e88d971fc0605ebc89e6ce4780e2c438a22cb83bb50756a208d38f6685",
+      "app/services/table_docling.py": "83f68b56079aee3b587cfa44aaf0a16f3454e5c21efdb5b8a6c6d7487af53445",
+      "Dockerfile": "a9550029e9e796b641d31a6dc1aa1a0601e369ed53219f754318a2e604d9c8fc",
+      "tests/test_table_readiness.py": "09ab8b4491e5831c508efb95c9be6e7f10150297fa10c96bd98b6dd2f77eabd5"
+    },
+    "tests": {
+      "command": "python -m pytest tests/test_table_readiness.py tests/test_table_pipeline.py -q",
+      "passed": 22,
+      "seconds": 0.51
+    },
+    "findings": [],
+    "verified": [
+      "Configured fallback initializes before persistent queue recovery and lifespan yield; initialization failure propagates and prevents readiness.",
+      "Default none subprocess installed an import blocker for both Docling and app.services.table_docling: startup/serve/shutdown succeeded without either import.",
+      "Concurrent prepare calls share one lock and initialized flag; failed initialization is not marked prepared.",
+      "Installed Docling2.142.0 initialize_pipeline invokes _get_pipeline, caches successful pipeline construction, propagates construction errors, and does not cache failed construction.",
+      "Installed StandardPdfPipeline constructor calls _init_models, which constructs OCR, layout and table models.",
+      "Docker health startup grace240s preserves normal interval/retries and successful readiness exits grace."
+    ],
+    "installed_api_probe": {
+      "docling_version": "2.142.0",
+      "public_api_cached_once": true,
+      "failed_constructor_propagates": true,
+      "failed_pipeline_not_cached": true,
+      "scope": "Actual installed public API using controlled pipeline constructor; real weights and resource qualification remain parent-owned."
+    },
+    "installed_source_sha256": {
+      "document_converter.py": "50f0af029f7ae04f925f769e1ec4c004dae842f6032d24df70dc8c459b772977",
+      "pipeline/standard_pdf_pipeline.py": "0a6acaa87e63124b81f798c6cd278990bfe3ab34f41ce2e2ae852bd86200af6b"
+    },
+    "limitations": [
+      "Startup loading is not a claim of inference warmup, deadline compliance or source accuracy. Parent owns real initializer-only mixed/resource qualification.",
+      "No deployment performed; rollout must verify orchestrator health-check overrides honor startup timing.",
+      "No global fallback enablement or production readiness certification."
+    ],
+    "source_edits": false
+  },
+  "adversarial": {
+    "task": "TAX-7829",
+    "round": 1,
+    "verdict": "CLEAN",
+    "commit": "b8b29a37d834fe8b4dfe634dd0b4e5e9861b8063",
+    "scope": "Optional Docling startup preparation, readiness/admission and persisted OCR recovery order, serialized one-time initialization, failure/cancellation and Docker initial grace. No financial-table logic re-review or production enablement approval.",
+    "source_hashes": {
+      "app/main.py": "066d67e88d971fc0605ebc89e6ce4780e2c438a22cb83bb50756a208d38f6685",
+      "app/services/table_docling.py": "83f68b56079aee3b587cfa44aaf0a16f3454e5c21efdb5b8a6c6d7487af53445",
+      "Dockerfile": "a9550029e9e796b641d31a6dc1aa1a0601e369ed53219f754318a2e604d9c8fc",
+      "tests/test_table_readiness.py": "09ab8b4491e5831c508efb95c9be6e7f10150297fa10c96bd98b6dd2f77eabd5"
+    },
+    "findings": [],
+    "tests": {
+      "result": "8 passed, 1 existing StarletteDeprecationWarning",
+      "seconds": 11.8,
+      "command": "docling-venv/bin/python -m pytest tests/test_table_readiness.py /home/taxscout/.codex/artifacts/TAX-7829-docling-readiness-20261111/adversarial/test_independent_startup.py -q"
+    },
+    "independent_probes": [
+      "Cancel lifespan while prepare thread is held: no queue recovery, no serve, no spurious shutdown; safely release the thread and await completion.",
+      "Real pinned Docling installation with missing offline model path: FileNotFoundError, _prepared remains False and converter None.",
+      "Held initialization later fails: _prepared remains False while loading and after failure."
+    ],
+    "inspection": [
+      "Installed Docling 2.142.0 initialize_pipeline calls _get_pipeline; missing pipeline raises. StandardPdfPipeline.__init__ runs _init_models eagerly. Therefore this API actually constructs heavy models and reuses the same converter cache on subsequent conversion.",
+      "prepare and conversion use same serialization lock. _prepared only flips after success; disabled lifespan branch does not invoke prepare. Preparation precedes get_queue and lifespan yield.",
+      "Docker startup grace is 240 seconds; normal interval, timeout and retries remain unchanged. It delays health failure accounting but does not mark startup successful."
+    ],
+    "limits": [
+      "This review does not independently prove cold-start latency or 3 GiB mixed-load success; the separate real-model workload acceptance remains required before enabling Docling.",
+      "asyncio.to_thread cancellation does not terminate an already running native initializer; the probe confirms no traffic or queue recovery follows a cancelled lifespan."
+    ]
+  },
+  "tests": {
+    "startup_health_queue_build_identity_passed": 158,
+    "seconds": 63.29
+  },
+  "actual_lifespan_mixed_load": {
+    "startup_seconds": 5.383,
+    "source_sha": "b8b29a37d834fe8b4dfe634dd0b4e5e9861b8063",
+    "packages": {
+      "rapidocr": "3.9.2",
+      "onnxruntime": "1.30.0",
+      "rapid-table": "3.0.2",
+      "PyMuPDF": "1.27.1",
+      "fastapi": "0.149.0",
+      "docling": "2.142.0",
+      "torch": "2.14.1+cpu"
+    },
+    "seconds": 51.237,
+    "process_peak_rss_mib": 2781.7734375,
+    "workers": 2,
+    "threads_per_worker": 1,
+    "cgroup": {
+      "cpu.max": "200000 100000",
+      "memory.max": "3221225472",
+      "memory.swap.max": "0",
+      "memory.peak": "2708623360",
+      "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0"
+    },
+    "p95_queue_wait_seconds": 39.062,
+    "p95_processing_seconds": 44.232,
+    "synthetic_documents": 5,
+    "ocr_pages": 12,
+    "network_disabled": true,
+    "download_only_mocked": true,
+    "release_candidate_image": false,
+    "accuracy_qualified": false,
+    "limitations": "Current source in existing local Python environment, ephemeral systemd unit with 2 CPU / 3 GiB hard memory / no swap. Five synthetic OCR documents plus two real financial auto-table pages; H001 native and H004 optional Docling. Not an immutable image or production-host acceptance. OCR queue timings, operation wall times and private raw table outputs retained.",
+    "passed": true,
+    "results": [
+      {
+        "case": "doc00",
+        "operation": "/text/ocr",
+        "http_status": 200,
+        "status": "completed",
+        "page_count": 8,
+        "pages_complete": true,
+        "ordered_pages": true,
+        "receipt_matches": true,
+        "seconds": 51.219
+      },
+      {
+        "case": "doc01",
+        "operation": "/text/ocr",
+        "http_status": 200,
+        "status": "completed",
+        "page_count": 1,
+        "pages_complete": true,
+        "ordered_pages": true,
+        "receipt_matches": true,
+        "seconds": 7.158
+      },
+      {
+        "case": "doc02",
+        "operation": "/text/ocr",
+        "http_status": 200,
+        "status": "completed",
+        "page_count": 1,
+        "pages_complete": true,
+        "ordered_pages": true,
+        "receipt_matches": true,
+        "seconds": 34.438
+      },
+      {
+        "case": "doc03",
+        "operation": "/text/ocr",
+        "http_status": 200,
+        "status": "completed",
+        "page_count": 1,
+        "pages_complete": true,
+        "ordered_pages": true,
+        "receipt_matches": true,
+        "seconds": 46.158
+      },
+      {
+        "case": "doc04",
+        "operation": "/text/ocr",
+        "http_status": 200,
+        "status": "completed",
+        "page_count": 1,
+        "pages_complete": true,
+        "ordered_pages": true,
+        "receipt_matches": true,
+        "seconds": 39.592
+      },
+      {
+        "case": "doc04",
+        "operation": "/transform/orientation",
+        "http_status": 200,
+        "status": "returned",
+        "success": true,
+        "seconds": 3.119
+      },
+      {
+        "case": "doc03",
+        "operation": "/text/tables",
+        "http_status": 200,
+        "status": "complete",
+        "tables": 1,
+        "pages": [
+          {
+            "page_index": 0,
+            "status": "complete",
+            "reason": null,
+            "strategy": null
+          }
+        ],
+        "seconds": 27.823
+      },
+      {
+        "case": "H001",
+        "operation": "/text/tables",
+        "http_status": 200,
+        "status": "complete",
+        "tables": 1,
+        "pages": [
+          {
+            "page_index": 0,
+            "status": "complete",
+            "reason": null,
+            "strategy": null
+          }
+        ],
+        "seconds": 0.302
+      },
+      {
+        "case": "H004",
+        "operation": "/text/tables",
+        "http_status": 200,
+        "status": "partial",
+        "tables": 1,
+        "pages": [
+          {
+            "page_index": 0,
+            "status": "unsupported",
+            "reason": "fallback_invalid_table_structure",
+            "strategy": null
+          }
+        ],
+        "seconds": 21.312
+      }
+    ]
+  },
+  "report_sha256": "e7f9d930be7bdc308d9fb4cca3ef30c29095a72c6c582b6ab1c6f2696d8e4a02",
+  "limits": [
+    "Frozen source and pinned local Python environment, not an immutable image or production hardware.",
+    "Single run; OS cache and shared devbox contention affect startup/wall timing. Do not generalize5.383sstartup or51.237smixed duration.",
+    "Earlier2GiB cold experiment OOM-killed; earlier3GiB prepared tests reached memory cap withoutOOM. Resource headroom still requires exact-image qualification.",
+    "H004 table remains unsupported for source ambiguity; operational completion is not financial accuracy approval.",
+    "Initial health grace is240s and ends on first successful probe; after startup existing failure detection remains."
+  ],
+  "rollout": {
+    "availability_after_merge": "nobody for optional Docling behavior; production TABLE_FALLBACK remains none",
+    "config_or_spending_changed": false,
+    "next_review": "2026-11-13",
+    "issue_stays_open": true
+  }
+}

@@ -1,0 +1,755 @@
+{
+  "issue": "TAX-9602",
+  "parent": "TAX-7827",
+  "pr": 30,
+  "reviewed_source_commit": "f1e478ce77bad94fb65495df7fe4fc8edfacc1c6",
+  "checker": {
+    "verdict": "PASS",
+    "round": 3,
+    "scope": "Narrow mixed-font/shifted standalone sign delta since prior round2 PASS; prior review retained for unchanged behavior",
+    "reviewed_commit": "f1e478ce77bad94fb65495df7fe4fc8edfacc1c6",
+    "source_sha256": {
+      "app/services/table_native_financial.py": "132d8a774874f6ac78b1f9e3d322629ef68b1e65466b68a24ee74b5dac6c7f8b",
+      "app/services/table_docling.py": "0cf7b9eb827640c477033a783aa80c93fa1ea8e5317939deb0c8f71bca677c20",
+      "tests/test_native_financial_boundaries.py": "970c5cd9df95f0d7135123becf37ab0da2042387d8900319dfd295ebdbc71802"
+    },
+    "findings": [],
+    "tests": {
+      "passed": 165,
+      "skipped": 1,
+      "seconds": 44.1,
+      "command": "python -m pytest tests/test_native_financial_boundaries.py tests/test_native_table_headers.py tests/test_native_transaction_rows.py tests/test_table_pipeline.py tests/test_table_evidence.py tests/test_tables.py tests/test_financial_table_metrics.py -q"
+    },
+    "independent_probes": {
+      "cases": 27,
+      "passed": 27,
+      "font_sizes": [
+        4,
+        6,
+        10
+      ],
+      "baseline_offsets": [
+        -2,
+        0,
+        2
+      ],
+      "operations": [
+        "separator_cleanup",
+        "new_summary",
+        "prior_summary"
+      ],
+      "evidence": "sign-result-round3.json"
+    },
+    "positive_adapter_controls": {
+      "hidden_merged": {
+        "status": "unsupported",
+        "reason": "fallback_invalid_table_structure",
+        "rows": 3,
+        "columns": 3
+      },
+      "clean_split": {
+        "status": "complete",
+        "reason": null,
+        "rows": 3,
+        "columns": 4
+      },
+      "negative_separator": {
+        "status": "complete",
+        "reason": null,
+        "rows": 2,
+        "columns": 1
+      },
+      "clean_summary": {
+        "status": "complete",
+        "reason": null,
+        "rows": 3,
+        "columns": 2
+      }
+    },
+    "assessment": "Vertical glyph overlap recognizes independently painted signs across font sizes/baseline shifts; source adjacency protects both prior and recovered summary values. Proven divider tokens alone are ignored in rule cleanup. Narrow delta is conservative and does not change source values.",
+    "limitations": [
+      "No deployment or real-model qualification claimed by this review.",
+      "Ambiguous nearby source glyphs intentionally refuse recovery."
+    ],
+    "source_edits": false
+  },
+  "checker_prior": {
+    "verdict": "PASS",
+    "round": 2,
+    "reviewed_commit": "4df86c2e317bfe04ddaf311a049084336f01ed86",
+    "source_sha256": {
+      "app/services/table_native_financial.py": "589dc793ad0c2ba8b19cd006a772deabb062189e7d8c16365224b3904cc4a7bb",
+      "app/services/table_docling.py": "0cf7b9eb827640c477033a783aa80c93fa1ea8e5317939deb0c8f71bca677c20",
+      "tests/test_native_financial_boundaries.py": "a8ea4ccfdecb7e8a7b69deda85798299f951a2806846446091ebc390c5707796"
+    },
+    "tests": {
+      "command": "python -m pytest tests/test_native_financial_boundaries.py tests/test_native_table_headers.py tests/test_native_transaction_rows.py tests/test_table_pipeline.py tests/test_table_evidence.py tests/test_tables.py tests/test_financial_table_metrics.py -q",
+      "passed": 156,
+      "skipped": 1,
+      "seconds": 6.34
+    },
+    "findings": [],
+    "resolved_findings": {
+      "C1": "Original independent wrong-physical-column probe no longer recovers summary; unresolved1. Native headings must be complete, nonoverlapping and ordered; prior amount shares physical baseline and both amounts stay within source Gain/Loss corridor.",
+      "C2": "Original hidden-source merged-header probe now returns unresolved1. Independent adapter probe proves unsupported/fallback_invalid_table_structure; rotated and word-limit controls pass."
+    },
+    "other_verified_changes": [
+      "Page-wide terminal-column evidence rejects clipped table/extra source values.",
+      "Rule cleanup refuses adjacent independent sign/digit tokens and preserves true negative sign.",
+      "Summary ownership checks all input tables and prior recoveries.",
+      "Page extraction retains source index and BBOX; original input remains unchanged."
+    ],
+    "independent_adapter_results": {
+      "hidden_merged": {
+        "status": "unsupported",
+        "reason": "fallback_invalid_table_structure",
+        "rows": 3,
+        "columns": 3
+      },
+      "clean_split": {
+        "status": "complete",
+        "reason": null,
+        "rows": 3,
+        "columns": 4
+      },
+      "negative_separator": {
+        "status": "complete",
+        "reason": null,
+        "rows": 2,
+        "columns": 1
+      },
+      "clean_summary": {
+        "status": "complete",
+        "reason": null,
+        "rows": 3,
+        "columns": 2
+      }
+    },
+    "evidence": [
+      "probe-round2.py",
+      "probe-result-round2.json",
+      "adapter-round2.py",
+      "adapter-result-round2.json"
+    ],
+    "scope_limits": [
+      "No production deployment performed or assessed.",
+      "No model accuracy/generalization claim from synthetic adapter checks; parent owns real financial corpus and resource qualification.",
+      "Conservative refusal on uncertain or unsupported structure is intentional."
+    ],
+    "source_edits": false
+  },
+  "adversarial": {
+    "task": "TAX-9602",
+    "round": 3,
+    "verdict": "CLEAN",
+    "commit": "f1e478ce77bad94fb65495df7fe4fc8edfacc1c6",
+    "source_hashes": {
+      "app/services/table_native_financial.py": "132d8a774874f6ac78b1f9e3d322629ef68b1e65466b68a24ee74b5dac6c7f8b",
+      "app/services/table_docling.py": "0cf7b9eb827640c477033a783aa80c93fa1ea8e5317939deb0c8f71bca677c20",
+      "tests/test_native_financial_boundaries.py": "970c5cd9df95f0d7135123becf37ab0da2042387d8900319dfd295ebdbc71802"
+    },
+    "scope": "Final authorized narrow sign-completeness delta, plus prior concrete blockers rechecked. Not an unrestricted fresh audit or production approval.",
+    "findings": [],
+    "independent_actual_pdf_probes": {
+      "wrong_summary_column": "No new row; unresolved1.",
+      "truncated_table_empty_column": "No new column; unresolved1.",
+      "cross_table_summary_duplicate": "No duplicate; second table keeps existing source.",
+      "same_font_minus_rule_cleanup": "Preserves contaminated input; unresolved1.",
+      "same_font_minus_new_summary": "Does not append unsigned amount; unresolved1.",
+      "five_point_minus_eight_point_amount_same_baseline_rule": "Preserves contaminated input; unresolved1.",
+      "five_point_minus_eight_point_amount_same_baseline_summary": "Does not append unsigned amount; unresolved1.",
+      "one_point_vertical_offset_minus_rule": "Preserves contaminated input; unresolved1.",
+      "one_point_vertical_offset_minus_summary": "Does not append unsigned amount; unresolved1."
+    },
+    "evidence": [
+      "round3/round1-probes.json",
+      "round3/sign-probes.json",
+      "probe_round1.py",
+      "probe_round2_signs.py"
+    ],
+    "reasoning": "The shared guard checks overlapping vertical glyph extent rather than equal bbox centres and is applied before rule cleanup and to both predecessor and newly recovered summary amounts. Proven separator glyphs are excluded only from rule-cleanup adjacency. Original and mixed-font failure probes are now rejected conservatively.",
+    "independent_pytest": {
+      "command": "python -m pytest tests/test_native_financial_boundaries.py -q",
+      "result": "37 passed, 1 preexisting StarletteDeprecationWarning",
+      "elapsed_seconds": 47.51
+    }
+  },
+  "tests": {
+    "focused_passed": 165,
+    "initially_skipped": 1,
+    "cached_real_model_scan_test": "passed separately in9.45s",
+    "total_passed": 166
+  },
+  "frozen_prediction_replay": [
+    {
+      "id": "H001",
+      "status": "complete",
+      "shape": [
+        [
+          25,
+          13
+        ]
+      ],
+      "warnings": [
+        []
+      ],
+      "metrics": {
+        "pages": 1,
+        "labelled_rows": 24,
+        "numeric_cells": 121,
+        "money_cells": 96,
+        "ambiguous_numeric_associations": 0,
+        "located_bbox_outside_cell_region": 13,
+        "located_numeric_cells": 121,
+        "exact_numeric_cells": 121,
+        "exact_money_cells": 96,
+        "exact_money_with_contained_bbox": 87,
+        "sign_comparable_cells": 78,
+        "wrong_sign_cells": 0,
+        "fully_located_numeric_rows": 24,
+        "fully_exact_numeric_rows": 24,
+        "labelled_numeric_rows": 24,
+        "missing_numeric_rows": 0,
+        "column_conflicts": 0
+      },
+      "seconds": 0.15998556799604557
+    },
+    {
+      "id": "H002",
+      "status": "complete",
+      "shape": [
+        [
+          2,
+          4
+        ],
+        [
+          14,
+          8
+        ]
+      ],
+      "warnings": [
+        [],
+        []
+      ],
+      "metrics": {
+        "pages": 1,
+        "labelled_rows": 8,
+        "numeric_cells": 40,
+        "money_cells": 32,
+        "ambiguous_numeric_associations": 0,
+        "located_bbox_outside_cell_region": 0,
+        "located_numeric_cells": 40,
+        "exact_numeric_cells": 40,
+        "exact_money_cells": 32,
+        "exact_money_with_contained_bbox": 32,
+        "sign_comparable_cells": 32,
+        "wrong_sign_cells": 0,
+        "fully_located_numeric_rows": 8,
+        "fully_exact_numeric_rows": 8,
+        "labelled_numeric_rows": 8,
+        "missing_numeric_rows": 0,
+        "column_conflicts": 0
+      },
+      "seconds": 0.6660302760137711
+    },
+    {
+      "id": "H003",
+      "status": "complete",
+      "shape": [
+        [
+          2,
+          4
+        ],
+        [
+          15,
+          8
+        ]
+      ],
+      "warnings": [
+        [],
+        []
+      ],
+      "metrics": {
+        "pages": 1,
+        "labelled_rows": 8,
+        "numeric_cells": 37,
+        "money_cells": 29,
+        "ambiguous_numeric_associations": 0,
+        "located_bbox_outside_cell_region": 0,
+        "located_numeric_cells": 37,
+        "exact_numeric_cells": 37,
+        "exact_money_cells": 29,
+        "exact_money_with_contained_bbox": 29,
+        "sign_comparable_cells": 32,
+        "wrong_sign_cells": 0,
+        "fully_located_numeric_rows": 8,
+        "fully_exact_numeric_rows": 8,
+        "labelled_numeric_rows": 8,
+        "missing_numeric_rows": 0,
+        "column_conflicts": 0
+      },
+      "seconds": 0.07405220999498852
+    },
+    {
+      "id": "H004",
+      "status": "unsupported",
+      "shape": [
+        [
+          15,
+          10
+        ]
+      ],
+      "warnings": [
+        [
+          "native_financial_amount_clipped",
+          "native_financial_row_contaminated"
+        ]
+      ],
+      "metrics": {
+        "pages": 1,
+        "labelled_rows": 14,
+        "numeric_cells": 49,
+        "money_cells": 39,
+        "missing_numeric_cells": 2,
+        "missing_money_cells": 1,
+        "ambiguous_numeric_associations": 0,
+        "located_bbox_outside_cell_region": 0,
+        "located_numeric_cells": 47,
+        "exact_numeric_cells": 47,
+        "exact_money_cells": 38,
+        "exact_money_with_contained_bbox": 38,
+        "sign_comparable_cells": 32,
+        "wrong_sign_cells": 0,
+        "fully_located_numeric_rows": 12,
+        "fully_exact_numeric_rows": 12,
+        "labelled_numeric_rows": 14,
+        "missing_numeric_rows": 1,
+        "column_conflicts": 0
+      },
+      "seconds": 0.5326179929834325
+    },
+    {
+      "id": "H005",
+      "status": "complete",
+      "shape": [
+        [
+          7,
+          7
+        ]
+      ],
+      "warnings": [
+        []
+      ],
+      "metrics": {
+        "pages": 1,
+        "labelled_rows": 5,
+        "numeric_cells": 23,
+        "money_cells": 19,
+        "ambiguous_numeric_associations": 0,
+        "located_bbox_outside_cell_region": 0,
+        "located_numeric_cells": 23,
+        "exact_numeric_cells": 23,
+        "exact_money_cells": 19,
+        "exact_money_with_contained_bbox": 19,
+        "sign_comparable_cells": 20,
+        "wrong_sign_cells": 0,
+        "fully_located_numeric_rows": 5,
+        "fully_exact_numeric_rows": 5,
+        "labelled_numeric_rows": 5,
+        "missing_numeric_rows": 0,
+        "column_conflicts": 0
+      },
+      "seconds": 1.4813358320097905
+    }
+  ],
+  "archived_40_development_outputs_changed": [],
+  "fresh_auto_pipeline": {
+    "metrics": [
+      {
+        "id": "H001",
+        "status": "complete",
+        "source": "native_pdf",
+        "shape": [
+          [
+            28,
+            13
+          ]
+        ],
+        "warnings": [
+          []
+        ],
+        "metrics": {
+          "pages": 1,
+          "labelled_rows": 24,
+          "numeric_cells": 121,
+          "money_cells": 96,
+          "ambiguous_numeric_associations": 0,
+          "located_bbox_outside_cell_region": 118,
+          "located_numeric_cells": 121,
+          "exact_numeric_cells": 121,
+          "exact_money_cells": 96,
+          "exact_money_with_contained_bbox": 2,
+          "sign_comparable_cells": 78,
+          "wrong_sign_cells": 0,
+          "fully_located_numeric_rows": 24,
+          "fully_exact_numeric_rows": 24,
+          "labelled_numeric_rows": 24,
+          "missing_numeric_rows": 0,
+          "column_conflicts": 0
+        }
+      },
+      {
+        "id": "H004",
+        "status": "unsupported",
+        "source": "docling_tableformer",
+        "shape": [
+          [
+            15,
+            10
+          ]
+        ],
+        "warnings": [
+          [
+            "native_financial_amount_clipped",
+            "native_financial_row_contaminated"
+          ]
+        ],
+        "metrics": {
+          "pages": 1,
+          "labelled_rows": 14,
+          "numeric_cells": 49,
+          "money_cells": 39,
+          "missing_numeric_cells": 2,
+          "missing_money_cells": 1,
+          "ambiguous_numeric_associations": 0,
+          "located_bbox_outside_cell_region": 0,
+          "located_numeric_cells": 47,
+          "exact_numeric_cells": 47,
+          "exact_money_cells": 38,
+          "exact_money_with_contained_bbox": 38,
+          "sign_comparable_cells": 32,
+          "wrong_sign_cells": 0,
+          "fully_located_numeric_rows": 12,
+          "fully_exact_numeric_rows": 12,
+          "labelled_numeric_rows": 14,
+          "missing_numeric_rows": 1,
+          "column_conflicts": 0
+        }
+      }
+    ],
+    "timings": [
+      {
+        "id": "H001",
+        "seconds": 0.257,
+        "status": "complete",
+        "reason": null,
+        "tables": 1,
+        "row_counts": [
+          28
+        ],
+        "source_sha256": "38e359911b3cdeedd84972eb8965c69aba01ffeeaf60612acd94de076d242e91",
+        "peak_process_rss_mib": 115.34375
+      },
+      {
+        "id": "H004",
+        "seconds": 177.885,
+        "status": "unsupported",
+        "reason": "fallback_invalid_table_structure",
+        "tables": 1,
+        "row_counts": [
+          15
+        ],
+        "source_sha256": "959c8f905b957cfdf4cb3ed07b835cb962e06a741a1aaf0f1e021115ce48f3fe",
+        "peak_process_rss_mib": 1478.5
+      }
+    ],
+    "limits": "H001 auto uses native extraction, not this Docling helper. Native cell rectangles exceed tight source annotation regions. H004 conservatively retains one missing summary due overlapping adjacent source glyphs. Cold local wall timing includes shared devbox contention; not production latency."
+  },
+  "mixed_load": {
+    "two_gib": {
+      "result": "oom-kill",
+      "scope": "isolated local systemd unit, no production change",
+      "memory_max_bytes": 2147483648,
+      "memory_peak_bytes": 2147483648,
+      "swap_bytes": 0,
+      "cpu_quota": "200%",
+      "ocr_workers": 2,
+      "table_fallback": "docling",
+      "runtime_seconds": 115.284,
+      "cpu_seconds": 136.893266,
+      "source_identity_limit": "Exploratory run begun on 4df86c2 while subsequent pure financial-source guards were being edited. Not immutable-source qualification; repeat freezes source snapshot.",
+      "report_complete": false,
+      "acceptance": "FAIL: do not enable Docling at 2 GiB with two OCR workers"
+    },
+    "three_gib": {
+      "source_sha": "f1e478ce77bad94fb65495df7fe4fc8edfacc1c6",
+      "packages": {
+        "rapidocr": "3.9.2",
+        "onnxruntime": "1.30.0",
+        "rapid-table": "3.0.2",
+        "PyMuPDF": "1.27.1",
+        "fastapi": "0.149.0",
+        "docling": "2.142.0",
+        "torch": "2.14.1+cpu"
+      },
+      "seconds": 159.709,
+      "process_peak_rss_mib": 2140.5859375,
+      "workers": 2,
+      "threads_per_worker": 1,
+      "cgroup": {
+        "cpu.max": "200000 100000",
+        "memory.max": "3221225472",
+        "memory.swap.max": "0",
+        "memory.peak": "2866651136",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0"
+      },
+      "p95_queue_wait_seconds": 134.076,
+      "p95_processing_seconds": 78.674,
+      "synthetic_documents": 5,
+      "ocr_pages": 12,
+      "network_disabled": true,
+      "download_only_mocked": true,
+      "release_candidate_image": false,
+      "accuracy_qualified": false,
+      "limitations": "Current source in existing local Python environment, ephemeral systemd unit with 2 CPU / 3 GiB hard memory / no swap. Five synthetic OCR documents plus two real financial Docling pages. Not an immutable image or production-host acceptance. OCR queue timings, operation wall times and private raw table outputs retained.",
+      "results": [
+        {
+          "case": "doc00",
+          "operation": "/text/ocr",
+          "http_status": 200,
+          "submit_seconds": 0.955,
+          "task_id": "6337be4e-e4ff-4534-9141-61bcc41b2476",
+          "status": "completed",
+          "page_count": 8,
+          "pages_complete": true,
+          "ordered_pages": true,
+          "total_words": 680,
+          "coverage": {
+            "requested_pages": 8,
+            "complete_pages": 8,
+            "partial_pages": 0,
+            "empty_pages": 0,
+            "failed_pages": 0,
+            "discarded_words": 0,
+            "status": "complete"
+          },
+          "receipt_matches": true,
+          "seconds": 105.332
+        },
+        {
+          "case": "doc01",
+          "operation": "/text/ocr",
+          "http_status": 200,
+          "submit_seconds": 1.023,
+          "task_id": "4a7e142d-6cf1-49a4-9cf1-bbe085fc24d0",
+          "status": "completed",
+          "page_count": 1,
+          "pages_complete": true,
+          "ordered_pages": true,
+          "total_words": 85,
+          "coverage": {
+            "requested_pages": 1,
+            "complete_pages": 1,
+            "partial_pages": 0,
+            "empty_pages": 0,
+            "failed_pages": 0,
+            "discarded_words": 0,
+            "status": "complete"
+          },
+          "receipt_matches": true,
+          "seconds": 143.159
+        },
+        {
+          "case": "doc02",
+          "operation": "/text/ocr",
+          "http_status": 200,
+          "submit_seconds": 1.016,
+          "task_id": "181665a7-4267-4e51-b7bf-94b2c736b7d5",
+          "status": "completed",
+          "page_count": 1,
+          "pages_complete": true,
+          "ordered_pages": true,
+          "total_words": 85,
+          "coverage": {
+            "requested_pages": 1,
+            "complete_pages": 1,
+            "partial_pages": 0,
+            "empty_pages": 0,
+            "failed_pages": 0,
+            "discarded_words": 0,
+            "status": "complete"
+          },
+          "receipt_matches": true,
+          "seconds": 135.102
+        },
+        {
+          "case": "doc03",
+          "operation": "/text/ocr",
+          "http_status": 200,
+          "submit_seconds": 1.012,
+          "task_id": "56f79b7c-95a9-4ba1-aa01-966392e0a254",
+          "status": "completed",
+          "page_count": 1,
+          "pages_complete": true,
+          "ordered_pages": true,
+          "total_words": 86,
+          "coverage": {
+            "requested_pages": 1,
+            "complete_pages": 1,
+            "partial_pages": 0,
+            "empty_pages": 0,
+            "failed_pages": 0,
+            "discarded_words": 0,
+            "status": "complete"
+          },
+          "receipt_matches": true,
+          "seconds": 115.531
+        },
+        {
+          "case": "doc04",
+          "operation": "/text/ocr",
+          "http_status": 200,
+          "submit_seconds": 1.012,
+          "task_id": "306c1fb5-ec28-4d19-8e44-c5c7587ecd98",
+          "status": "completed",
+          "page_count": 1,
+          "pages_complete": true,
+          "ordered_pages": true,
+          "total_words": 85,
+          "coverage": {
+            "requested_pages": 1,
+            "complete_pages": 1,
+            "partial_pages": 0,
+            "empty_pages": 0,
+            "failed_pages": 0,
+            "discarded_words": 0,
+            "status": "complete"
+          },
+          "receipt_matches": true,
+          "seconds": 125.945
+        },
+        {
+          "case": "doc04",
+          "operation": "/transform/orientation",
+          "http_status": 200,
+          "submit_seconds": 26.343,
+          "status": "returned",
+          "success": true,
+          "checked_page_count": 1,
+          "error": null,
+          "seconds": 26.343,
+          "harness_status_original": "failed"
+        },
+        {
+          "case": "doc03",
+          "operation": "/text/tables",
+          "http_status": 200,
+          "submit_seconds": 34.084,
+          "status": "complete",
+          "tables": 1,
+          "pages": [
+            {
+              "page_index": 0,
+              "status": "complete",
+              "reason": null,
+              "strategy": null
+            }
+          ],
+          "seconds": 34.086
+        },
+        {
+          "case": "H001",
+          "operation": "/text/tables",
+          "http_status": 200,
+          "submit_seconds": 99.01,
+          "status": "partial",
+          "tables": 0,
+          "pages": [
+            {
+              "page_index": 0,
+              "status": "failed",
+              "reason": "table_request_timeout",
+              "strategy": null
+            }
+          ],
+          "seconds": 99.01
+        },
+        {
+          "case": "H004",
+          "operation": "/text/tables",
+          "http_status": 200,
+          "submit_seconds": 99.008,
+          "status": "partial",
+          "tables": 0,
+          "pages": [
+            {
+              "page_index": 0,
+              "status": "failed",
+              "reason": "table_request_timeout",
+              "strategy": null
+            }
+          ],
+          "seconds": 99.008
+        }
+      ],
+      "queue_timings": [
+        {
+          "operation": "ocr",
+          "status": "completed",
+          "queue_wait_seconds": 25.415,
+          "processing_seconds": 78.674
+        },
+        {
+          "operation": "ocr",
+          "status": "completed",
+          "queue_wait_seconds": 104.089,
+          "processing_seconds": 10.345
+        },
+        {
+          "operation": "ocr",
+          "status": "completed",
+          "queue_wait_seconds": 114.434,
+          "processing_seconds": 10.455
+        },
+        {
+          "operation": "ocr",
+          "status": "completed",
+          "queue_wait_seconds": 124.889,
+          "processing_seconds": 9.186
+        },
+        {
+          "operation": "ocr",
+          "status": "completed",
+          "queue_wait_seconds": 134.076,
+          "processing_seconds": 7.716
+        }
+      ],
+      "passed": false,
+      "harness_correction": "Original orientation status string compared HTTP to50 after an overbroad fixture-count replacement. HTTP200,success=true,checked_page_count=1 independently establish orientation success. Original report retained; no product code affected. Overall mixed-load verdict remains FAIL because both financial table requests timed out.",
+      "input_path_note": "Two financial pages used strategy=auto; H001 can use native PDF extraction and H004 uses optional Docling. This does not prove both invoked Docling.",
+      "host_timing_limit": "CPU quota limits consumption; it does not reserve two CPUs against concurrent devbox work. Wall times are local contention observations, not a production latency guarantee."
+    }
+  },
+  "production_read_only": {
+    "observed_utc": "2026-11-11T22:01:13.749113+00:00",
+    "status": "ok",
+    "container_health": "healthy",
+    "source_commit": "fdb8526357a213f6c253897b41a6d1c679720570",
+    "image_config_id": "sha256:bf0331c00ab73f3c66608cfa26af5135042cdf4ca832e2688fc44cb1500fabcc",
+    "table_fallback": "none",
+    "unfinished_ocr_jobs": 0,
+    "operation": "read-only SSM inspection; safe docker format and allowlisted health/config fields, no secret reads"
+  },
+  "rollout": {
+    "availability_after_merge": "nobody in production; TABLE_FALLBACK remains none",
+    "config_changed": false,
+    "next_review": "2026-11-13",
+    "issue_remains_open": true
+  },
+  "limits": [
+    "No universal financial table completeness or automatic tax fact approval claim.",
+    "30-50 page broader corpus accuracy gate and meaningful cross-page continuation remain on TAX-7827.",
+    "Mixed load failed:2GiB OOM;3GiB no OOM but both financial table requests timed out. No optional fallback rollout approval.",
+    "Fresh H00438/39 exact money, not earlier39/39 pre-final-guard replay; source ambiguity deliberately preserved."
+  ]
+}

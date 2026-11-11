@@ -235,3 +235,22 @@ def test_unavailable_source_never_certifies_known_merged_columns(reason):
     result,u=refine_financial_boundaries(page if reason=='word_limit' else doc[0],[t])
     assert u==1 and result[0]['col_count']==3
     assert 'native_merged_financial_columns' in result[0]['warnings']
+
+
+@pytest.mark.parametrize('size,offset',[(5,0),(8,1),(5,-1)])
+@pytest.mark.parametrize('operation',['rule','new_summary','prior_summary'])
+def test_small_or_shifted_sign_is_not_dropped(size,offset,operation):
+    if operation=='rule':
+        doc,t,c=rule_fixture('123.45')
+        doc[0].insert_text((240,90+offset),'-',fontsize=size)
+        result,u=refine_financial_boundaries(doc[0],[t])
+        assert result[0]['rows'][1][0]!='123.45'
+    else:
+        doc,t=summary_fixture(loss_value='55.00')
+        y=92 if operation=='new_summary' else 80
+        value='55.00' if operation=='new_summary' else '100.00'
+        x=t['cells'][-1]['bbox']['x1']-fitz.get_text_length(value,fontsize=8)-8
+        doc[0].insert_text((x,y+offset),'-',fontsize=size)
+        result,u=refine_financial_boundaries(doc[0],[t])
+        assert result[0]['row_count']==2
+    assert u==1

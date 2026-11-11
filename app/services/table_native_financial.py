@@ -97,6 +97,16 @@ def _split_empty_terminal_column(table, words):
     table['col_count'] += 1
 
 
+def _has_adjacent_source(evidence, words, ignored=()):
+    # Glyph centres differ with font size even on an identical PDF baseline.
+    # Vertical overlap retains separately painted small signs and punctuation.
+    b = _box(evidence)
+    return any(w not in evidence and w not in ignored and
+               min(w[0].y1, b.y1) > max(w[0].y0, b.y0) and
+               w[0].x1 >= b.x0-2*b.height and w[0].x0 <= b.x1+2*b.height
+               for w in words)
+
+
 def _remove_proven_rules(table, words):
     bounds = _rect(table['bbox'])
     rules = []
@@ -127,11 +137,7 @@ def _remove_proven_rules(table, words):
             continue
         # Independently painted signs/digits can lie just outside the model
         # bbox. Never turn a clipped signed token into an unsigned amount.
-        b = _box(kept)
-        adjacent = [w for w in words if w not in kept and
-                    abs((w[0].y0+w[0].y1-b.y0-b.y1)/2) <= .8 and
-                    w[0].x1 >= b.x0-2*b.height and w[0].x0 <= b.x1+2*b.height]
-        if adjacent:
+        if _has_adjacent_source(kept, words, rules):
             table['warnings'].append('native_financial_amount_clipped')
             continue
         table['cells'][i] = _cell(c,kept)
@@ -191,6 +197,9 @@ def _recover_summary(table, words, assigned):
             abs((ab.y0+ab.y1-lb.y0-lb.y1)/2) > .8):
         table['warnings'].append('native_summary_column_unproven')
         return
+    if _has_adjacent_source(source_amount, words):
+        table['warnings'].append('native_financial_amount_clipped')
+        return
     prior = _box(source_label+source_amount)
     target = match[1] + (' Loss' if match[2]=='Gain' else ' Gain')
     candidates = []
@@ -202,9 +211,15 @@ def _recover_summary(table, words, assigned):
         label = [w for w in line if w not in numbers]
         if len(numbers)==1 and _text(label)==target:
             candidates.append((label,numbers))
+        elif len(numbers)==1 and _text([w for w in label if w[1] not in ('-', '−', '(', ')')])==target:
+            table['warnings'].append('native_financial_amount_clipped')
+            return
     if len(candidates)!=1:
         return
     label,number = candidates[0]
+    if _has_adjacent_source(number, words):
+        table['warnings'].append('native_financial_amount_clipped')
+        return
     lb,nb = _box(label),_box(number)
     if (abs(lb.x0-_box(source_label).x0)>1 or
             abs(nb.x1-_box(source_amount).x1)>1 or lb.x1>=nb.x0 or

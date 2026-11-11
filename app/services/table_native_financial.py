@@ -67,7 +67,15 @@ def _split_empty_terminal_column(table, words):
         return
     boundary = (_box(left).x1 + _box(right).x0)/2
     bounds = _rect(table['bbox'])
-    below = [w for w in _inside(bounds, words) if w[0].y0 > _box(source).y1]
+    # A clipped model rectangle cannot prove that the newly split column is
+    # empty. Require the full native heading and inspect its footprint through
+    # the rest of the page, including content outside the model's bottom edge.
+    heading = _box(source)
+    if (not bounds or bounds.x0 > heading.x0 or bounds.x1 < heading.x1 or
+            bounds.y1 < heading.y1):
+        table['warnings'].append(fail)
+        return
+    below = [w for w in words if w[0].y0 > heading.y1]
     body = [x for x in table['cells'] if x is not c and
             x['column_index']+x['column_span'] > c['column_index']]
     if any((w[0].x0+w[0].x1)/2 >= boundary for w in below):
@@ -117,10 +125,41 @@ def _remove_proven_rules(table, words):
         if len(_lines(kept)) != 1 or abs((_box(kept).y0+_box(kept).y1-
                                        _box(removed).y0-_box(removed).y1)/2) < _box(kept).height*.5:
             continue
+        # Independently painted signs/digits can lie just outside the model
+        # bbox. Never turn a clipped signed token into an unsigned amount.
+        b = _box(kept)
+        adjacent = [w for w in words if w not in kept and
+                    abs((w[0].y0+w[0].y1-b.y0-b.y1)/2) <= .8 and
+                    w[0].x1 >= b.x0-2*b.height and w[0].x0 <= b.x1+2*b.height]
+        if adjacent:
+            table['warnings'].append('native_financial_amount_clipped')
+            continue
         table['cells'][i] = _cell(c,kept)
 
 
-def _recover_summary(table, words):
+def _header_corridor(table, header, words):
+    """Column ownership comes from ordered native headings, never model indices alone."""
+    headings = []
+    for h in table['cells']:
+        if not h.get('is_header'):
+            continue
+        source = _inside(_rect(h['bbox']), words)
+        if (h['column_span'] != 1 or not source or
+                Counter(w[1] for w in source) != Counter(h['raw_text'].split())):
+            return None
+        headings.append((h, _box(source)))
+    headings.sort(key=lambda pair: pair[1].x0)
+    if ([h['column_index'] for h, _ in headings] != list(range(table['col_count'])) or
+            any(a[1].x1 >= b[1].x0 for a, b in zip(headings, headings[1:]))):
+        return None
+    index = next(i for i, (h, _) in enumerate(headings) if h is header)
+    bounds = _rect(table['bbox'])
+    left = bounds.x0 if index == 0 else (headings[index-1][1].x1+headings[index][1].x0)/2
+    right = bounds.x1 if index == len(headings)-1 else (headings[index][1].x1+headings[index+1][1].x0)/2
+    return left, right
+
+
+def _recover_summary(table, words, assigned):
     pattern = r'(Box [A-F] (?:Short|Long)-Term Realized) (Gain|Loss)'
     summary = [(c,re.fullmatch(pattern,c['text'])) for c in table['cells']]
     summary = [(c,m) for c,m in summary if m]
@@ -146,6 +185,12 @@ def _recover_summary(table, words):
     if (_compact(_text(source_label)) != _compact(c['raw_text']) or
             _compact(_text(source_amount)) != _compact(amount['raw_text']) or not source_label or not source_amount):
         return
+    corridor = _header_corridor(table, gain_headers[0], words)
+    ab, lb = _box(source_amount), _box(source_label)
+    if (not corridor or ab.x0 < corridor[0] or ab.x1 > corridor[1] or
+            abs((ab.y0+ab.y1-lb.y0-lb.y1)/2) > .8):
+        table['warnings'].append('native_summary_column_unproven')
+        return
     prior = _box(source_label+source_amount)
     target = match[1] + (' Loss' if match[2]=='Gain' else ' Gain')
     candidates = []
@@ -162,14 +207,16 @@ def _recover_summary(table, words):
     label,number = candidates[0]
     lb,nb = _box(label),_box(number)
     if (abs(lb.x0-_box(source_label).x0)>1 or
-            abs(nb.x1-_box(source_amount).x1)>1 or lb.x1>=nb.x0):
+            abs(nb.x1-_box(source_amount).x1)>1 or lb.x1>=nb.x0 or
+            nb.x0 < corridor[0] or nb.x1 > corridor[1]):
         return
-    # Never duplicate evidence already assigned elsewhere in this table.
-    if any(_inside(_rect(x['bbox']), label+number) for x in table['cells']):
+    # Ownership is page-wide, including other tables and earlier recoveries.
+    if any(_inside(_rect(x['bbox']), label+number) for x in assigned):
         return
     next_row=table['row_count']
     table['cells'].extend([_cell(dict(c,row_index=next_row),label),
                            _cell(dict(amount,row_index=next_row),number)])
+    assigned.extend(table['cells'][-2:])
     table['row_count']+=1
     b = _rect(table['bbox']) | lb | nb
     table['bbox']=dict(x0=b.x0,y0=b.y0,x1=b.x1,y1=b.y1)
@@ -178,13 +225,12 @@ def _recover_summary(table, words):
 def refine_financial_boundaries(page, tables):
     angle=math.radians(page.rotation)
     trace=page.get_texttrace()
-    if not trace or any(s['type']==3 or s['opacity']==0 or
-                       s['dir'][0]*math.cos(angle)-s['dir'][1]*math.sin(angle)<.9 for s in trace):
-        return tables,0
+    source_safe = bool(trace) and not any(s['type']==3 or s['opacity']==0 or
+                       s['dir'][0]*math.cos(angle)-s['dir'][1]*math.sin(angle)<.9 for s in trace)
     words=[(fitz.Rect(w[:4])*page.rotation_matrix,w[4]) for w in page.get_text('words')]
-    if len(words)>5000:
-        return tables,0
+    source_safe = source_safe and len(words) <= 5000
     output,unresolved=[],0
+    assigned=[c for t in tables for c in t['cells']]
     for original in tables:
         table=deepcopy(original)
         headers=[c for c in table['cells'] if c.get('is_header')]
@@ -192,9 +238,16 @@ def refine_financial_boundaries(page, tables):
             output.append(original)
             continue
         table.setdefault('warnings',[])
+        if not source_safe:
+            if any('Wash Sale Loss Disallowed (Box 1g) Proceeds from C/Q' ==
+                   ' '.join(c['text'].split()) for c in headers):
+                table['warnings'].append('native_merged_financial_columns')
+                unresolved += 1
+            output.append(table)
+            continue
         _split_empty_terminal_column(table,words)
         _remove_proven_rules(table,words)
-        _recover_summary(table,words)
+        _recover_summary(table,words,assigned)
         # Quantity/date columns containing header prose are not transactions,
         # even when their associated monetary values happen to be correct.
         scalar_cols={c['column_index'] for c in headers if c['text']=='Quantity' or

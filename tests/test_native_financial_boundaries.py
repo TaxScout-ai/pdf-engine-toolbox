@@ -58,7 +58,7 @@ def test_uncertain_terminal_column_is_not_split(change):
     if change=='body_span':t['cells'][-1]['column_span']=2
     result,u=refine_financial_boundaries(doc[0],[t])
     assert result[0]['col_count']==3
-    if change!='hidden':assert u==1
+    assert u==1
 
 
 def rule_fixture(value='123.45',dashes=100):
@@ -165,3 +165,73 @@ def test_adapter_keeps_recovered_summary_on_its_original_document_page(monkeypat
     for index,result in [(1,first),(2,second)]:
         assert result['tables'][0]['page_index']==index
         assert all(c['page_index']==index for c in result['tables'][0]['cells'])
+
+
+@pytest.mark.parametrize('clip', ['right', 'bottom'])
+def test_clipped_table_cannot_prove_empty_terminal_column(clip):
+    doc,t=header_fixture(extra=clip=='right')
+    if clip=='right':t['bbox']['x1']=530
+    else:doc[0].insert_text((550,180),'999.00',fontsize=8)
+    result,u=refine_financial_boundaries(doc[0],[t])
+    assert result[0]['col_count']==3 and u==1
+
+
+@pytest.mark.parametrize('x,text', [(240,'-'),(240,'9'),(282,'-')])
+def test_separate_source_sign_or_digit_cannot_be_dropped(x,text):
+    doc,t,c=rule_fixture('123.45');before=deepcopy(c)
+    doc[0].insert_text((x,90),text,fontsize=8)
+    result,u=refine_financial_boundaries(doc[0],[t])
+    assert result[0]['cells'][1]==before
+    # Tokens inside the model bbox already invalidate exact source matching.
+    assert result[0]['rows'][1][0]!='123.45'
+    if x==240:assert u==1
+
+
+@pytest.mark.parametrize('gain_x,cost_x,amount_x', [(300,540,575),(540,280,300)])
+def test_summary_requires_native_column_ownership(gain_x,cost_x,amount_x):
+    doc=fitz.open();p=doc.new_page(width=700,height=400);cells=[]
+    add(p,cells,0,0,'Proceeds (Box 1d)',20,40,True)
+    gain_col=1 if gain_x<cost_x else 2
+    add(p,cells,0,gain_col,'Gain/Loss (-)',gain_x,40,True)
+    add(p,cells,0,3-gain_col,'Cost basis (Box 1e)',cost_x,40,True)
+    add(p,cells,1,0,'Box B Short-Term Realized Gain',20,80)
+    a=add(p,cells,1,gain_col,'100.00',amount_x,80)
+    p.insert_text((20,92),'Box B Short-Term Realized Loss',fontsize=8)
+    p.insert_text((a['bbox']['x1']-fitz.get_text_length('55.00',fontsize=8),92),'55.00',fontsize=8)
+    result,u=refine_financial_boundaries(p,[table(cells,2,3,110)])
+    assert result[0]['row_count']==2 and u==1
+
+
+def test_summary_source_owned_by_another_table_is_not_duplicated():
+    doc,t=summary_fixture(loss_value='55.00')
+    ws=[w for w in doc[0].get_text('words') if w[1]>80]
+    other=[]
+    for original,words in [(t['cells'][2],[w for w in ws if w[4]!='55.00']),
+                           (t['cells'][3],[w for w in ws if w[4]=='55.00'])]:
+        c=deepcopy(original)
+        c.update(row_index=0,text=' '.join(w[4] for w in words),raw_text=' '.join(w[4] for w in words),
+                 bbox=dict(x0=min(w[0] for w in words),y0=min(w[1] for w in words),
+                           x1=max(w[2] for w in words),y1=max(w[3] for w in words)))
+        other.append(c)
+    second=table(other,1,2,110)
+    for inputs in [[t,second],[second,t]]:
+        result,_=refine_financial_boundaries(doc[0],inputs)
+        assert sorted(x['row_count'] for x in result)==[1,2]
+
+
+@pytest.mark.parametrize('reason',['hidden','rotated','word_limit'])
+def test_unavailable_source_never_certifies_known_merged_columns(reason):
+    doc,t=header_fixture()
+    if reason=='hidden':doc[0].insert_text((20,200),'HIDDEN',render_mode=3)
+    elif reason=='rotated':doc[0].insert_text((20,200),'SIDEWAYS',rotate=90)
+    else:
+        # A source wrapper supplies actual native words beyond the safety cap.
+        class ExcessWords:
+            rotation=0
+            rotation_matrix=fitz.Matrix(1,1)
+            def get_texttrace(self):return doc[0].get_texttrace()
+            def get_text(self,kind):return doc[0].get_text(kind)*1000
+        page=ExcessWords()
+    result,u=refine_financial_boundaries(page if reason=='word_limit' else doc[0],[t])
+    assert u==1 and result[0]['col_count']==3
+    assert 'native_merged_financial_columns' in result[0]['warnings']

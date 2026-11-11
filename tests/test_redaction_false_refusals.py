@@ -438,3 +438,19 @@ def test_a_longer_number_is_still_not_an_identifier_in_a_text_layer():
     doc.new_page(width=612, height=792).insert_text(
         (72, 100), "Ref 2025-123-45-678901 and 1-12-3456789-0", fontsize=11)
     assert ir.redact_identifiers(doc.tobytes(), ocr=lambda *_: {})["redactions"] == []
+
+
+def test_kept_last_four_beside_a_year_and_a_short_group_do_not_refuse():
+    """Round 3: "Row 2024 12" + a masked SSN's last four is not an identifier."""
+    def draw(p):
+        p.insert_text((72, 160), "Row 2024 12 912-34-5678", fontsize=11)
+
+    scan, words, source = _scan(draw)
+
+    def check(text, rect):
+        if text == "912-34-5678":
+            return [(text[-4:], _part(source, rect, text[-4:]))]
+        return [(text, rect)]
+
+    result = ir.redact_identifiers(scan, ocr=_ocr(words, source, check))
+    assert [r["kind"] for r in result["redactions"]] == ["ssn"]

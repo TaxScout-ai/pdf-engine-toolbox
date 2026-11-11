@@ -327,7 +327,9 @@ def bare_suspect_runs(words: list[Word]) -> list[str]:
     return out
 
 
-def _matches(line: str, ocr: bool = False) -> Iterable[tuple[int, int, str, str]]:
+def _matches(
+    line: str, ocr: bool = False, exact: bool = False
+) -> Iterable[tuple[int, int, str, str]]:
     """(start, end, kind, digits) for every identifier in one line of text.
 
     OCR text (``ocr``) is matched after confusion normalization, and any run of
@@ -340,7 +342,7 @@ def _matches(line: str, ocr: bool = False) -> Iterable[tuple[int, int, str, str]
             if len(digits) == 9:
                 yield start, end, _run_kind(normalized, start, end), digits
             elif len(digits) > 9:
-                yield from _embedded_identifiers(normalized, start, end)
+                yield from _embedded_identifiers(normalized, start, end, exact)
         return
     for m in _SSN.finditer(line):
         yield m.start(), m.end(), "ssn", m.group(1) + m.group(3) + m.group(4)
@@ -353,7 +355,7 @@ def _matches(line: str, ocr: bool = False) -> Iterable[tuple[int, int, str, str]
         yield m.start(1), m.end(1), kind, m.group(1)
 
 
-def _embedded_identifiers(text: str, start: int, end: int):
+def _embedded_identifiers(text: str, start: int, end: int, exact: bool = False):
     """Identifiers in exact SSN (3-2-4), EIN (2-7) or bare (9) group shape
     inside a longer digit run (TAX-9096).
 
@@ -373,7 +375,7 @@ def _embedded_identifiers(text: str, start: int, end: int):
             # it with no separator ("Tax10" + "123-45-6789"). Its own digits
             # are the last of that group. A lone 9-digit group must be exact.
             if lengths[1:] != shape[1:] or not (
-                lengths[0] == shape[0] or (n > 1 and lengths[0] > shape[0])
+                lengths[0] == shape[0] or (not exact and n > 1 and lengths[0] > shape[0])
             ):
                 continue
             s0 = window[0][1] - shape[0]
@@ -479,7 +481,8 @@ def _part_rect(word: Word, lo: int, hi: int, page: fitz.Page | None, source: str
 
 
 def find_identifiers(
-    page_index: int, words: list[Word], source: str, page: fitz.Page | None = None
+    page_index: int, words: list[Word], source: str, page: fitz.Page | None = None,
+    exact: bool = False,
 ) -> list[Found]:
     """Locate identifiers in a page's words, spanning word boundaries.
 
@@ -497,7 +500,7 @@ def find_identifiers(
             start = len(text)
             text += w.text
             spans.append((start, len(text), w))
-        for start, end, kind, digits in _matches(text, ocr):
+        for start, end, kind, digits in _matches(text, ocr, exact):
             cut = _prefix_end(normalize_confusions(text) if ocr else text, start, end)
             rects = []
             for s, e, w in spans:
@@ -1108,7 +1111,10 @@ def redact_identifiers(
         finally:
             _OWN_FILLS.reset(token)
         for i, words in check.items():
-            remaining.extend(find_identifiers(i, words, "ocr"))
+            # Exact shapes only: once a prefix is masked, the kept last four
+            # sit next to whatever was left of it, and a longer first group
+            # there ("2024 12" + last four) is not a readable identifier.
+            remaining.extend(find_identifiers(i, words, "ocr", exact=True))
             # A reference number masked whole must not be readable in the
             # output: no near-identifier run may touch one of its boxes. (Other
             # print was judged on the first reading; a second reading of an

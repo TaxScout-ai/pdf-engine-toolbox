@@ -103,8 +103,9 @@ ENV HF_HUB_OFFLINE=1 HF_HUB_DISABLE_TELEMETRY=1
 # Expose port
 EXPOSE 8000
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --retries=3 \
+# Optional offline model preparation precedes readiness. A successful probe
+# ends the startup grace immediately; normal failure detection is unchanged.
+HEALTHCHECK --start-period=240s --interval=30s --timeout=10s --retries=3 \
     CMD curl -f http://localhost:8000/health || exit 1
 
 # Run with uvicorn. The explicit exec preserves signal delivery while allowing

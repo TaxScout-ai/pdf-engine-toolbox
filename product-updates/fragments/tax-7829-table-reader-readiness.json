@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "id": "tax-7829-table-reader-readiness",
+  "audience": "design_partners",
+  "category": "fix",
+  "customerVisible": true,
+  "title": "Prepare the optional table reader before processing documents",
+  "summary": "When enabled, the optional table reader loads before accepting documents so model startup does not consume the first request\u2019s time limit.",
+  "bodyMarkdown": "## What changed\n\nThe optional financial table reader prepares its offline models before the service accepts requests or resumes queued OCR work. Missing models stop startup instead of failing the first document.\n\n## Why it matters\n\nDocument requests no longer have to wait for this model initialization within their own time limit. This does not remove queue limits or guarantee table recognition.\n\n## Where to find it\n\nApplies when the optional table reader is enabled. General availability remains under financial accuracy and capacity qualification.",
+  "fromFeedback": false,
+  "channels": {
+    "widget": true,
+    "inApp": true,
+    "email": false
+  },
+  "cta": null,
+  "email": null,
+  "screenshot": {
+    "required": false,
+    "captureInstructions": null,
+    "altText": null
+  },
+  "relatedLinearIssueIds": [
+    "TAX-7829"
+  ]
+}

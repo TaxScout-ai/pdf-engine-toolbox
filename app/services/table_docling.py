@@ -11,6 +11,7 @@ import io
 import json
 import os
 import threading
+import time
 from pathlib import Path
 
 import structlog
@@ -22,6 +23,7 @@ from app.services.table_evidence import MAX_CELLS, TableStructureError, pdf_bbox
 log = structlog.get_logger()
 _lock = threading.Lock()
 _converter = None
+_prepared = False
 
 
 def _get_converter():
@@ -70,8 +72,27 @@ def _get_converter():
     _converter = DocumentConverter(format_options={
         InputFormat.PDF: PdfFormatOption(pipeline_options=options),
     })
-    log.info("tableformer_ready", threads=threads, profile="docling-2.142.0-accurate")
+    log.info("tableformer_converter_configured", threads=threads, profile="docling-2.142.0-accurate")
     return _converter
+
+
+def prepare():
+    """Load the offline PDF pipeline before HTTP traffic or queue recovery.
+
+    This uses Docling's public initialization API, not a customer document.
+    A missing/incompatible model aborts startup instead of the first request.
+    """
+    global _prepared
+    from docling.datamodel.base_models import InputFormat
+
+    with _lock:
+        if _prepared:
+            return
+        started = time.monotonic()
+        _get_converter().initialize_pipeline(InputFormat.PDF)
+        _prepared = True
+        log.info("tableformer_ready", profile="docling-2.142.0-accurate",
+                 preparation_seconds=round(time.monotonic()-started, 3))
 
 
 class MappedTables(list):

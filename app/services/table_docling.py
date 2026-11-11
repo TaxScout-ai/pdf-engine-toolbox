@@ -78,7 +78,7 @@ class MappedTables(list):
     unresolved_tables = 0
 
 
-def map_document(document, page_index: int, *, strict: bool = True) -> list[dict]:
+def map_document(document, page_index: int, *, strict: bool = True, native_page=None) -> list[dict]:
     """Map single-page Docling coordinates and spans without inventing cells."""
     tables = MappedTables()
     for item in document.tables:
@@ -88,25 +88,23 @@ def map_document(document, page_index: int, *, strict: bool = True) -> list[dict
             provenance = item.prov[0]
             page = document.pages[provenance.page_no]
             width, height = page.size.width, page.size.height
+            table_box = provenance.bbox.to_top_left_origin(height)
+            table_bounds = pdf_bbox([table_box.l, table_box.t, table_box.r, table_box.b],
+                                    (0, 0), (1, 1), width, height)
             data = item.data
             if data.num_rows <= 0 or data.num_cols <= 0 or data.num_rows * data.num_cols > MAX_CELLS:
                 raise TableStructureError("Invalid table dimensions")
             rows = [[""] * data.num_cols for _ in range(data.num_rows)]
-            cells, occupied = [], set()
+            cells = []
             for cell in data.table_cells:
                 r, c = cell.start_row_offset_idx, cell.start_col_offset_idx
                 rs, cs = cell.row_span, cell.col_span
                 if not (0 <= r < data.num_rows and 0 <= c < data.num_cols and
                         1 <= rs <= data.num_rows - r and 1 <= cs <= data.num_cols - c):
                     raise TableStructureError("Invalid table cell span")
-                slots = {(y, x) for y in range(r, r + rs) for x in range(c, c + cs)}
-                if slots & occupied:
-                    raise TableStructureError("Overlapping table cells")
-                occupied.update(slots)
                 b = cell.bbox.to_top_left_origin(height) if cell.bbox else None
                 bounds = pdf_bbox([b.l, b.t, b.r, b.b], (0, 0), (1, 1), width, height) if b else None
                 text = " ".join(cell.text.split())
-                rows[r][c] = text
                 cells.append({
                     "page_index": page_index, "row_index": r, "column_index": c,
                     "row_span": rs, "column_span": cs, "raw_text": cell.text,
@@ -114,8 +112,19 @@ def map_document(document, page_index: int, *, strict: bool = True) -> list[dict
                     "bbox": bounds, "geometry_status": "available" if bounds else "unavailable",
                     "source": "docling_tableformer",
                 })
-            b = provenance.bbox.to_top_left_origin(height)
-            bbox = pdf_bbox([b.l, b.t, b.r, b.b], (0, 0), (1, 1), width, height)
+            if native_page is not None:
+                from app.services.table_native_headers import recover_headers
+                cells = recover_headers(native_page, cells, data.num_cols, table_bounds)
+            occupied = set()
+            for cell in cells:
+                r, c = cell['row_index'], cell['column_index']
+                slots = {(y, x) for y in range(r, r + cell['row_span'])
+                         for x in range(c, c + cell['column_span'])}
+                if slots & occupied:
+                    raise TableStructureError("Overlapping table cells")
+                occupied.update(slots)
+                rows[r][c] = cell['text']
+            bbox = table_bounds
             if bbox is None:
                 raise TableStructureError("Invalid table geometry")
             tables.append({
@@ -150,10 +159,10 @@ def read_page_result(source, index: int) -> dict:
             if converted.status.value != "success":
                 result["reason"] = "fallback_conversion_incomplete"
                 return result
-            tables = map_document(converted.document, index, strict=False)
-        unresolved = tables.unresolved_tables
         from app.services.table_native_rows import refine_native_tables
         with rapid_ocr.FITZ_LOCK, rapid_ocr.open_source(data) as original:
+            tables = map_document(converted.document, index, strict=False, native_page=original[0])
+            unresolved = tables.unresolved_tables
             tables, native_unresolved = refine_native_tables(original[0], tables)
         unresolved += native_unresolved
         if unresolved:

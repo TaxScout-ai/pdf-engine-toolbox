@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "id": "tax-9602-financial-table-boundaries",
+  "audience": "design_partners",
+  "category": "fix",
+  "customerVisible": true,
+  "title": "Preserve brokerage column headings and printed totals",
+  "summary": "The optional financial table reader preserves separate printed columns and recovers source-backed totals while flagging uncertain transaction rows.",
+  "bodyMarkdown": "## What changed\n\nThe optional financial table reader can separate a proven empty terminal column, keep printed divider lines out of amounts, and recover an adjacent gain or loss summary from the original PDF.\n\n## Why it matters\n\nA table can contain correct amounts but still have invalid transaction rows. Such rows now keep the result marked for review. Printed negative signs and source-page references are preserved.\n\n## Where to find it\n\nUse Extract Tables in the PDF toolbox when the optional financial table reader is enabled. General rollout remains under qualification; these changes do not approve tax facts.",
+  "fromFeedback": false,
+  "channels": {
+    "widget": true,
+    "inApp": true,
+    "email": false
+  },
+  "cta": null,
+  "email": null,
+  "screenshot": {
+    "required": false,
+    "captureInstructions": null,
+    "altText": null
+  },
+  "relatedLinearIssueIds": [
+    "TAX-9602",
+    "TAX-7827"
+  ]
+}

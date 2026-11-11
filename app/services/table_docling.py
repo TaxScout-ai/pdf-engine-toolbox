@@ -160,11 +160,13 @@ def read_page_result(source, index: int) -> dict:
                 result["reason"] = "fallback_conversion_incomplete"
                 return result
         from app.services.table_native_rows import refine_native_tables
+        from app.services.table_native_financial import refine_financial_boundaries
         with rapid_ocr.FITZ_LOCK, rapid_ocr.open_source(data) as original:
             tables = map_document(converted.document, index, strict=False, native_page=original[0])
             unresolved = tables.unresolved_tables
             tables, native_unresolved = refine_native_tables(original[0], tables)
-        unresolved += native_unresolved
+            tables, financial_unresolved = refine_financial_boundaries(original[0], tables)
+        unresolved += native_unresolved + financial_unresolved
         if unresolved:
             result.update(tables=tables, status="unsupported", reason="fallback_invalid_table_structure")
         elif tables:

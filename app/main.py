@@ -76,6 +76,18 @@ def source_offer_headers() -> dict[str, str]:
     }
 
 
+async def _cache_sweep_loop() -> None:
+    from app.services import cache_service
+
+    while True:
+        if settings.cache_enabled:
+            try:
+                await asyncio.to_thread(cache_service.sweep_expired)
+            except Exception as exc:  # never let the sweeper die
+                log.warning("cache_sweep_failed", error=str(exc))
+        await asyncio.sleep(settings.cache_sweep_interval_seconds)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan: startup and shutdown."""
@@ -112,8 +124,13 @@ async def lifespan(app: FastAPI):
     from app.services import ocr_queue
     ocr_queue.get_queue()
 
+    # TAX-9528 (audit T12): expired cache files (page images, thumbnails, OCR
+    # results) are deleted on a timer, not only when the same key is read.
+    cache_sweeper = asyncio.create_task(_cache_sweep_loop())
+
     yield
     log.info("pdf_engine_shutting_down")
+    cache_sweeper.cancel()
     # Unfinished jobs stay in the ledger and resume on the next start.
     ocr_queue.shutdown()
 

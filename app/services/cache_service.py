@@ -12,6 +12,7 @@ navigating away and back).
 import hashlib
 import json
 import os
+import threading
 import time
 from typing import Any
 
@@ -149,6 +150,7 @@ def put_cached(
 
     # Prune if over size limit
     _prune_if_needed(cache_dir)
+    sweep_if_due()
 
 
 def _remove_entry(data_path: str, meta_path: str) -> None:
@@ -190,3 +192,96 @@ def _prune_if_needed(cache_dir: str) -> None:
             log.debug("cache_pruned", path=os.path.basename(path))
     except OSError:
         pass
+
+
+_sweep_lock = threading.Lock()
+_last_sweep_at = 0.0
+
+
+def _entry_expired(meta_path: str, now: float) -> bool:
+    """True when the entry's TTL has passed or its meta cannot be read."""
+    try:
+        with open(meta_path, "r") as f:
+            meta = json.load(f)
+        created_at = float(meta.get("created_at", 0))
+        ttl = float(meta.get("ttl", settings.cache_ttl_seconds))
+    except (json.JSONDecodeError, OSError, TypeError, ValueError):
+        return True
+    return now - created_at > ttl
+
+
+def sweep_expired(now: float | None = None) -> int:
+    """Delete every expired entry from disk (TAX-9528, audit T12).
+
+    The TTL used to be applied only when the same key was read again, so the
+    page images and thumbnails of a document nobody opened again stayed on
+    disk until the size cap pushed them out. This removes:
+      * entries whose TTL has passed (data + meta);
+      * entries whose meta is unreadable;
+      * data files without a meta file and meta files without a data file,
+        once they are older than the default TTL (a write in progress has
+        both files within milliseconds).
+
+    Returns the number of files removed. Never raises.
+    """
+    if not os.path.isdir(settings.cache_dir):
+        return 0
+    now = time.time() if now is None else now
+    removed = 0
+    try:
+        names = os.listdir(settings.cache_dir)
+    except OSError:
+        return 0
+    present = set(names)
+    for fname in names:
+        path = os.path.join(settings.cache_dir, fname)
+        if fname.endswith(".meta"):
+            data_path = path[: -len(".meta")] + ".dat"
+            if fname[: -len(".meta")] + ".dat" not in present:
+                if _older_than(path, now, settings.cache_ttl_seconds):
+                    removed += _remove_counted(path)
+                continue
+            if _entry_expired(path, now):
+                removed += _remove_counted(data_path) + _remove_counted(path)
+        elif fname.endswith(".dat"):
+            if fname[: -len(".dat")] + ".meta" not in present and _older_than(
+                path, now, settings.cache_ttl_seconds
+            ):
+                removed += _remove_counted(path)
+    if removed:
+        log.info("cache_swept", removed_files=removed)
+    return removed
+
+
+def sweep_if_due(now: float | None = None) -> int:
+    """Run `sweep_expired` when the sweep interval has passed since the last one."""
+    global _last_sweep_at
+    if not settings.cache_enabled:
+        return 0
+    now = time.time() if now is None else now
+    if now - _last_sweep_at < settings.cache_sweep_interval_seconds:
+        return 0
+    if not _sweep_lock.acquire(blocking=False):
+        return 0
+    try:
+        _last_sweep_at = now
+        return sweep_expired(now)
+    finally:
+        _sweep_lock.release()
+
+
+def _older_than(path: str, now: float, seconds: float) -> bool:
+    try:
+        return now - os.stat(path).st_mtime > seconds
+    except OSError:
+        return False
+
+
+def _remove_counted(path: str) -> int:
+    try:
+        os.remove(path)
+        return 1
+    except FileNotFoundError:
+        return 0
+    except OSError:
+        return 0

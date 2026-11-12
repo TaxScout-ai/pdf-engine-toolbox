@@ -21,6 +21,8 @@ WORKDIR /app
 
 # Install system dependencies:
 # - curl: for health checks
+# - tini: PID 1 that reaps orphaned children (timed-out health-check curls,
+#   LibreOffice helpers); uvicorn as PID 1 leaves them as zombies
 # - libheif: for HEIC image support (iPhone photos)
 # - libgl1: required by opencv-python
 # - libreoffice-core + writer + calc + impress: for office-to-PDF conversion
@@ -30,6 +32,7 @@ RUN apt-get update && \
     apt-get upgrade -y && \
     apt-get install -y --no-install-recommends \
         curl \
+        tini \
         libheif-dev \
         libgl1 \
         libreoffice-core \
@@ -107,6 +110,8 @@ EXPOSE 8000
 # ends the startup grace immediately; normal failure detection is unchanged.
 HEALTHCHECK --start-period=240s --interval=30s --timeout=10s --retries=3 \
     CMD curl -f http://localhost:8000/health || exit 1
+
+ENTRYPOINT ["/usr/bin/tini", "--"]
 
 # Run with uvicorn. The explicit exec preserves signal delivery while allowing
 # WORKERS to remain runtime-configurable.

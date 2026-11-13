@@ -1533,6 +1533,11 @@ def _extract_tables_pymupdf(doc, page_idx: int) -> list[dict]:
             "row_count": len(rows),
             "col_count": len(rows[0]) if rows else 0,
         })
+    from app.services.table_native_geometry import refine_native_highlights
+    refine_native_highlights(page, [cell for table in results for cell in table['cells']])
+    for table in results:
+        if any(c['text'].strip() and c['geometry_kind'] != 'native_text' for c in table['cells']):
+            table['warnings'].append('cell_text_geometry_unresolved')
     return results
 
 

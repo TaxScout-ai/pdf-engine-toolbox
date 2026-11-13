@@ -155,14 +155,15 @@ def test_later_white_paint_does_not_promote_invisible_text_to_precise_evidence()
         assert set(pix.samples) == {255}  # The text objects survive but no ink does.
 
 
-def test_same_baseline_minus_assigned_to_next_row_keeps_grid_warning():
+@pytest.mark.parametrize('amount_x', [160, 170, 180, 190, 200])
+def test_same_baseline_minus_assigned_to_next_row_keeps_grid_warning(amount_x):
     with fitz.open() as doc:
         p = doc.new_page()
         for y0, y1 in [(40, 60), (60, 77), (77, 100)]:
             for x0, x1 in [(40, 140), (140, 240)]:
                 p.draw_rect((x0, y0, x1, y1))
         for pos, text in [((48, 55), 'Account'), ((148, 55), 'Amount'),
-                          ((48, 75), 'Alpha'), ((160, 80), '100.00'),
+                          ((48, 75), 'Alpha'), ((amount_x, 80), '100.00'),
                           ((48, 95), 'Beta'), ((148, 95), '200.00')]:
             p.insert_text(pos, text)
         p.insert_text((148, 80), '-', fontsize=7)

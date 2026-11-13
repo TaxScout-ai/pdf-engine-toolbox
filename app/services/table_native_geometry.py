@@ -98,8 +98,9 @@ def _refine(page, cells):
         for i in range(lo, hi):
             b, _ = displayed[i]
             gap = max(bounds[0] - b.x1, b.x0 - bounds[2], 0)
+            same_column = b.x0 < region['x1'] and b.x1 > region['x0']
             if (i not in own and min(bounds[3], b.y1) > max(bounds[1], b.y0)
-                    and gap <= max(bounds[3] - bounds[1], b.height)):
+                    and (same_column or gap <= max(bounds[3] - bounds[1], b.height))):
                 nearby = True
                 break
         if nearby or _covered(fitz.Rect(bounds), paint):

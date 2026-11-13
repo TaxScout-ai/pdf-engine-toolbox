@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "id": "tax-7827-native-table-highlights",
+  "audience": "design_partners",
+  "category": "fix",
+  "customerVisible": true,
+  "title": "More precise sources for values in PDF tables",
+  "summary": "Matched values in digital PDF tables highlight their original text instead of the full cell.",
+  "bodyMarkdown": "## What changed\n\nWhen a table cell matches its original PDF text unambiguously, selecting the cell highlights those words. Repeated amounts keep their own rows, and highlights account for page rotation.\n\n## Why it matters\n\nYou can see the source of an amount more precisely without changing the extracted value or marking it as reviewed. Unresolved matches retain the full cell area for manual inspection.\n\n## Where to find it\n\nSource highlights for cells extracted from digital PDF tables.",
+  "fromFeedback": false,
+  "channels": {
+    "widget": true,
+    "inApp": true,
+    "email": false
+  },
+  "cta": null,
+  "email": null,
+  "screenshot": {
+    "required": false,
+    "captureInstructions": null,
+    "altText": null
+  },
+  "relatedLinearIssueIds": [
+    "TAX-7827"
+  ]
+}

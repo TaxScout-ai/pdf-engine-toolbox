@@ -35,6 +35,13 @@ def _no_full_identifier(text: str) -> None:
         "912-34-\n5678",     # wrapped over two lines
         "9 1 2 3 4 5 6 7",   # a comb field read box by box, one box missed
         "123-45-678",        # a near-identifier run
+        # Review round 1: groups that OCR returns as separate lines or boxes.
+        "912-34\n5678",
+        "912-34\n-5678",
+        "912\n34\n5678",
+        "9\n1\n2\n3\n4\n5\n6\n7\n8",  # a comb field, one box per line
+        "Taxpayer SSN 912.34.5678",
+        "EIN 00 1234567",
     ],
 )
 def test_identifiers_and_near_identifiers_are_masked(line):
@@ -82,7 +89,9 @@ def test_a_scan_is_read_through_ocr_and_masked():
     )
     assert pages == [
         {"page_index": 0,
-         "text": "a Employee's social security number XXX-XX-5678\n1 Wages 78,000.00"}
+         # The box number on the next line joins the run and is masked with
+         # it; the SSN keeps its last four.
+         "text": "a Employee's social security number XXX-XX-5678\nX Wages 78,000.00"}
     ]
 
 
@@ -132,3 +141,37 @@ def test_the_route_answers_a_refusal_with_masked_text(client, auth_headers, monk
     assert data["text_only"] is True
     assert data["pages"] == [{"page_index": 0, "text": "SSN XXX-XX-5678"}]
     assert "pdf_base64" not in data
+
+
+def _ocr_page(*boxes):
+    """An OCR page result: recognized lines as (text, x, y, w, h) boxes."""
+    return {"_lines": [{"text": t, "bbox": {"x": x, "y": y, "w": w, "h": h}}
+                       for t, x, y, w, h in boxes]}
+
+
+@pytest.mark.parametrize(
+    "boxes",
+    [
+        # One printed row read as three boxes, at slightly different heights.
+        [("Recipient TIN", 50, 100, 70, 10), ("912", 130, 101, 18, 10),
+         ("34", 152, 99, 12, 10), ("5678", 168, 100.5, 24, 10)],
+        # A comb field read box by box, glyph heights jittering.
+        [(d, 100 + 12 * n, 200 + (n % 3), 8, 10) for n, d in enumerate("912345678")],
+        # Wrapped onto the next row, no dash at the end of the first.
+        [("SSN 912-34", 50, 300, 60, 10), ("5678 Box 1", 50, 313, 60, 10)],
+    ],
+)
+def test_fragments_read_from_real_geometry_are_one_row_and_masked(boxes):
+    text = ir.page_text_from_ocr(_ocr_page(*boxes))
+    masked = ir.mask_text_for_model(text)
+    _no_full_identifier(masked)
+    assert "1234" not in re.sub(r"\D", "", masked)
+
+
+def test_rows_read_in_order():
+    text = ir.page_text_from_ocr(_ocr_page(
+        ("Wages", 300, 100.4, 40, 10), ("Box 1", 50, 100, 30, 10),
+        ("Employer", 50, 140, 50, 10),
+    ))
+    assert text == "Box 1 Wages\nEmployer"
+

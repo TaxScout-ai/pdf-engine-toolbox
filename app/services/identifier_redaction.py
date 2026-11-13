@@ -1151,23 +1151,31 @@ def redact_identifiers(
 _MASK = "X"
 
 
+# An SSN or EIN in exact shape with dots, dashes or spaces: masked before the
+# amount rule could read "123.45" as money.
+_FALLBACK_SSN = re.compile(r"(?<!\d)\d{3}([-. ])\d{2}\1\d{4}(?!\d)")
+_FALLBACK_EIN = re.compile(r"(?<!\d)\d{2}[-. ]\d{7}(?!\d)")
+
+
 def mask_text_for_model(text: str) -> str:
     """The text with every identifier, and every digit run that may be one,
-    masked character for character.
+    masked character for character (TAX-9543).
 
-    Detection runs on the confusion-normalized text, a line ending in a dash
-    joined to the next, so an SSN wrapped over two lines or joined to a label
-    is one run.
-    Amounts, dates, ZIP+4 and phone numbers are left alone (`_NOT_IDENTIFIER`).
-    A run of exactly nine digits keeps its last four; any other run of seven or
-    more digits, and a comb field read box by box, is masked whole. A run of
-    groups in an exact identifier shape inside a longer run is masked too.
+    The model reads this in place of a page image that could not be masked,
+    so a missed group means a full identifier sent. Detection is deliberately
+    wider than the image path's:
+      * line breaks count as spaces — groups of an identifier read as separate
+        boxes, wrapped over lines or a comb field read box per line, are one
+        run (a number on the next line may be masked with it: masking more is
+        the safe side);
+      * SSN and EIN shapes with dots, dashes or spaces are masked first;
+      * a run of exactly nine digits keeps its last four; any other run of
+        seven or more digits, a comb field (4+ groups of 1-2 digits) and an
+        exact identifier shape inside a longer run are masked whole.
+    Amounts with cents or thousands separators, dates, ZIP+4 and phone
+    numbers stay readable (`_NOT_IDENTIFIER`).
     """
-    # A line that ends in a separator continues on the next ("123-45-" /
-    # "6789"); any other line break ends a run, so a box number on the next
-    # line does not join an identifier.
-    joined = re.sub(r"(?<=[-\u2010-\u2015])[ \t]*\r?\n", lambda m: " " * len(m.group(0)), text)
-    normalized = normalize_confusions(joined.replace("\r", " "))
+    normalized = normalize_confusions(re.sub(r"[\r\n]", " ", text))
     out = list(text)
 
     def hide(start: int, end: int, keep_last: int) -> None:
@@ -1176,6 +1184,9 @@ def mask_text_for_model(text: str) -> str:
         for i in positions:
             out[i] = normalized[i] if i in kept else _MASK
 
+    for pattern in (_FALLBACK_SSN, _FALLBACK_EIN):
+        for m in pattern.finditer(normalized):
+            hide(m.start(), m.end(), 4)
     for start, end, digits in _digit_runs(normalized):
         groups = [len(g) for g in re.findall(r"\d+", normalized[start:end])]
         comb = len(groups) >= 4 and max(groups) <= 2
@@ -1183,11 +1194,36 @@ def mask_text_for_model(text: str) -> str:
             hide(start, end, 4)
         elif len(digits) >= _SUSPECT_DIGITS or comb:
             hide(start, end, 0)
+            # An identifier in exact shape inside a longer run (a box number
+            # beside it) keeps its last four, so it can still be matched to
+            # the full number restored from OCR.
+            for s0, e0, _kind, _d in _embedded_identifiers(normalized, start, end):
+                last = [i for i in range(s0, e0) if normalized[i].isdigit()][-4:]
+                for i in last:
+                    out[i] = normalized[i]
     return "".join(out)
 
 
+def page_text_from_ocr(page_result: dict) -> str:
+    """Reading rows of an OCR page: recognized lines grouped into rows by
+    vertical overlap (as the redaction search groups words), left to right,
+    rows top to bottom. Fragments of one printed row are one text row."""
+    items = page_result.get("_lines") or []
+    if not items:
+        return page_result.get("full_text") or ""
+    words = [
+        Word(item["text"], fitz.Rect(item["bbox"]["x"], item["bbox"]["y"],
+                                     item["bbox"]["x"] + item["bbox"]["w"],
+                                     item["bbox"]["y"] + item["bbox"]["h"]))
+        for item in items
+    ]
+    rows = _lines(words)
+    rows.sort(key=lambda row: min(w.rect.y0 for w in row))
+    return "\n".join(" ".join(w.text for w in row) for row in rows)
+
+
 def ocr_text_pages(pdf_bytes: bytes, pages: list[int]) -> dict[int, str]:
-    """What OCR reads on the pages, as reading lines; no unread-print check.
+    """What OCR reads on the pages, as reading rows; no unread-print check.
 
     Used only for the text fallback: the text is masked before it leaves, and
     print OCR did not read is not in it, so no check on it is needed.
@@ -1197,15 +1233,7 @@ def ocr_text_pages(pdf_bytes: bytes, pages: list[int]) -> dict[int, str]:
     result = rapid_ocr.ocr_pages(
         pdf_bytes, pages, force_ocr=True, with_pdf=False, low_confidence=True
     )
-    texts: dict[int, str] = {}
-    for page in result["pages"]:
-        lines = page.get("_lines") or []
-        if lines:
-            ordered = sorted(lines, key=lambda l: (round(l["bbox"]["y"] / 4), l["bbox"]["x"]))
-            texts[page["page_index"]] = "\n".join(l["text"] for l in ordered)
-        else:
-            texts[page["page_index"]] = page.get("full_text") or ""
-    return texts
+    return {page["page_index"]: page_text_from_ocr(page) for page in result["pages"]}
 
 
 def masked_text_pages(

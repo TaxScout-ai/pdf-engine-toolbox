@@ -197,6 +197,16 @@ class RedactIdentifiersRequest(BaseModel):
             "answered at once with status `needs_ocr` and no task is started."
         ),
     )
+    text_fallback: bool = Field(
+        default=False,
+        description=(
+            "TAX-9543: when the document cannot be returned with every identifier "
+            "hidden, answer with its text instead — text layer or OCR, every "
+            "identifier and every digit run that may be one masked "
+            "(`text_only: true`, `pages: [{page_index, text}]`). No image is "
+            "returned then."
+        ),
+    )
 
 
 class DetectPiiRequest(BaseModel):

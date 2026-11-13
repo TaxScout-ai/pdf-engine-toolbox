@@ -1,0 +1,447 @@
+{
+  "issue": "TAX-7827",
+  "pr": 34,
+  "reviewed_source_commit": "f6ccd2ce66647739d9eb15f14e2b745a0cd85564",
+  "source_sha256": {
+    "app/services/pdf_service.py": "d1a73360fcfc7eaf03aa0e7774e45f3dd609f7af1c32cbe198f02b62b273f057",
+    "app/services/table_native_geometry.py": "1cb743f47393ed8117ac58df7d182f3c1f461afc3a89a93c4a009166141f61aa",
+    "tests/test_native_cell_highlights.py": "e1de8f9de70d5b094ba968dd306c2fecf48e97581a73cfea0b5a2825901918b2"
+  },
+  "checker": {
+    "reviewed_sha": "f6ccd2ce66647739d9eb15f14e2b745a0cd85564",
+    "verdict": "PASS",
+    "findings": [],
+    "validation": {
+      "tests": "100 passed,1 skipped across test_native_cell_highlights.py,test_table_evidence.py,test_tables.py,test_table_pipeline.py,test_native_word_geometry.py; one dependency deprecation warning.",
+      "diff_review": "Only same-column horizontal intersection was added to the existing vertical-overlap neighbor guard; regression fixture now varies amount position over five gaps. Existing work budgets,occlusion protection,and metadata preservation remain unchanged.",
+      "independent_experiments": [
+        {
+          "sign_x": 148,
+          "amount_x": 300,
+          "result": "cell_region"
+        },
+        {
+          "sign_x": 40,
+          "amount_x": 300,
+          "result": "native_text"
+        },
+        {
+          "sign_x": null,
+          "amount_x": 300,
+          "result": "native_text"
+        }
+      ],
+      "independent_experiment_interpretation": "A mixed-font minus at x148 with amount at x300 now retains grid geometry even with a large gap. A minus in a separate distant column and no minus both retain eligible native-text geometry. Values,spans,page identity,and original cell region were asserted unchanged in all cases.",
+      "scope": "Third and final bounded read-only review. No product edits. Source fallback used; no graph coverage claim. Parent owns real-model and H001-H006 before/after results."
+    }
+  },
+  "adversarial": {
+    "reviewed_sha": "f6ccd2ce66647739d9eb15f14e2b745a0cd85564",
+    "verdict": "CLEAN",
+    "findings": [],
+    "validation": {
+      "scope": "Third and final bounded review: verify round-two distant accounting-minus blocker and directly related geometry regressions.",
+      "focused_tests": "24 passed in tests/test_native_cell_highlights.py",
+      "independent_original_reproduction": "Executed original round-two synthetic-PDF reproduction unchanged. All five amount positions x160/170/180/190/200 now remain cell_region with bbox equal to cell_bbox and unresolved geometry warnings.",
+      "neighboring_cells_regression": "Independent actual native extraction of ordinary 3-row, 2-column ruled table preserves all values, refines all 6 cells to native_text, and produces no warnings.",
+      "code_review": "same_column uses original cell horizontal range independently of sign-to-amount gap, closing the reported omission without changing extracted values. Existing bounded candidate checks remain in place.",
+      "product_files_modified": false,
+      "data_used": "Synthetic generated PDFs only."
+    }
+  },
+  "focused_tests": {
+    "passed": 89,
+    "skipped": 1,
+    "seconds": 3.39,
+    "real_model_skipped_test": "Passed separately with cached RapidOCR/RapidTable models in44.43s; TABLE_FALLBACK=none."
+  },
+  "primary_path_before": {
+    "docling_loaded": false,
+    "results": [
+      {
+        "case": "H001",
+        "source_sha256": "38e359911b3cdeedd84972eb8965c69aba01ffeeaf60612acd94de076d242e91",
+        "seconds": 0.184,
+        "status": "complete",
+        "reason": null,
+        "source": "native_pdf",
+        "tables": 1,
+        "metrics": {
+          "pages": 1,
+          "labelled_rows": 24,
+          "numeric_cells": 121,
+          "money_cells": 96,
+          "ambiguous_numeric_associations": 0,
+          "located_bbox_outside_cell_region": 118,
+          "located_numeric_cells": 121,
+          "exact_numeric_cells": 121,
+          "exact_money_cells": 96,
+          "exact_money_with_contained_bbox": 2,
+          "sign_comparable_cells": 78,
+          "wrong_sign_cells": 0,
+          "fully_located_numeric_rows": 24,
+          "fully_exact_numeric_rows": 24,
+          "labelled_numeric_rows": 24,
+          "missing_numeric_rows": 0,
+          "column_conflicts": 0
+        },
+        "precise_cells": 0
+      },
+      {
+        "case": "H002",
+        "source_sha256": "ea05941427ad97e263eb41dde9f53dd3c7437b10616ddb183c70185d4205cf67",
+        "seconds": 0.949,
+        "status": "unsupported",
+        "reason": "no_ruled_table_region",
+        "source": "rapidtable",
+        "tables": 0,
+        "metrics": {
+          "pages": 1,
+          "labelled_rows": 8,
+          "numeric_cells": 40,
+          "money_cells": 32,
+          "missing_numeric_cells": 40,
+          "missing_money_cells": 32,
+          "fully_located_numeric_rows": 0,
+          "fully_exact_numeric_rows": 0,
+          "labelled_numeric_rows": 8,
+          "missing_numeric_rows": 8,
+          "column_conflicts": 0
+        },
+        "precise_cells": 0
+      },
+      {
+        "case": "H003",
+        "source_sha256": "7f1a31dee98cb1ad750f7f9a88de1ace44efea4884e6d7ba4538fb421b383802",
+        "seconds": 0.222,
+        "status": "unsupported",
+        "reason": "no_ruled_table_region",
+        "source": "rapidtable",
+        "tables": 0,
+        "metrics": {
+          "pages": 1,
+          "labelled_rows": 8,
+          "numeric_cells": 37,
+          "money_cells": 29,
+          "missing_numeric_cells": 37,
+          "missing_money_cells": 29,
+          "fully_located_numeric_rows": 0,
+          "fully_exact_numeric_rows": 0,
+          "labelled_numeric_rows": 8,
+          "missing_numeric_rows": 8,
+          "column_conflicts": 0
+        },
+        "precise_cells": 0
+      },
+      {
+        "case": "H004",
+        "source_sha256": "959c8f905b957cfdf4cb3ed07b835cb962e06a741a1aaf0f1e021115ce48f3fe",
+        "seconds": 0.172,
+        "status": "unsupported",
+        "reason": "no_ruled_table_region",
+        "source": "rapidtable",
+        "tables": 0,
+        "metrics": {
+          "pages": 1,
+          "labelled_rows": 14,
+          "numeric_cells": 49,
+          "money_cells": 39,
+          "missing_numeric_cells": 49,
+          "missing_money_cells": 39,
+          "fully_located_numeric_rows": 0,
+          "fully_exact_numeric_rows": 0,
+          "labelled_numeric_rows": 14,
+          "missing_numeric_rows": 14,
+          "column_conflicts": 0
+        },
+        "precise_cells": 0
+      },
+      {
+        "case": "H005",
+        "source_sha256": "04cb316a6e1c0efc3ada3d35b30af74585b2e3569a73049d6305e932661ba61e",
+        "seconds": 0.323,
+        "status": "unsupported",
+        "reason": "no_ruled_table_region",
+        "source": "rapidtable",
+        "tables": 0,
+        "metrics": {
+          "pages": 1,
+          "labelled_rows": 5,
+          "numeric_cells": 23,
+          "money_cells": 19,
+          "missing_numeric_cells": 23,
+          "missing_money_cells": 19,
+          "fully_located_numeric_rows": 0,
+          "fully_exact_numeric_rows": 0,
+          "labelled_numeric_rows": 5,
+          "missing_numeric_rows": 5,
+          "column_conflicts": 0
+        },
+        "precise_cells": 0
+      },
+      {
+        "case": "H006",
+        "source_sha256": "0c691dad7a2740fff9d4a5b68ac238204fa305e5d214a290ffd0f3d159d6c2b4",
+        "seconds": 0.071,
+        "status": "unsupported",
+        "reason": "native_text_orientation_unresolved",
+        "source": "native_pdf",
+        "tables": 0,
+        "metrics": {
+          "pages": 1,
+          "labelled_rows": 24,
+          "numeric_cells": 121,
+          "money_cells": 96,
+          "missing_numeric_cells": 121,
+          "missing_money_cells": 96,
+          "fully_located_numeric_rows": 0,
+          "fully_exact_numeric_rows": 0,
+          "labelled_numeric_rows": 24,
+          "missing_numeric_rows": 24,
+          "column_conflicts": 0
+        },
+        "precise_cells": 0
+      }
+    ]
+  },
+  "primary_path_after": {
+    "docling_loaded": false,
+    "results": [
+      {
+        "case": "H001",
+        "source_sha256": "38e359911b3cdeedd84972eb8965c69aba01ffeeaf60612acd94de076d242e91",
+        "seconds": 1.26,
+        "status": "complete",
+        "reason": null,
+        "source": "native_pdf",
+        "tables": 1,
+        "metrics": {
+          "pages": 1,
+          "labelled_rows": 24,
+          "numeric_cells": 121,
+          "money_cells": 96,
+          "ambiguous_numeric_associations": 0,
+          "located_bbox_outside_cell_region": 0,
+          "located_numeric_cells": 121,
+          "exact_numeric_cells": 121,
+          "exact_money_cells": 96,
+          "exact_money_with_contained_bbox": 96,
+          "sign_comparable_cells": 78,
+          "wrong_sign_cells": 0,
+          "fully_located_numeric_rows": 24,
+          "fully_exact_numeric_rows": 24,
+          "labelled_numeric_rows": 24,
+          "missing_numeric_rows": 0,
+          "column_conflicts": 0
+        },
+        "precise_cells": 250
+      },
+      {
+        "case": "H002",
+        "source_sha256": "ea05941427ad97e263eb41dde9f53dd3c7437b10616ddb183c70185d4205cf67",
+        "seconds": 0.558,
+        "status": "unsupported",
+        "reason": "no_ruled_table_region",
+        "source": "rapidtable",
+        "tables": 0,
+        "metrics": {
+          "pages": 1,
+          "labelled_rows": 8,
+          "numeric_cells": 40,
+          "money_cells": 32,
+          "missing_numeric_cells": 40,
+          "missing_money_cells": 32,
+          "fully_located_numeric_rows": 0,
+          "fully_exact_numeric_rows": 0,
+          "labelled_numeric_rows": 8,
+          "missing_numeric_rows": 8,
+          "column_conflicts": 0
+        },
+        "precise_cells": 0
+      },
+      {
+        "case": "H003",
+        "source_sha256": "7f1a31dee98cb1ad750f7f9a88de1ace44efea4884e6d7ba4538fb421b383802",
+        "seconds": 0.505,
+        "status": "unsupported",
+        "reason": "no_ruled_table_region",
+        "source": "rapidtable",
+        "tables": 0,
+        "metrics": {
+          "pages": 1,
+          "labelled_rows": 8,
+          "numeric_cells": 37,
+          "money_cells": 29,
+          "missing_numeric_cells": 37,
+          "missing_money_cells": 29,
+          "fully_located_numeric_rows": 0,
+          "fully_exact_numeric_rows": 0,
+          "labelled_numeric_rows": 8,
+          "missing_numeric_rows": 8,
+          "column_conflicts": 0
+        },
+        "precise_cells": 0
+      },
+      {
+        "case": "H004",
+        "source_sha256": "959c8f905b957cfdf4cb3ed07b835cb962e06a741a1aaf0f1e021115ce48f3fe",
+        "seconds": 0.263,
+        "status": "unsupported",
+        "reason": "no_ruled_table_region",
+        "source": "rapidtable",
+        "tables": 0,
+        "metrics": {
+          "pages": 1,
+          "labelled_rows": 14,
+          "numeric_cells": 49,
+          "money_cells": 39,
+          "missing_numeric_cells": 49,
+          "missing_money_cells": 39,
+          "fully_located_numeric_rows": 0,
+          "fully_exact_numeric_rows": 0,
+          "labelled_numeric_rows": 14,
+          "missing_numeric_rows": 14,
+          "column_conflicts": 0
+        },
+        "precise_cells": 0
+      },
+      {
+        "case": "H005",
+        "source_sha256": "04cb316a6e1c0efc3ada3d35b30af74585b2e3569a73049d6305e932661ba61e",
+        "seconds": 0.51,
+        "status": "unsupported",
+        "reason": "no_ruled_table_region",
+        "source": "rapidtable",
+        "tables": 0,
+        "metrics": {
+          "pages": 1,
+          "labelled_rows": 5,
+          "numeric_cells": 23,
+          "money_cells": 19,
+          "missing_numeric_cells": 23,
+          "missing_money_cells": 19,
+          "fully_located_numeric_rows": 0,
+          "fully_exact_numeric_rows": 0,
+          "labelled_numeric_rows": 5,
+          "missing_numeric_rows": 5,
+          "column_conflicts": 0
+        },
+        "precise_cells": 0
+      },
+      {
+        "case": "H006",
+        "source_sha256": "0c691dad7a2740fff9d4a5b68ac238204fa305e5d214a290ffd0f3d159d6c2b4",
+        "seconds": 0.012,
+        "status": "unsupported",
+        "reason": "native_text_orientation_unresolved",
+        "source": "native_pdf",
+        "tables": 0,
+        "metrics": {
+          "pages": 1,
+          "labelled_rows": 24,
+          "numeric_cells": 121,
+          "money_cells": 96,
+          "missing_numeric_cells": 121,
+          "missing_money_cells": 96,
+          "fully_located_numeric_rows": 0,
+          "fully_exact_numeric_rows": 0,
+          "labelled_numeric_rows": 24,
+          "missing_numeric_rows": 24,
+          "column_conflicts": 0
+        },
+        "precise_cells": 0
+      }
+    ]
+  },
+  "payload_invariants": [
+    {
+      "case": "H001",
+      "non_geometry_payload_unchanged": true,
+      "table_warnings_before": [
+        []
+      ],
+      "table_warnings_after": [
+        [
+          "cell_text_geometry_unresolved"
+        ]
+      ]
+    },
+    {
+      "case": "H002",
+      "non_geometry_payload_unchanged": true,
+      "table_warnings_before": [],
+      "table_warnings_after": []
+    },
+    {
+      "case": "H003",
+      "non_geometry_payload_unchanged": true,
+      "table_warnings_before": [],
+      "table_warnings_after": []
+    },
+    {
+      "case": "H004",
+      "non_geometry_payload_unchanged": true,
+      "table_warnings_before": [],
+      "table_warnings_after": []
+    },
+    {
+      "case": "H005",
+      "non_geometry_payload_unchanged": true,
+      "table_warnings_before": [],
+      "table_warnings_after": []
+    },
+    {
+      "case": "H006",
+      "non_geometry_payload_unchanged": true,
+      "table_warnings_before": [],
+      "table_warnings_after": []
+    }
+  ],
+  "local_repeated_timing": {
+    "before": {
+      "version": "before",
+      "case": "H001",
+      "seconds": [
+        0.1777,
+        0.1571,
+        0.1561,
+        0.1553,
+        0.1571
+      ],
+      "median_seconds": 0.1571,
+      "docling_loaded": false,
+      "limits": "Five sequential local shared-devbox observations; not production latency or load qualification."
+    },
+    "after": {
+      "version": "after",
+      "case": "H001",
+      "seconds": [
+        0.5138,
+        0.4886,
+        0.4909,
+        0.4673,
+        0.4881
+      ],
+      "median_seconds": 0.4886,
+      "docling_loaded": false,
+      "limits": "Five sequential local shared-devbox observations; not production latency or load qualification."
+    }
+  },
+  "rollout": {
+    "availability_after_engine_rollout": "everyone using native PDF table extraction",
+    "docling_enabled": false,
+    "production_changed": false,
+    "release_issue": "TAX-9716",
+    "application_change_needed": false
+  },
+  "limits": [
+    "Six previously used development pages, not blind accuracy qualification. H007/H008 remain unused.",
+    "H001 money96/96 unchanged; strict contained money BBOX2/96 ->96/96. Old broad boxes are not96 wrong values.",
+    "H002-H005 remain unsupported/no_ruled_table_region; H006 remains unsupported/native_text_orientation_unresolved. These table-structure outcomes do not measure plain OCR text accuracy.",
+    "Exact matching does not confer CPA approval or tax fact eligibility. Cell-region fallback with warnings intentionally remains for ambiguous text.",
+    "Local five-run median H0010.1571s ->0.4886s; extra source validation costs time. Shared devbox observations are not production latency.",
+    "No additional model/dependency, no Docling import in comparison, no production/config changes.",
+    "Code graph provider returned Internalerror; source and tests used, no verified graph-coverage claim.",
+    "Engine release requires exact-image qualification and application source pin under TAX-9716."
+  ]
+}

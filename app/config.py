@@ -92,6 +92,10 @@ class Settings(BaseSettings):
     cache_dir: str = "/tmp/pdf_engine_cache"
     cache_max_size_mb: int = 500  # Max total cache size
     cache_ttl_seconds: int = 3600  # 1 hour default TTL
+    # TAX-9528 (audit T12): expired entries are swept from disk, not only on
+    # a read of the same key. A background sweep runs at startup and then every
+    # interval; every put also sweeps once the interval has passed.
+    cache_sweep_interval_seconds: int = Field(default=300, ge=10, le=3600)
 
     # "ignore": a .env written for an older engine (OCR_BACKEND=paddle) must
     # not stop the service from starting.

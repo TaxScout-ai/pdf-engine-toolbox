@@ -1,0 +1,53 @@
+{
+  "issue": "TAX-9528",
+  "release_issue": "TAX-9716",
+  "pr": 33,
+  "reviewed_sha": "a821cde0c507cd67c430aeffebac7781f7f958eb",
+  "source_sha256": {
+    "app/main.py": "16e270a511a55c2cfe8a83fced9d16e7ab27b7f6458ffe3d432d1ffb5232ca15",
+    "app/config.py": "787d34ba2bc12d23d53191af3ede95dd4e10ac7407d3eae8ce529b9607c686ae",
+    "app/services/cache_service.py": "cabc9f820595f084678cbd34932d2300a254d9bb791afe93c2aad536438f6ac8",
+    "tests/test_cache.py": "b22a0b7d52799821d6fa2b48a12abbf06a2f92020e14442dbc2587051a53780a",
+    "tests/test_cache_sweep_safety.py": "d248c47f04b9a777cc30b5b47c2e7ad49fb524d116ffbbfae01081c49cb66195"
+  },
+  "checker": {
+    "reviewed_sha": "a821cde0c507cd67c430aeffebac7781f7f958eb",
+    "verdict": "PASS",
+    "findings": [],
+    "validation": {
+      "tests": "33 passed: tests/test_cache.py tests/test_cache_sweep_safety.py tests/test_images.py tests/test_health.py. One dependency deprecation warning.",
+      "metadata_blocker_fixed": "Independent reproductions with list JSON,NaN TTL,and invalid UTF-8 all remove invalid pairs without failing a fresh put/get. Shared _meta_expired handles reads and sweeps.",
+      "concurrency_blocker_fixed": "Thread RLock plus directory-inode flock protects get,put,and sweep. Reviewed nested put->sweep reentrancy and nonblocking sweep_if_due lock acquisition: no lock-order cycle found. Deterministic partial-publication and stale-expiry-decision races pass; separate-process directory-lock blocking test passes.",
+      "independent_additional_checks": "Disabled sweep returns0 without files; injected PermissionError returns0 and logs error_type only,without exception message.",
+      "lifecycle": "Prior immediate timer execution,interval sleep,failure recovery,and cancellation behavior retained. Shutdown still requests task cancellation without joining an already-running synchronous sweep; no new blocker in bounded scope.",
+      "scope": "Read-only cache delta review. Native-highlight main merge excluded as previously reviewed. No product edits; all standalone probes used synthetic temporary directories."
+    }
+  },
+  "adversarial": {
+    "reviewed_sha": "a821cde0c507cd67c430aeffebac7781f7f958eb",
+    "verdict": "CLEAN",
+    "findings": [],
+    "validation": {
+      "scope": "Bounded second-round review of PR33 cache metadata validation, shared locking, expiry lifecycle, and previous findings.",
+      "focused_tests": "24 passed: tests/test_cache.py and tests/test_cache_sweep_safety.py",
+      "independent_metadata_reproduction": "Array, null, invalid UTF-8, NaN creation time, and infinite TTL all removed. An unrelated put_cached completes and the fresh result remains readable in every case.",
+      "independent_process_race_reproduction": "Paused a sweeper after the original expiry predicate returned true while holding its real guard. Started a separate Python process that announced readiness and attempted same-key put_cached. Writer remained blocked for 250ms. Released sweep, then writer completed; fresh TTL3600 bytes remained readable. No same-thread reentrant mutation was used.",
+      "existing_concurrency_regressions": "Tests confirm second-thread refresh waits for expiry cleanup, sweep waits during partial metadata publication, and a subprocess waits for the directory flock.",
+      "code_review": "The RLock serializes in-process callers, directory flock serializes worker processes, and thread-local held state permits nested put-to-sweep calls without reacquiring flock. Nonblocking sweep-interval lock avoids reverse-lock-order deadlock. Metadata object and finite-value validation closes the reported malformed-input cases.",
+      "shared_worktree_modified": false,
+      "data_used": "Synthetic cache payloads in isolated TemporaryDirectory directories only."
+    }
+  },
+  "tests": {
+    "passed": 36,
+    "seconds": 3.29,
+    "scope": "cache, concurrency safety, health, images, WebP thumbnails"
+  },
+  "availability": "everyone when the engine image is deployed; active when cache_enabled=true; no per-firm opt-in",
+  "limits": [
+    "Linux directory flock serializes cache readers/writers/sweeps across workers; existing pair file format retained.",
+    "Cache IO is serialized; mixed image load qualification remains required under TAX-9716.",
+    "Not yet deployed. Exact source image qualification, cache TTL+interval observation and source pin pending.",
+    "No Docling enablement or added model/dependency."
+  ]
+}

@@ -4,6 +4,8 @@ import base64
 import binascii
 import time
 
+import structlog
+
 from fastapi import APIRouter, BackgroundTasks, Depends, Response
 from fastapi.responses import JSONResponse
 
@@ -22,6 +24,7 @@ from app.services import (
     task_service,
 )
 
+log = structlog.get_logger()
 router = APIRouter(prefix="/redact")
 
 
@@ -64,7 +67,19 @@ def _redaction_payload(result: dict) -> dict:
     }
 
 
-def _run_identifier_redaction(task_id: str, data: bytes, media_type: str, source_hash: str):
+def _text_fallback_payload(data: bytes, media_type: str, reason: str) -> dict:
+    """TAX-9543: the document as masked text, for when its image cannot be
+    sent with every identifier hidden. Never an image."""
+    return {
+        "text_only": True,
+        "reason": f"redaction_incomplete: {reason}",
+        "pages": identifier_redaction.masked_text_pages(data, media_type),
+    }
+
+
+def _run_identifier_redaction(
+    task_id: str, data: bytes, media_type: str, source_hash: str, text_fallback: bool = False
+):
     """Background worker: OCR is CPU-bound for minutes, so plain ``def``."""
     task_service.set_processing(task_id)
     try:
@@ -72,6 +87,15 @@ def _run_identifier_redaction(task_id: str, data: bytes, media_type: str, source
         cache_service.put_cached(source_hash, _OPERATION, payload, {"media_type": media_type})
         task_service.complete_task(task_id, payload)
     except identifier_redaction.RedactionIncompleteError as e:
+        if text_fallback:
+            try:
+                task_service.complete_task(
+                    task_id, _text_fallback_payload(data, media_type, str(e))
+                )
+                return
+            except Exception as fallback_error:  # the refusal stands
+                log.warning("redaction_text_fallback_failed",
+                            error_type=type(fallback_error).__name__)
         task_service.fail_task(task_id, f"redaction_incomplete: {e}")
     except Exception as e:
         task_service.fail_task(task_id, str(e))
@@ -116,7 +140,8 @@ async def redact_identifiers(request: RedactIdentifiersRequest, background_tasks
     if needs_ocr:
         task = task_service.create_task(_OPERATION)
         background_tasks.add_task(
-            _run_identifier_redaction, task.id, data, request.media_type, source_hash
+            _run_identifier_redaction, task.id, data, request.media_type, source_hash,
+            request.text_fallback,
         )
         return {"success": True, "task_id": task.id, "status": "pending"}
 
@@ -126,6 +151,12 @@ async def redact_identifiers(request: RedactIdentifiersRequest, background_tasks
             data, request.media_type, ocr=lambda *_: {}
         )
     except identifier_redaction.RedactionIncompleteError as e:
+        if request.text_fallback:
+            return {
+                "success": True,
+                "data": _text_fallback_payload(data, request.media_type, str(e)),
+                "processing_time_ms": round((time.monotonic() - start) * 1000, 2),
+            }
         return JSONResponse(
             status_code=422,
             content={

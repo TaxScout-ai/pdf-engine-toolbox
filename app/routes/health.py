@@ -22,6 +22,9 @@ def capabilities() -> list[str]:
       (seconds) instead of failing a task as busy.
     * ``identifier-redaction:rapid-ocr`` — /redact/identifiers reads page
       images with RapidOCR.
+    * ``identifier-redaction:text-fallback`` — /redact/identifiers takes
+      ``text_fallback`` and answers a refused document with its masked text
+      (TAX-9543).
     * ``orientation:rapid-ocr`` — /transform/orientation judges pages from
       RapidOCR text lines (TAX-6995), not the PaddleX classifier.
     * ``tables:rapid-table`` — /text/tables reads page images with RapidTable
@@ -30,6 +33,7 @@ def capabilities() -> list[str]:
     return [
         "ocr-queue:persistent",
         "identifier-redaction:rapid-ocr",
+        "identifier-redaction:text-fallback",
         "orientation:rapid-ocr",
         "tables:rapid-table",
     ]

@@ -1142,3 +1142,95 @@ def redact_identifiers(
         "masked_references": sum(f.kind == "reference" for f in found),
         "ocr_pages": ocr_pages,
     }
+
+
+# ---------------------------------------------------------------------------
+# Text fallback (TAX-9543)
+# ---------------------------------------------------------------------------
+
+_MASK = "X"
+
+
+def mask_text_for_model(text: str) -> str:
+    """The text with every identifier, and every digit run that may be one,
+    masked character for character.
+
+    Detection runs on the confusion-normalized text, a line ending in a dash
+    joined to the next, so an SSN wrapped over two lines or joined to a label
+    is one run.
+    Amounts, dates, ZIP+4 and phone numbers are left alone (`_NOT_IDENTIFIER`).
+    A run of exactly nine digits keeps its last four; any other run of seven or
+    more digits, and a comb field read box by box, is masked whole. A run of
+    groups in an exact identifier shape inside a longer run is masked too.
+    """
+    # A line that ends in a separator continues on the next ("123-45-" /
+    # "6789"); any other line break ends a run, so a box number on the next
+    # line does not join an identifier.
+    joined = re.sub(r"(?<=[-\u2010-\u2015])[ \t]*\r?\n", lambda m: " " * len(m.group(0)), text)
+    normalized = normalize_confusions(joined.replace("\r", " "))
+    out = list(text)
+
+    def hide(start: int, end: int, keep_last: int) -> None:
+        positions = [i for i in range(start, end) if normalized[i].isdigit()]
+        kept = set(positions[-keep_last:]) if keep_last else set()
+        for i in positions:
+            out[i] = normalized[i] if i in kept else _MASK
+
+    for start, end, digits in _digit_runs(normalized):
+        groups = [len(g) for g in re.findall(r"\d+", normalized[start:end])]
+        comb = len(groups) >= 4 and max(groups) <= 2
+        if len(digits) == 9:
+            hide(start, end, 4)
+        elif len(digits) >= _SUSPECT_DIGITS or comb:
+            hide(start, end, 0)
+    return "".join(out)
+
+
+def ocr_text_pages(pdf_bytes: bytes, pages: list[int]) -> dict[int, str]:
+    """What OCR reads on the pages, as reading lines; no unread-print check.
+
+    Used only for the text fallback: the text is masked before it leaves, and
+    print OCR did not read is not in it, so no check on it is needed.
+    """
+    from app.services import rapid_ocr
+
+    result = rapid_ocr.ocr_pages(
+        pdf_bytes, pages, force_ocr=True, with_pdf=False, low_confidence=True
+    )
+    texts: dict[int, str] = {}
+    for page in result["pages"]:
+        lines = page.get("_lines") or []
+        if lines:
+            ordered = sorted(lines, key=lambda l: (round(l["bbox"]["y"] / 4), l["bbox"]["x"]))
+            texts[page["page_index"]] = "\n".join(l["text"] for l in ordered)
+        else:
+            texts[page["page_index"]] = page.get("full_text") or ""
+    return texts
+
+
+def masked_text_pages(
+    data: bytes,
+    media_type: str = "application/pdf",
+    ocr_text: Callable[[bytes, list[int]], dict[int, str]] = ocr_text_pages,
+) -> list[dict]:
+    """The document as masked text, page by page (TAX-9543).
+
+    When the page image cannot be sent with every identifier hidden, the model
+    reads this instead: the text layer where a page has one, OCR elsewhere,
+    with `mask_text_for_model` applied. Only text leaves; no image.
+    """
+    pdf_bytes = _as_pdf(data, media_type)
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    pages: dict[int, str] = {}
+    ocr_needed = []
+    for i, page in enumerate(doc):
+        if needs_ocr(page):
+            ocr_needed.append(i)
+        else:
+            pages[i] = page.get_text()
+    if ocr_needed:
+        pages.update(ocr_text(pdf_bytes, ocr_needed))
+    return [
+        {"page_index": i, "text": mask_text_for_model(pages.get(i, ""))}
+        for i in range(len(doc))
+    ]

@@ -142,3 +142,41 @@ def test_dense_ambiguous_grid_has_a_bounded_comparison_budget(monkeypatch):
         c = cell('100.00 200.00', (40, 60, 220, 95))
         refine_native_highlights(p, [c])
         assert c['geometry_kind'] == 'cell_region'
+
+
+def test_later_white_paint_does_not_promote_invisible_text_to_precise_evidence():
+    with fitz.open() as doc:
+        p = doc.new_page(); p.insert_text((80, 80), '-100.00')
+        p.draw_rect((76, 64, 140, 86), fill=(1, 1, 1), color=None)
+        c = cell('-100.00', (40, 60, 220, 95))
+        refine_native_highlights(p, [c])
+        assert c['geometry_kind'] == 'cell_region'
+        pix = p.get_pixmap(clip=fitz.Rect(78, 66, 138, 84), colorspace=fitz.csGRAY)
+        assert set(pix.samples) == {255}  # The text objects survive but no ink does.
+
+
+def test_same_baseline_minus_assigned_to_next_row_keeps_grid_warning():
+    with fitz.open() as doc:
+        p = doc.new_page()
+        for y0, y1 in [(40, 60), (60, 77), (77, 100)]:
+            for x0, x1 in [(40, 140), (140, 240)]:
+                p.draw_rect((x0, y0, x1, y1))
+        for pos, text in [((48, 55), 'Account'), ((148, 55), 'Amount'),
+                          ((48, 75), 'Alpha'), ((160, 80), '100.00'),
+                          ((48, 95), 'Beta'), ((148, 95), '200.00')]:
+            p.insert_text(pos, text)
+        p.insert_text((148, 80), '-', fontsize=7)
+        tables = _extract_tables_pymupdf(doc, 0)
+        amount = next(c for t in tables for c in t['cells'] if c['text'] == '100.00')
+        assert amount['geometry_kind'] == 'cell_region'
+        assert amount['bbox'] == amount['cell_bbox']
+        assert 'cell_text_geometry_unresolved' in tables[0]['warnings']
+
+
+def test_background_painted_before_text_does_not_block_precise_source():
+    with fitz.open() as doc:
+        p = doc.new_page(); p.draw_rect((40, 60, 220, 95), fill=(1, 1, 1))
+        p.insert_text((80, 80), '-100.00')
+        c = cell('-100.00', (40, 60, 220, 95))
+        refine_native_highlights(p, [c])
+        assert c['geometry_kind'] == 'native_text'

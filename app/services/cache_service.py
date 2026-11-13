@@ -10,6 +10,10 @@ navigating away and back).
 """
 
 import hashlib
+import fcntl
+import math
+from contextlib import contextmanager
+from functools import wraps
 import json
 import os
 import threading
@@ -29,6 +33,56 @@ def _ensure_cache_dir() -> str:
     return settings.cache_dir
 
 
+# Linux runtime: the directory inode is the common lock across worker processes.
+# RLock also serializes threads; nested put -> sweep calls reuse the same flock.
+_cache_lock = threading.RLock()
+_lock_state = threading.local()
+
+
+@contextmanager
+def _cache_guard():
+    with _cache_lock:
+        if getattr(_lock_state, 'held', False):
+            yield
+            return
+        fd = os.open(_ensure_cache_dir(), os.O_RDONLY)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            _lock_state.held = True
+            yield
+        finally:
+            _lock_state.held = False
+            os.close(fd)
+
+
+def _serialized(default=None):
+    def decorate(fn):
+        @wraps(fn)
+        def wrapped(*args, **kwargs):
+            if not settings.cache_enabled:
+                return default
+            try:
+                with _cache_guard():
+                    return fn(*args, **kwargs)
+            except OSError as exc:
+                log.warning('cache_io_failed', error_type=type(exc).__name__)
+                return default
+        return wrapped
+    return decorate
+
+
+def _meta_expired(meta, now):
+    if not isinstance(meta, dict):
+        return True
+    try:
+        created = float(meta.get('created_at', 0))
+        ttl = float(meta.get('ttl', settings.cache_ttl_seconds))
+    except (TypeError, ValueError, OverflowError):
+        return True
+    return (not math.isfinite(created) or not math.isfinite(ttl)
+            or created < 0 or ttl < 0 or now - created > ttl)
+
+
 def _cache_key(content_hash: str, operation: str, params: dict | None = None) -> str:
     """Build a deterministic cache key from content hash + operation + params."""
     key_parts = f"{content_hash}:{operation}"
@@ -43,6 +97,7 @@ def content_hash(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+@_serialized()
 def get_cached(
     source_hash: str,
     operation: str,
@@ -69,12 +124,10 @@ def get_cached(
     try:
         with open(meta_path, "r") as f:
             meta = json.load(f)
-    except (json.JSONDecodeError, OSError):
+    except (ValueError, UnicodeError, OSError):
         return None
 
-    created_at = meta.get("created_at", 0)
-    ttl = meta.get("ttl", settings.cache_ttl_seconds)
-    if time.time() - created_at > ttl:
+    if _meta_expired(meta, time.time()):
         # Expired - clean up
         _remove_entry(data_path, meta_path)
         return None
@@ -97,6 +150,7 @@ def get_cached(
     return raw
 
 
+@_serialized()
 def put_cached(
     source_hash: str,
     operation: str,
@@ -146,7 +200,7 @@ def put_cached(
             json.dump(meta, f)
         log.debug("cache_put", operation=operation, key=key[:12], size=len(raw))
     except OSError as e:
-        log.warning("cache_write_failed", error=str(e))
+        log.warning("cache_write_failed", error_type=type(e).__name__)
 
     # Prune if over size limit
     _prune_if_needed(cache_dir)
@@ -203,13 +257,12 @@ def _entry_expired(meta_path: str, now: float) -> bool:
     try:
         with open(meta_path, "r") as f:
             meta = json.load(f)
-        created_at = float(meta.get("created_at", 0))
-        ttl = float(meta.get("ttl", settings.cache_ttl_seconds))
-    except (json.JSONDecodeError, OSError, TypeError, ValueError):
+    except (ValueError, UnicodeError, OSError):
         return True
-    return now - created_at > ttl
+    return _meta_expired(meta, now)
 
 
+@_serialized(default=0)
 def sweep_expired(now: float | None = None) -> int:
     """Delete every expired entry from disk (TAX-9528, audit T12).
 

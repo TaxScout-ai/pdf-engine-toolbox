@@ -84,7 +84,7 @@ async def _cache_sweep_loop() -> None:
             try:
                 await asyncio.to_thread(cache_service.sweep_expired)
             except Exception as exc:  # never let the sweeper die
-                log.warning("cache_sweep_failed", error=str(exc))
+                log.warning("cache_sweep_failed", error_type=type(exc).__name__)
         await asyncio.sleep(settings.cache_sweep_interval_seconds)
 
 

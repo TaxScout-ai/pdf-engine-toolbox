@@ -42,13 +42,25 @@ def _no_full_identifier(text: str) -> None:
         "9\n1\n2\n3\n4\n5\n6\n7\n8",  # a comb field, one box per line
         "Taxpayer SSN 912.34.5678",
         "EIN 00 1234567",
+        # Review round 2: words or other fields between the groups, mixed or
+        # lost separators, a ZIP+4-shaped SSN, groups out of order.
+        "912 SSN 34 5678",
+        "SSN 912-34-|Box b 5678",
+        "Employee SSN 912-34 Control no 77\n5678",
+        "SSN 91234-5678",
+        "912.34-5678",
+        "912.34 5678",
+        "912,34,5678",
+        "5678\n34\nRecipient's TIN 912",
+        "9 line 1 text 2 more 3 x 4 y 5 z 6 q 7 w 8",
     ],
 )
 def test_identifiers_and_near_identifiers_are_masked(line):
     masked = ir.mask_text_for_model(line)
     assert len(masked) == len(line)
     _no_full_identifier(masked)
-    assert "1234" not in re.sub(r"\D", "", masked).replace("5678", "")
+    # At most four digits of the identifier are readable, whatever the shape.
+    assert len(re.sub(r"\D", "", masked)) <= 4
 
 
 def test_an_exact_identifier_keeps_its_last_four():
@@ -61,14 +73,25 @@ def test_an_exact_identifier_keeps_its_last_four():
     [
         "Wages 78,000.00 Federal tax 6,100.00",
         "Date 04/15/2026",
-        "Austin, TX 78701-1234",
-        "Phone (512) 555-0100",
-        "Box 12a D 1,500.00",
-        "Control number NW-2025",
+        "Premium $1,450 SLCSP 1520.00",
+        "Tax year 2025",
     ],
 )
-def test_amounts_dates_zip_and_phone_stay_readable(line):
+def test_money_dates_and_years_stay_readable(line):
     assert ir.mask_text_for_model(line) == line
+
+
+@pytest.mark.parametrize(
+    ("line", "masked"),
+    [
+        ("Austin, TX 78701-1234", "Austin, TX XXXXX-1234"),
+        ("Phone (512) 555-0100", "Phone (XXX) XXX-XXXX"),
+        ("Box 1 Wages", "Box X Wages"),
+        ("Control number NW-2025-004417", "Control number NW-XXXX-XXXXXX"),
+    ],
+)
+def test_every_other_digit_is_masked(line, masked):
+    assert ir.mask_text_for_model(line) == masked
 
 
 def _scan(lines: list[str]) -> bytes:

@@ -1151,56 +1151,55 @@ def redact_identifiers(
 _MASK = "X"
 
 
-# An SSN or EIN in exact shape with dots, dashes or spaces: masked before the
-# amount rule could read "123.45" as money.
-_FALLBACK_SSN = re.compile(r"(?<!\d)\d{3}([-. ])\d{2}\1\d{4}(?!\d)")
-_FALLBACK_EIN = re.compile(r"(?<!\d)\d{2}[-. ]\d{7}(?!\d)")
+# What stays readable in fallback text (TAX-9543): amounts written as money
+# (a "$", thousands separators or cents, and no further digit group joined to
+# them), dates, and years. Everything else that is a digit is masked.
+_FALLBACK_KEEP = re.compile(
+    r"\$\s?\d{1,3}(?:,\d{3})*(?:\.\d{2})?(?![\d.,\-/]|\s?\d)"
+    r"|(?<![\d.,\-/])\d{1,3}(?:,\d{3})+(?:\.\d{2})?(?![\d.,\-/]|\s?\d)"
+    r"|(?<![\d.,\-/])\d+\.\d{2}(?![\d.,\-/]|\s?\d)"
+    r"|(?<![\d.,\-/])\d{1,2}/\d{1,2}/(?:\d{4}|\d{2})(?![\d.,\-/])"
+    r"|(?<![\d.,\-/])(?:19[5-9]\d|20[0-4]\d)(?![\d.,\-/]|\s?\d)"
+)
+# An SSN or EIN in exact shape, any separators: its last four stay readable
+# so the full number restored from OCR can be matched to it.
+_FALLBACK_ID = re.compile(
+    r"(?<!\d)\d{3}[-. ]?\d{2}[-. ]?\d{4}(?!\d)|(?<!\d)\d{2}[-. ]?\d{7}(?!\d)"
+)
 
 
 def mask_text_for_model(text: str) -> str:
-    """The text with every identifier, and every digit run that may be one,
-    masked character for character (TAX-9543).
+    """The text with every digit masked except money, dates and years
+    (TAX-9543).
 
-    The model reads this in place of a page image that could not be masked,
-    so a missed group means a full identifier sent. Detection is deliberately
-    wider than the image path's:
-      * line breaks count as spaces — groups of an identifier read as separate
-        boxes, wrapped over lines or a comb field read box per line, are one
-        run (a number on the next line may be masked with it: masking more is
-        the safe side);
-      * SSN and EIN shapes with dots, dashes or spaces are masked first;
-      * a run of exactly nine digits keeps its last four; any other run of
-        seven or more digits, a comb field (4+ groups of 1-2 digits) and an
-        exact identifier shape inside a longer run are masked whole.
-    Amounts with cents or thousands separators, dates, ZIP+4 and phone
-    numbers stay readable (`_NOT_IDENTIFIER`).
+    The model reads this in place of a page image that could not be masked.
+    Recognizing identifiers in OCR text is not safe enough here: OCR splits
+    an SSN into boxes, rows and columns, puts words between its groups, and
+    drops or swaps its separators. So nothing is recognized: every digit is
+    masked, except
+      * amounts written as money ($, thousands separators or cents) with no
+        further digit group joined to them, dates, and 4-digit years;
+      * the last four digits of an exact SSN or EIN shape, so the extraction
+        still has a last four to match the full number restored from OCR.
+    Confusable letters in numeric tokens ("I23-45-678S") count as digits.
+    Box numbers, ZIP codes, phone and account numbers are masked too: the
+    document is in Needs review, and the CPA reads them on the page.
     """
     normalized = normalize_confusions(re.sub(r"[\r\n]", " ", text))
     out = list(text)
-
-    def hide(start: int, end: int, keep_last: int) -> None:
-        positions = [i for i in range(start, end) if normalized[i].isdigit()]
-        kept = set(positions[-keep_last:]) if keep_last else set()
-        for i in positions:
-            out[i] = normalized[i] if i in kept else _MASK
-
-    for pattern in (_FALLBACK_SSN, _FALLBACK_EIN):
-        for m in pattern.finditer(normalized):
-            hide(m.start(), m.end(), 4)
-    for start, end, digits in _digit_runs(normalized):
-        groups = [len(g) for g in re.findall(r"\d+", normalized[start:end])]
-        comb = len(groups) >= 4 and max(groups) <= 2
-        if len(digits) == 9:
-            hide(start, end, 4)
-        elif len(digits) >= _SUSPECT_DIGITS or comb:
-            hide(start, end, 0)
-            # An identifier in exact shape inside a longer run (a box number
-            # beside it) keeps its last four, so it can still be matched to
-            # the full number restored from OCR.
-            for s0, e0, _kind, _d in _embedded_identifiers(normalized, start, end):
-                last = [i for i in range(s0, e0) if normalized[i].isdigit()][-4:]
-                for i in last:
-                    out[i] = normalized[i]
+    kept = [False] * len(text)
+    for m in _FALLBACK_KEEP.finditer(normalized):
+        for i in range(m.start(), m.end()):
+            kept[i] = True
+    for m in _FALLBACK_ID.finditer(normalized):
+        digits = [i for i in range(m.start(), m.end()) if normalized[i].isdigit()]
+        for i in digits:
+            kept[i] = False
+        for i in digits[-4:]:
+            kept[i] = True
+    for i, ch in enumerate(normalized):
+        if ch.isdigit():
+            out[i] = normalized[i] if kept[i] else _MASK
     return "".join(out)
 
 

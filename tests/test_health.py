@@ -118,6 +118,7 @@ def test_health_lists_capabilities(client):
     assert data["capabilities"] == [
         "ocr-queue:persistent",
         "identifier-redaction:rapid-ocr",
+        "identifier-redaction:text-fallback",
         "orientation:rapid-ocr",
         "tables:rapid-table",
     ]

@@ -1142,3 +1142,181 @@ def redact_identifiers(
         "masked_references": sum(f.kind == "reference" for f in found),
         "ocr_pages": ocr_pages,
     }
+
+
+# ---------------------------------------------------------------------------
+# Text fallback (TAX-9543)
+# ---------------------------------------------------------------------------
+
+_MASK = "X"
+
+
+# What stays readable in fallback text (TAX-9543): amounts written as money
+# (a "$", thousands separators or cents), dates, and years. Everything else
+# that is a digit is masked.
+_FALLBACK_MONEY = re.compile(
+    r"\$\s?\d{1,3}(?:,\d{3})*(?:\.\d{2})?(?![\d.,\-/])"
+    r"|(?<![\d.,\-/])\d{1,3}(?:,\d{3})+(?:\.\d{2})?(?![\d.,\-/])"
+    r"|(?<![\d.,\-/])\d+\.\d{2}(?![\d.,\-/])"
+)
+_FALLBACK_DATE_YEAR = re.compile(
+    r"(?<![\d.,\-/])\d{1,2}/\d{1,2}/(?:\d{4}|\d{2})(?![\d.,\-/])"
+    r"|(?<![\d.,\-/])(?:19[5-9]\d|20[0-4]\d)(?![\d.,\-/]|\s?\d)"
+)
+# What may follow an amount with no letter in between: another amount (a
+# table row), or a row number that starts the next row ("120.00 02 May").
+_FALLBACK_GAP = re.compile(r"[^A-Za-z0-9]*")
+_FALLBACK_ROW_NUMBER = re.compile(r"\d{1,2} ?[A-Za-z]")
+# An SSN or EIN in exact shape, any separators: its last four stay readable
+# so the full number restored from OCR can be matched to it.
+_FALLBACK_ID = re.compile(
+    r"(?<!\d)\d{3}[-. ]?\d{2}[-. ]?\d{4}(?!\d)|(?<!\d)\d{2}[-. ]?\d{7}(?!\d)"
+)
+
+
+def _digit_count(text: str) -> int:
+    return sum(c.isdigit() for c in text)
+
+
+def _money_chains(normalized: str) -> list[list[re.Match]]:
+    """Amounts that stay readable, as chains of amounts joined by no letter.
+
+    An SSN read with a dot or comma looks like an amount ("912.34"), and its
+    other groups follow it across spaces, dashes or symbols ("912.34 - 5678",
+    "912.34 56.78", "9.12 3.45 6.78"). So an amount stays readable only when
+    every digit group after it, up to the next letter, is an amount too or a
+    row number, and no run of joined amounts holds nine digits (or an amount
+    holds nine digits before its cents) — the size of an SSN or EIN.
+    """
+    chains: list[list[re.Match]] = []
+    chain: list[re.Match] = []
+    matches = list(_FALLBACK_MONEY.finditer(normalized))
+    for n, m in enumerate(matches):
+        gap = _FALLBACK_GAP.match(normalized, m.end()).end()
+        nxt = matches[n + 1] if n + 1 < len(matches) else None
+        joined_next = nxt is not None and nxt.start() <= gap
+        chain.append(m)
+        if joined_next:
+            continue
+        ok = (
+            gap >= len(normalized)
+            or not normalized[gap].isdigit()
+            or _FALLBACK_ROW_NUMBER.match(normalized, gap) is not None
+        )
+        if ok:
+            chains.append(chain)
+        chain = []
+    safe: list[list[re.Match]] = []
+    for chain in chains:
+        whole = [_digit_count(m.group().split(".")[0]) >= 9 for m in chain]
+        sizes = [_digit_count(m.group()) for m in chain]
+        bad = set(i for i, w in enumerate(whole) if w)
+        for i in range(len(chain)):
+            total = 0
+            for j in range(i, len(chain)):
+                total += sizes[j]
+                if total == 9:
+                    bad.update(range(i, j + 1))
+                if total >= 9:
+                    break
+        safe.append([m for i, m in enumerate(chain) if i not in bad])
+    return safe
+
+
+def mask_text_for_model(text: str) -> str:
+    """The text with every digit masked except money, dates and years
+    (TAX-9543).
+
+    The model reads this in place of a page image that could not be masked.
+    Recognizing identifiers in OCR text is not safe enough here: OCR splits
+    an SSN into boxes, rows and columns, puts words between its groups, and
+    drops or swaps its separators. So nothing is recognized: every digit is
+    masked, except
+      * amounts written as money ($, thousands separators or cents) with no
+        further digit group joined to them, dates, and 4-digit years;
+      * the last four digits of an exact SSN or EIN shape, so the extraction
+        still has a last four to match the full number restored from OCR.
+    Confusable letters in numeric tokens ("I23-45-678S") count as digits.
+    Box numbers, ZIP codes, phone and account numbers are masked too: the
+    document is in Needs review, and the CPA reads them on the page.
+    """
+    normalized = normalize_confusions(re.sub(r"[\r\n]", " ", text))
+    out = list(text)
+    kept = [False] * len(text)
+    for m in _FALLBACK_DATE_YEAR.finditer(normalized):
+        for i in range(m.start(), m.end()):
+            kept[i] = True
+    for chain in _money_chains(normalized):
+        for m in chain:
+            for i in range(m.start(), m.end()):
+                kept[i] = True
+    for m in _FALLBACK_ID.finditer(normalized):
+        digits = [i for i in range(m.start(), m.end()) if normalized[i].isdigit()]
+        for i in digits:
+            kept[i] = False
+        for i in digits[-4:]:
+            kept[i] = True
+    for i, ch in enumerate(normalized):
+        if ch.isdigit():
+            out[i] = normalized[i] if kept[i] else _MASK
+    return "".join(out)
+
+
+def page_text_from_ocr(page_result: dict) -> str:
+    """Reading rows of an OCR page: recognized lines grouped into rows by
+    vertical overlap (as the redaction search groups words), left to right,
+    rows top to bottom. Fragments of one printed row are one text row."""
+    items = page_result.get("_lines") or []
+    if not items:
+        return page_result.get("full_text") or ""
+    words = [
+        Word(item["text"], fitz.Rect(item["bbox"]["x"], item["bbox"]["y"],
+                                     item["bbox"]["x"] + item["bbox"]["w"],
+                                     item["bbox"]["y"] + item["bbox"]["h"]))
+        for item in items
+    ]
+    rows = _lines(words)
+    rows.sort(key=lambda row: min(w.rect.y0 for w in row))
+    return "\n".join(" ".join(w.text for w in row) for row in rows)
+
+
+def ocr_text_pages(pdf_bytes: bytes, pages: list[int]) -> dict[int, str]:
+    """What OCR reads on the pages, as reading rows; no unread-print check.
+
+    Used only for the text fallback: the text is masked before it leaves, and
+    print OCR did not read is not in it, so no check on it is needed.
+    """
+    from app.services import rapid_ocr
+
+    result = rapid_ocr.ocr_pages(
+        pdf_bytes, pages, force_ocr=True, with_pdf=False, low_confidence=True
+    )
+    return {page["page_index"]: page_text_from_ocr(page) for page in result["pages"]}
+
+
+def masked_text_pages(
+    data: bytes,
+    media_type: str = "application/pdf",
+    ocr_text: Callable[[bytes, list[int]], dict[int, str]] = ocr_text_pages,
+) -> list[dict]:
+    """The document as masked text, page by page (TAX-9543).
+
+    When the page image cannot be sent with every identifier hidden, the model
+    reads this instead: the text layer where a page has one, OCR elsewhere,
+    with `mask_text_for_model` applied. Only text leaves; no image.
+    """
+    pdf_bytes = _as_pdf(data, media_type)
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    pages: dict[int, str] = {}
+    ocr_needed = []
+    for i, page in enumerate(doc):
+        if needs_ocr(page):
+            ocr_needed.append(i)
+        else:
+            pages[i] = page.get_text()
+    if ocr_needed:
+        pages.update(ocr_text(pdf_bytes, ocr_needed))
+    return [
+        {"page_index": i, "text": mask_text_for_model(pages.get(i, ""))}
+        for i in range(len(doc))
+    ]

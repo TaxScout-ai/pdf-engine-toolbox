@@ -59,6 +59,19 @@ def _no_full_identifier(text: str) -> None:
         "912.34 5,678",
         "9,123 456.78",
         "912.34 56 78",
+        # Review round 3: any gap without a letter joins the groups.
+        "912.34  5678",
+        "SSN 912.34 - 5678 Box",
+        "SSN 912.34\u20135678",
+        "912.34     5678",
+        "912.34\t\t5678",
+        "912.34 - 56.78",
+        "912.34 / 56.78",
+        "912.34 \u2014 56.78",
+        "912,345,678",
+        "$912,345,678",
+        "9.12 3.45 6.78",
+        "EIN 0.01 23.45 67",
     ],
 )
 def test_identifiers_and_near_identifiers_are_masked(line):

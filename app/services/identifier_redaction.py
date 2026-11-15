@@ -1153,29 +1153,74 @@ _MASK = "X"
 
 # What stays readable in fallback text (TAX-9543): amounts written as money
 # (a "$", thousands separators or cents), dates, and years. Everything else
-# that is a digit is masked. An amount may not have another digit group
-# joined to it ("912.34 5678" is an SSN read with a dot), except a next
-# amount in the same table row or a row number ("78,000.00 6,100.00",
-# "120.00 12 May"): OCR cannot turn the groups of an SSN into two amounts.
-_MONEY_NEXT = (
-    r"(?:\$\s?)?\d{1,3}(?:,\d{3})+(?:\.\d{2})?(?![\d.,\-/])"
-    r"|\$\s?\d+(?:\.\d{2})?(?![\d.,\-/])"
-    r"|\d+\.\d{2}(?![\d.,\-/])"
-    r"|\d{1,2}\s?[A-Za-z]"
+# that is a digit is masked.
+_FALLBACK_MONEY = re.compile(
+    r"\$\s?\d{1,3}(?:,\d{3})*(?:\.\d{2})?(?![\d.,\-/])"
+    r"|(?<![\d.,\-/])\d{1,3}(?:,\d{3})+(?:\.\d{2})?(?![\d.,\-/])"
+    r"|(?<![\d.,\-/])\d+\.\d{2}(?![\d.,\-/])"
 )
-_MONEY_END = rf"(?![\d.,\-/]|(?!\s(?:{_MONEY_NEXT}))\s?\d)"
-_FALLBACK_KEEP = re.compile(
-    rf"\$\s?\d{{1,3}}(?:,\d{{3}})*(?:\.\d{{2}})?{_MONEY_END}"
-    rf"|(?<![\d.,\-/])\d{{1,3}}(?:,\d{{3}})+(?:\.\d{{2}})?{_MONEY_END}"
-    rf"|(?<![\d.,\-/])\d+\.\d{{2}}{_MONEY_END}"
-    r"|(?<![\d.,\-/])\d{1,2}/\d{1,2}/(?:\d{4}|\d{2})(?![\d.,\-/])"
+_FALLBACK_DATE_YEAR = re.compile(
+    r"(?<![\d.,\-/])\d{1,2}/\d{1,2}/(?:\d{4}|\d{2})(?![\d.,\-/])"
     r"|(?<![\d.,\-/])(?:19[5-9]\d|20[0-4]\d)(?![\d.,\-/]|\s?\d)"
 )
+# What may follow an amount with no letter in between: another amount (a
+# table row), or a row number that starts the next row ("120.00 02 May").
+_FALLBACK_GAP = re.compile(r"[^A-Za-z0-9]*")
+_FALLBACK_ROW_NUMBER = re.compile(r"\d{1,2} ?[A-Za-z]")
 # An SSN or EIN in exact shape, any separators: its last four stay readable
 # so the full number restored from OCR can be matched to it.
 _FALLBACK_ID = re.compile(
     r"(?<!\d)\d{3}[-. ]?\d{2}[-. ]?\d{4}(?!\d)|(?<!\d)\d{2}[-. ]?\d{7}(?!\d)"
 )
+
+
+def _digit_count(text: str) -> int:
+    return sum(c.isdigit() for c in text)
+
+
+def _money_chains(normalized: str) -> list[list[re.Match]]:
+    """Amounts that stay readable, as chains of amounts joined by no letter.
+
+    An SSN read with a dot or comma looks like an amount ("912.34"), and its
+    other groups follow it across spaces, dashes or symbols ("912.34 - 5678",
+    "912.34 56.78", "9.12 3.45 6.78"). So an amount stays readable only when
+    every digit group after it, up to the next letter, is an amount too or a
+    row number, and no run of joined amounts holds nine digits (or an amount
+    holds nine digits before its cents) — the size of an SSN or EIN.
+    """
+    chains: list[list[re.Match]] = []
+    chain: list[re.Match] = []
+    matches = list(_FALLBACK_MONEY.finditer(normalized))
+    for n, m in enumerate(matches):
+        gap = _FALLBACK_GAP.match(normalized, m.end()).end()
+        nxt = matches[n + 1] if n + 1 < len(matches) else None
+        joined_next = nxt is not None and nxt.start() <= gap
+        chain.append(m)
+        if joined_next:
+            continue
+        ok = (
+            gap >= len(normalized)
+            or not normalized[gap].isdigit()
+            or _FALLBACK_ROW_NUMBER.match(normalized, gap) is not None
+        )
+        if ok:
+            chains.append(chain)
+        chain = []
+    safe: list[list[re.Match]] = []
+    for chain in chains:
+        whole = [_digit_count(m.group().split(".")[0]) >= 9 for m in chain]
+        sizes = [_digit_count(m.group()) for m in chain]
+        bad = set(i for i, w in enumerate(whole) if w)
+        for i in range(len(chain)):
+            total = 0
+            for j in range(i, len(chain)):
+                total += sizes[j]
+                if total == 9:
+                    bad.update(range(i, j + 1))
+                if total >= 9:
+                    break
+        safe.append([m for i, m in enumerate(chain) if i not in bad])
+    return safe
 
 
 def mask_text_for_model(text: str) -> str:
@@ -1198,22 +1243,13 @@ def mask_text_for_model(text: str) -> str:
     normalized = normalize_confusions(re.sub(r"[\r\n]", " ", text))
     out = list(text)
     kept = [False] * len(text)
-    keeps = list(_FALLBACK_KEEP.finditer(normalized))
-    # Two amounts side by side whose digits add up to nine could be the
-    # groups of an SSN or EIN read with dots or commas ("912.34 56.78"):
-    # neither stays readable.
-    dropped: set[int] = set()
-    for n in range(len(keeps) - 1):
-        a, b = keeps[n], keeps[n + 1]
-        if normalized[a.end():b.start()].strip():
-            continue
-        if sum(c.isdigit() for c in a.group() + b.group()) == 9:
-            dropped.update((n, n + 1))
-    for n, m in enumerate(keeps):
-        if n in dropped:
-            continue
+    for m in _FALLBACK_DATE_YEAR.finditer(normalized):
         for i in range(m.start(), m.end()):
             kept[i] = True
+    for chain in _money_chains(normalized):
+        for m in chain:
+            for i in range(m.start(), m.end()):
+                kept[i] = True
     for m in _FALLBACK_ID.finditer(normalized):
         digits = [i for i in range(m.start(), m.end()) if normalized[i].isdigit()]
         for i in digits:

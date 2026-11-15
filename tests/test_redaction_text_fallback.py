@@ -53,6 +53,12 @@ def _no_full_identifier(text: str) -> None:
         "912,34,5678",
         "5678\n34\nRecipient's TIN 912",
         "9 line 1 text 2 more 3 x 4 y 5 z 6 q 7 w 8",
+        # Amounts side by side may stay readable (a table row), but not two
+        # money-shaped groups that together are nine digits.
+        "912.34 56.78",
+        "912.34 5,678",
+        "9,123 456.78",
+        "912.34 56 78",
     ],
 )
 def test_identifiers_and_near_identifiers_are_masked(line):
@@ -75,6 +81,10 @@ def test_an_exact_identifier_keeps_its_last_four():
         "Date 04/15/2026",
         "Premium $1,450 SLCSP 1520.00",
         "Tax year 2025",
+        # Table rows: amounts side by side, a row number on the next line.
+        "Wages 78,000.00 6,100.00\n78,000.00 4,836.00",
+        "January 1,450.00 1,520.00 120.00\nFebruary 1,450.00",
+        "Annual Totals 17,400.00 18,240.00 9,800.00",
     ],
 )
 def test_money_dates_and_years_stay_readable(line):
@@ -87,6 +97,7 @@ def test_money_dates_and_years_stay_readable(line):
         ("Austin, TX 78701-1234", "Austin, TX XXXXX-1234"),
         ("Phone (512) 555-0100", "Phone (XXX) XXX-XXXX"),
         ("Box 1 Wages", "Box X Wages"),
+        ("January 1,520.00 120.00\n02 February", "January 1,520.00 120.00\nXX February"),
         ("Control number NW-2025-004417", "Control number NW-XXXX-XXXXXX"),
     ],
 )

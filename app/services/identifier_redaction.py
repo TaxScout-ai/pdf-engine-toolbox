@@ -1152,12 +1152,22 @@ _MASK = "X"
 
 
 # What stays readable in fallback text (TAX-9543): amounts written as money
-# (a "$", thousands separators or cents, and no further digit group joined to
-# them), dates, and years. Everything else that is a digit is masked.
+# (a "$", thousands separators or cents), dates, and years. Everything else
+# that is a digit is masked. An amount may not have another digit group
+# joined to it ("912.34 5678" is an SSN read with a dot), except a next
+# amount in the same table row or a row number ("78,000.00 6,100.00",
+# "120.00 12 May"): OCR cannot turn the groups of an SSN into two amounts.
+_MONEY_NEXT = (
+    r"(?:\$\s?)?\d{1,3}(?:,\d{3})+(?:\.\d{2})?(?![\d.,\-/])"
+    r"|\$\s?\d+(?:\.\d{2})?(?![\d.,\-/])"
+    r"|\d+\.\d{2}(?![\d.,\-/])"
+    r"|\d{1,2}\s?[A-Za-z]"
+)
+_MONEY_END = rf"(?![\d.,\-/]|(?!\s(?:{_MONEY_NEXT}))\s?\d)"
 _FALLBACK_KEEP = re.compile(
-    r"\$\s?\d{1,3}(?:,\d{3})*(?:\.\d{2})?(?![\d.,\-/]|\s?\d)"
-    r"|(?<![\d.,\-/])\d{1,3}(?:,\d{3})+(?:\.\d{2})?(?![\d.,\-/]|\s?\d)"
-    r"|(?<![\d.,\-/])\d+\.\d{2}(?![\d.,\-/]|\s?\d)"
+    rf"\$\s?\d{{1,3}}(?:,\d{{3}})*(?:\.\d{{2}})?{_MONEY_END}"
+    rf"|(?<![\d.,\-/])\d{{1,3}}(?:,\d{{3}})+(?:\.\d{{2}})?{_MONEY_END}"
+    rf"|(?<![\d.,\-/])\d+\.\d{{2}}{_MONEY_END}"
     r"|(?<![\d.,\-/])\d{1,2}/\d{1,2}/(?:\d{4}|\d{2})(?![\d.,\-/])"
     r"|(?<![\d.,\-/])(?:19[5-9]\d|20[0-4]\d)(?![\d.,\-/]|\s?\d)"
 )
@@ -1188,7 +1198,20 @@ def mask_text_for_model(text: str) -> str:
     normalized = normalize_confusions(re.sub(r"[\r\n]", " ", text))
     out = list(text)
     kept = [False] * len(text)
-    for m in _FALLBACK_KEEP.finditer(normalized):
+    keeps = list(_FALLBACK_KEEP.finditer(normalized))
+    # Two amounts side by side whose digits add up to nine could be the
+    # groups of an SSN or EIN read with dots or commas ("912.34 56.78"):
+    # neither stays readable.
+    dropped: set[int] = set()
+    for n in range(len(keeps) - 1):
+        a, b = keeps[n], keeps[n + 1]
+        if normalized[a.end():b.start()].strip():
+            continue
+        if sum(c.isdigit() for c in a.group() + b.group()) == 9:
+            dropped.update((n, n + 1))
+    for n, m in enumerate(keeps):
+        if n in dropped:
+            continue
         for i in range(m.start(), m.end()):
             kept[i] = True
     for m in _FALLBACK_ID.finditer(normalized):

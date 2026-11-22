@@ -1,0 +1,49 @@
+{
+  "issue": "TAX-11151",
+  "base": "76a51fa8b1a75b2b8681df9c5e7c3e5cdf449ebc",
+  "reviewedFilesSha256": {
+    "app/services/table_native_coverage.py": "c903e32fc8f5c0c83bc3a3f7ec03be3c6d5ed5256fe67e7ecac4f006f7570b70",
+    "app/services/table_pipeline.py": "1eb6851b37b740c86cbf3da7c18bc0136e5d1aa2dd8e93247bd5cc2d10ffdc9c",
+    "tests/test_native_table_coverage.py": "fdaf8ec33478b0d6838adbf149d8c13654eb30a95fbcd398193499f02416da21",
+    "product-updates/fragments/tax-11151-incomplete-financial-tables.json": "452957e172f2a381985afdd6459bf65ae0b361ecd2b73cd94e838c8daa986fcd"
+  },
+  "reviews": [
+    {
+      "role": "independent checker",
+      "agent": "coverage_checker",
+      "round": 3,
+      "verdict": "PASS",
+      "resolved": [
+        "Prose false-positive excluded by trailing aligned monetary columns.",
+        "Latest visible paint sequence calculated once, within bounded work."
+      ]
+    },
+    {
+      "role": "adversarial",
+      "agent": "coverage_adversarial",
+      "round": 3,
+      "verdict": "CLEAN",
+      "resolved": [
+        "Thin rules and transparent fills no longer suppress visible amounts.",
+        "Hidden duplicate text does not erase visible amounts.",
+        "Invisible prose cannot suppress omitted financial rows."
+      ],
+      "independentChecks": "16 direct regression checks passed"
+    }
+  ],
+  "validation": {
+    "pytest": "93 passed, 1 unrelated Starlette deprecation warning in 15.11s",
+    "realNativePages": 21,
+    "unchangedExtractedTables": 21,
+    "correctedFalseCompleteStatuses": 2,
+    "agplSourceTree": "PASS",
+    "productFragment": "PASS"
+  },
+  "limitations": [
+    "Current source tested on an isolated older image carrying identical pinned OCR/PyMuPDF runtime versions and hash-verified models; not exact production-image qualification.",
+    "Private source-only pilot labels are single-agent; independent CPA corpus qualification remains TAX-6878.",
+    "Detects strong monetary rows outside found tables, not all missed cells or a proof of complete extraction.",
+    "No tax facts, amounts, approvals, production data or runtime configuration changed.",
+    "Production deployment pending."
+  ]
+}

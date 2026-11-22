@@ -7,6 +7,7 @@ import structlog
 from app.config import settings
 from app.services import rapid_ocr, table_ocr
 from app.services.ocr_preprocessing import text_layer_quality
+from app.services.table_native_coverage import coverage_reason
 
 log = structlog.get_logger()
 
@@ -55,10 +56,13 @@ def read_page(source, index: int, params: dict) -> dict:
                     if tables or strategy == "pymupdf":
                         blank = (not page.get_text().strip() and not page.get_images()
                                  and not page.get_drawings())
+                        missing = coverage_reason(page, tables)
                         result = {
                             "page_index": index, "tables": tables, "source": "native_pdf",
-                            "status": "complete" if tables else "empty" if blank else "unsupported",
-                            "reason": None if tables else "blank_page" if blank else "native_table_not_resolved",
+                            "status": ("unsupported" if missing else "complete" if tables
+                                       else "empty" if blank else "unsupported"),
+                            "reason": missing or (None if tables else "blank_page" if blank
+                                                  else "native_table_not_resolved"),
                         }
         except MemoryError:
             raise
@@ -77,9 +81,13 @@ def read_page(source, index: int, params: dict) -> dict:
     # Geometry warnings remain visible for review; a complete native table does
     # not justify loading a second model and replacing its correct text.
     # Neither current table reader qualifies sideways native financial layouts.
-    # A second header-only detection must not turn this abstention into success.
+    # A second header-only detection must not turn orientation or known missing
+    # native rows into success; no fallback has qualified that missing region.
     needs_fallback = (result["status"] in ("unsupported", "failed")
-                      and result.get("reason") != "native_text_orientation_unresolved")
+                      and result.get("reason") not in {
+                          "native_text_orientation_unresolved", "native_financial_rows_omitted",
+                          "native_financial_coverage_limit",
+                      })
     if strategy == "auto" and needs_fallback and settings.table_fallback == "docling":
         claim = params.get("claim_fallback")
         allowed = claim() if callable(claim) else params.get("allow_fallback", True)

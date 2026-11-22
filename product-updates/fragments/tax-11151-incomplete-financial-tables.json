@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "id": "tax-11151-incomplete-financial-tables",
+  "audience": "design_partners",
+  "category": "fix",
+  "customerVisible": true,
+  "title": "Flag financial rows missed by table extraction",
+  "summary": "A recognized statement header no longer makes a page look complete when aligned financial amounts below it were missed.",
+  "bodyMarkdown": "## What changed\n\nTable extraction flags a partial result when it finds clear financial rows outside the tables it recognized. The tables and source highlights already found remain available.\n\n## Why it matters\n\nA statement can have a readable header while its financial rows are missing. The result now keeps that gap visible for review. This check does not approve amounts or tax facts, and it does not guarantee every row was found.\n\n## Where to find it\n\nUse Extract Tables in the PDF toolbox. Incomplete results remain marked for review.",
+  "fromFeedback": false,
+  "channels": {"widget": true, "inApp": true, "email": false},
+  "cta": null,
+  "email": null,
+  "screenshot": {"required": false, "captureInstructions": null, "altText": null},
+  "relatedLinearIssueIds": ["TAX-11151", "TAX-6878"]
+}

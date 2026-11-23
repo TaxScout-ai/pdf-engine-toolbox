@@ -124,3 +124,11 @@ def test_overlapping_description_words_do_not_establish_visible_source():
     with bank() as doc:
         doc[0].insert_text((130, 104), 'Other', fontsize=8)
         assert table_native_bank.recover_bank_table(doc[0], 0) == []
+
+
+def test_overlapping_header_words_cannot_establish_column_boundaries():
+    with bank(header=False) as doc:
+        for x, text in [(40,'Date'), (125,'Description'), (330,'Money'), (345,'out'),
+                        (415,'Money'), (430,'in'), (525,'Balance')]:
+            doc[0].insert_text((x, 56), text, fontsize=8)
+        assert table_native_bank.recover_bank_table(doc[0], 0) == []

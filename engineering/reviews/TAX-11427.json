@@ -1,0 +1,39 @@
+{
+  "issue": "TAX-11427",
+  "base": "df29f25ed1f9c2df8eb9c10f9d6af470a259db7a",
+  "reviewedFilesSha256": {
+    "app/services/table_native_bank.py": "8315040aa19d347caeb05ac59f6e9044fa6754973ed52d47d582d253b2eff5c8",
+    "app/services/pdf_service.py": "6e4edca127236a3a63521a6015949a0e0d04268b9b46950027d1ec5b3e935ead",
+    "app/config.py": "e61464cd64b684d614a17bed78fb5f815da9b977e41e816cd9415d4b675e77e3",
+    "tests/test_native_bank_table.py": "2428fc4a4c896fd43adb27a689862c64bf63b84f7af87ef6099211975cb3fd7b"
+  },
+  "status": "founder_decision_required_at_review_cap",
+  "reviews": [
+    {
+      "role": "independent checker",
+      "agent": "coverage_checker",
+      "round": 3,
+      "verdict": "PASS before final header guard"
+    },
+    {
+      "role": "adversarial",
+      "agent": "coverage_adversarial",
+      "round": 3,
+      "verdict": "P2 header overlap accepted",
+      "resolution": "Same two-line adjacent-word overlap check now applied to header, with exact reproducer regression. Local tests pass; this final delta has not received an additional independent review."
+    }
+  ],
+  "validation": {
+    "pytest": "200 passed, 1 deselected, 1 warning in 37.22s",
+    "deselected": "Optional Docling adapter requires unavailable dependency; no Docling support claim",
+    "realReference": "6/6 exact monetary cells,6/6 contained BBOX,zero wrong signs or column conflicts",
+    "pairedNativePages": 50,
+    "changedPages": 1
+  },
+  "limitations": [
+    "Private reference labels single-agent; broad CPA corpus remains TAX-6878",
+    "Current source mounted over matching pinned runtime, not exact production-image qualification",
+    "Final post-round3 header guard awaits founder decision; PR stays Draft",
+    "No deployment, tax fact approval or runtime configuration change"
+  ]
+}

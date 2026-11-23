@@ -39,6 +39,8 @@ def recover_bank_table(page, page_index):
         return []
     start = headers[0]
     h = lines[start]
+    if any(a[2] > b[0]+.1 for a, b in zip(h, h[1:])):
+        return []
     edges = [h[0][0]-2, h[1][0]-2, h[2][0]-2,
              (h[3][2]+h[4][0])/2, (h[5][2]+h[6][0])/2, h[6][2]+2]
     if any(b <= a for a, b in zip(edges, edges[1:])):

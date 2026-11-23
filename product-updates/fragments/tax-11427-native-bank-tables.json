@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "id": "tax-11427-native-bank-tables",
+  "audience": "design_partners",
+  "category": "improvement",
+  "customerVisible": true,
+  "title": "Read supported bank tables without vertical rules",
+  "summary": "Supported digital bank statements retain transaction columns and source highlights even without a full grid.",
+  "bodyMarkdown": "## What changed\n\nNative PDF table extraction supports the Date, Description, Money out, Money in and Balance layout. Empty amounts remain empty and each cell retains its source coordinates.\n\n## Why it matters\n\nSupported bank statements no longer lose their transaction table because it lacks vertical rules. Wrapped or ambiguous rows remain unsupported; this does not approve transactions or tax facts.\n\n## Where to find it\n\nUse Extract Tables in the PDF toolbox. Scanned borderless tables are outside this change.",
+  "fromFeedback": false,
+  "channels": {
+    "widget": true,
+    "inApp": true,
+    "email": false
+  },
+  "cta": null,
+  "email": null,
+  "screenshot": {
+    "required": false,
+    "captureInstructions": null,
+    "altText": null
+  },
+  "relatedLinearIssueIds": [
+    "TAX-11427",
+    "TAX-6878"
+  ]
+}

@@ -45,6 +45,8 @@ class Settings(BaseSettings):
     table_fallback: Literal["none", "docling"] = "none"
     docling_model_dir: str = "/opt/docling/models"
     table_fallback_max_pages: int = Field(default=4, ge=0, le=50)
+    # Native five-column bank statements; no additional model or runtime.
+    native_bank_tables_enabled: bool = True
 
     # OCR job queue (TAX-6876). Every /text/ocr request is a persistent job:
     # its bytes are spilled under OCR_QUEUE_DIR and its state is kept in a

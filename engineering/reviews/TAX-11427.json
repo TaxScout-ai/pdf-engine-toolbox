@@ -7,7 +7,7 @@
     "app/config.py": "e61464cd64b684d614a17bed78fb5f815da9b977e41e816cd9415d4b675e77e3",
     "tests/test_native_bank_table.py": "2428fc4a4c896fd43adb27a689862c64bf63b84f7af87ef6099211975cb3fd7b"
   },
-  "status": "founder_decision_required_at_review_cap",
+  "status": "passed",
   "reviews": [
     {
       "role": "independent checker",
@@ -21,6 +21,15 @@
       "round": 3,
       "verdict": "P2 header overlap accepted",
       "resolution": "Same two-line adjacent-word overlap check now applied to header, with exact reproducer regression. Local tests pass; this final delta has not received an additional independent review."
+    },
+    {
+      "role": "adversarial",
+      "agent": "coverage_adversarial",
+      "round": 4,
+      "scope": "Founder-authorized one narrow header-only verification after continue instruction on 2026-11-25",
+      "reviewedCommit": "9fc9094b94a909081c1b33d39f9c1ffd38fc8aba",
+      "verdict": "CLEAN",
+      "validation": "2 passed in 0.24s; original overlapping header unsupported/zero tables; valid header complete/20 cells"
     }
   ],
   "validation": {
@@ -33,7 +42,6 @@
   "limitations": [
     "Private reference labels single-agent; broad CPA corpus remains TAX-6878",
     "Current source mounted over matching pinned runtime, not exact production-image qualification",
-    "Final post-round3 header guard awaits founder decision; PR stays Draft",
     "No deployment, tax fact approval or runtime configuration change"
   ]
 }

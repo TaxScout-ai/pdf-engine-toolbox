@@ -1533,6 +1533,10 @@ def _extract_tables_pymupdf(doc, page_idx: int) -> list[dict]:
             "row_count": len(rows),
             "col_count": len(rows[0]) if rows else 0,
         })
+    from app.config import settings
+    if not results and settings.native_bank_tables_enabled:
+        from app.services.table_native_bank import recover_bank_table
+        return recover_bank_table(page, page_idx)
     from app.services.table_native_geometry import refine_native_highlights
     refine_native_highlights(page, [cell for table in results for cell in table['cells']])
     for table in results:

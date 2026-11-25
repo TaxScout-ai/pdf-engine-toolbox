@@ -343,7 +343,13 @@ threads).
 
 `POST /text/tables` preserves the table list and adds explicit page outcomes.
 Digital pages whose text passes the quality gate use PyMuPDF `find_tables`
-(no model). Other pages, and digital pages where PyMuPDF finds nothing, are read from the
+(no model). If it finds no ruled table, a bounded native reader also supports
+the single-line bank layout `Date / Description / Money out / Money in / Balance`.
+It requires at least two dated rows, preserves empty columns and exact text
+geometry, and abstains on ambiguous continuations, amounts or source geometry.
+This reader is enabled for everyone using the new engine image; set
+`NATIVE_BANK_TABLES_ENABLED=false` as a kill switch. It adds no model and does
+not approve transactions or tax facts. Other pages, and digital pages where neither reader finds a table, are read from the
 page image (`app/services/table_ocr.py`), rendered at `dpi` capped at 216:
 
 - **Where:** ruled tables only. Long horizontal and vertical strokes are kept

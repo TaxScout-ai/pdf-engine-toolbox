@@ -71,10 +71,16 @@ because the two archives are approximately 150 MB combined.
 
 ## Development
 
-Install Python 3.12 dependencies from `requirements.txt`, configure the values
-documented in `.env.example`, and run:
+Use a fresh Python 3.12 virtual environment. RapidOCR requires headless OpenCV
+and RapidTable requires the regular distribution. Install them in separate
+directories so pip cannot overwrite their shared `cv2` module. The Docker
+image uses the same arrangement. Configure the values in `.env.example` and run:
 
 ```bash
+export PYTHONPATH="$VIRTUAL_ENV/opencv-headless"
+python -m pip install --no-deps --target "$PYTHONPATH" "$(grep '^opencv-python-headless==' requirements.txt)"
+python -m pip install -r requirements.txt
+python -m pip check
 uvicorn app.main:app --reload
 ```
 
@@ -98,7 +104,7 @@ RapidOCR is the planned production engine: responses carry
 kept so readers of the old shape keep working, and nothing in the engine
 depends on it.
 
-The pinned runtime is RapidOCR 3.9.2 + ONNX Runtime 1.30.0, CPU only, using
+The pinned runtime is RapidOCR 3.10.0 + ONNX Runtime 1.30.0, CPU only, using
 PP-OCRv6 Small detection/recognition and the mobile v2 line classifier. Public
 weights (31,749,509 bytes total) can be provisioned before startup from these
 versioned upstream locations; the service verifies their SHA-256 before loading:
@@ -407,7 +413,7 @@ remain unchanged.
 ## Primary review OCR and rollback (TAX-6713)
 
 `/text/ocr` now defaults to `OCR_BACKEND=rapid`, using PP-OCRv6 Small with
-RapidOCR 3.9.2 / ONNX Runtime 1.30.0. Keep `WORKERS=1`: one lazily loaded engine,
+RapidOCR 3.10.0 / ONNX Runtime 1.30.0. Keep `WORKERS=1`: one lazily loaded engine,
 serialized inference, and one rendered page at a time. Usable native PDF text
 skips inference. The image includes SHA-256-verified weights in
 `/opt/rapidocr/models`; failed downloads abort the build and missing/mismatched

@@ -325,3 +325,44 @@ def test_route_text_layer_only_still_redacts_a_digital_pdf(client, auth_headers)
     out = fitz.open(stream=base64.b64decode(data["pdf_base64"]), filetype="pdf")[0].get_text()
     assert SSN not in out and EIN not in out
     assert "5678" in out
+
+
+def test_check_pass_reocrs_only_the_pages_it_blacked_out():
+    """TAX-11691: a scanned page with nothing to black out is not OCR'd twice."""
+    scan, positions = _scanned_w2()
+    doc = fitz.open(stream=scan, filetype="pdf")
+    blank = fitz.open()
+    blank_page = blank.new_page(width=612, height=792)
+    blank_page.insert_text((72, 100), "Wages statement continued", fontsize=11)
+    pix = blank_page.get_pixmap(dpi=150)
+    page = doc.new_page(width=612, height=792)
+    page.insert_image(page.rect, stream=pix.tobytes("png"))
+    two_pages = doc.tobytes()
+
+    reader = _pixel_reading_ocr(positions["__words__"])
+    calls: list[list[int]] = []
+
+    def ocr(pdf_bytes: bytes, pages: list[int]) -> dict[int, list[ir.Word]]:
+        calls.append(list(pages))
+        read = reader(pdf_bytes, [p for p in pages if p == 0])
+        return read | {p: [] for p in pages if p != 0}
+
+    result = ir.redact_identifiers(two_pages, ocr=ocr)
+    assert result["ocr_pages"] == [0, 1]
+    assert calls == [[0, 1], [0]]
+    assert {r["last4"] for r in result["redactions"]} == {"5678", "4567", "6789", "0021"}
+
+
+def test_check_pass_still_fails_closed_on_a_boxed_page(monkeypatch):
+    monkeypatch.setattr(fitz.Page, "apply_redactions", lambda self, **_: None)
+    scan, positions = _scanned_w2()
+    calls: list[list[int]] = []
+    reader = _pixel_reading_ocr(positions["__words__"])
+
+    def ocr(pdf_bytes: bytes, pages: list[int]) -> dict[int, list[ir.Word]]:
+        calls.append(list(pages))
+        return reader(pdf_bytes, pages)
+
+    with pytest.raises(ir.RedactionIncompleteError):
+        ir.redact_identifiers(scan, ocr=ocr)
+    assert calls == [[0], [0]]

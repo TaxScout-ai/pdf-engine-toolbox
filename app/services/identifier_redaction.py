@@ -1091,13 +1091,19 @@ def redact_identifiers(
     redacted = doc.tobytes(garbage=4, deflate=True)
 
     # The check: search the redacted document the same way, OCR included for
-    # every page that needed it the first time.
+    # every page that needed it the first time and was changed. A page with no
+    # black box is the page the scan already read and cleared (any identifier
+    # or suspect run there raised or was boxed), so OCR'ing it again only
+    # repeats that reading and doubled the time of a long scan (TAX-11691).
+    # The text layer of every page is still searched.
     check_doc = fitz.open(stream=redacted, filetype="pdf")
     remaining: list[Found] = []
     suspect_left: list[int] = []
     for i, page in enumerate(check_doc):
         remaining.extend(find_identifiers(i, text_layer_words(page), "text_layer", page))
-    if ocr_pages:
+    boxed = {f.page for f in found}
+    check_pages = [i for i in ocr_pages if i in boxed]
+    if check_pages:
         # The unread-print test of the check pass knows our own black boxes
         # (TAX-9096): they carry no print, and two boxes on neighbouring table
         # rows must not turn the paper strip between them into "light print on
@@ -1107,7 +1113,7 @@ def redact_identifiers(
             fills.setdefault(f.page, []).extend(r + (0, -2, 0, 2) for r in f.rects)
         token = _OWN_FILLS.set(fills)
         try:
-            check = ocr(redacted, ocr_pages)
+            check = ocr(redacted, check_pages)
         finally:
             _OWN_FILLS.reset(token)
         for i, words in check.items():

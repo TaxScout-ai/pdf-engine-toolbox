@@ -8,6 +8,7 @@ they are provisioned (RAPIDOCR_MODEL_DIR).
 """
 
 import json
+import sys
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -165,6 +166,27 @@ def test_scanned_table_is_read_from_the_image(client, auth_headers, fake_engines
     assert table["bbox"]["x1"] == pytest.approx(372, abs=3)
     assert table["bbox"]["y1"] == pytest.approx(152, abs=3)
     assert len(fake_engines.table.crops) == 1
+
+
+@pytest.mark.parametrize(("first", "second", "expected"), [
+    ("1 Interest income $ 325.67", "2 Early withdrawal penalty $ 0.00", "unsupported"),
+    ("1 Interest income", "$ 325.67", "complete"),
+    ("2 Early withdrawal penalty ($123.45)", "", "unsupported"),
+])
+def test_1099_int_label_amount_assignment(client, auth_headers, fake_engines, monkeypatch,
+                                           first, second, expected):
+    rows = [["Form 1099-INT", "2025", "Copy B"], [first, second, ""]]
+    monkeypatch.setattr(sys.modules[__name__], "ROWS", rows)
+    response = _post(client, auth_headers, _scan_of(_create_pdf_with_table()), {"strategy": "auto"})
+    assert response.status_code == 200
+    data = response.json()["data"]
+    outcome = data["pages"][0]
+    assert outcome["status"] == expected
+    assert data["status"] == ("partial" if expected == "unsupported" else "complete")
+    if expected == "unsupported":
+        assert outcome["reason"] == "1099_int_label_and_amount_merged"
+        cell = next(c for c in data["tables"][0]["cells"] if c["raw_text"] == first)
+        assert cell["page_index"] == 0 and cell["bbox"]["x1"] > cell["bbox"]["x0"]
 
 
 def test_digital_page_without_a_pymupdf_table_falls_back_to_the_image(

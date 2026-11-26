@@ -37,6 +37,23 @@ def _bbox(l, t, r, b):
     return SimpleNamespace(to_top_left_origin=lambda height: SimpleNamespace(l=l, t=t, r=r, b=b))
 
 
+def test_region_failure_keeps_merged_interest_evidence(monkeypatch):
+    import fitz
+    monkeypatch.setattr(settings, "table_fallback", "docling")
+    table = {"warnings": ["1099_int_label_and_amount_merged"]}
+    primary = {"status": "failed", "tables": [table], "reason": "table_region_failed",
+               "page_index": 0, "source": "rapidtable"}
+    monkeypatch.setattr(table_ocr, "read_page_result", lambda *args, **kwargs: primary.copy())
+    fallback = Mock()
+    monkeypatch.setattr(table_docling, "read_page_result", fallback)
+    with fitz.open() as pdf:
+        pdf.new_page()
+        result = table_pipeline.read_page(pdf.tobytes(), 0, {"strategy": "auto"})
+    fallback.assert_not_called()
+    assert result["reason"] == "table_region_failed"
+    assert result["tables"] == [table]
+
+
 def test_fallback_budget_counts_only_unresolved_pages_under_parallel_workers(monkeypatch):
     import fitz
     from app.services import ocr_queue

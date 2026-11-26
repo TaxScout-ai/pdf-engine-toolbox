@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 2,
+  "id": "tax-6878-1099-int-cell-review",
+  "audience": "design_partners",
+  "category": "improvement",
+  "customerVisible": true,
+  "title": "Flag combined interest labels and amounts for review",
+  "summary": "Scanned 1099-INT tables flag a Box 1 or Box 2 amount joined to its label in one cell.",
+  "bodyMarkdown": "Extract Tables retains the recognized text and source location for review when a scanned 1099-INT combines an interest or early withdrawal label with its amount.",
+  "fromFeedback": false,
+  "channels": {
+    "widget": true,
+    "inApp": true,
+    "email": false
+  },
+  "cta": null,
+  "email": null,
+  "screenshot": {
+    "required": false,
+    "captureInstructions": null,
+    "altText": null
+  },
+  "relatedLinearIssueIds": [
+    "TAX-6878"
+  ],
+  "release": {
+    "feature": "TAX-6878",
+    "flag": "everyone",
+    "verify": {
+      "steps": [
+        "card-documents"
+      ]
+    },
+    "public": false
+  }
+}

@@ -84,6 +84,8 @@ def read_page(source, index: int, params: dict) -> dict:
     # A second header-only detection must not turn orientation or known missing
     # native rows into success; no fallback has qualified that missing region.
     needs_fallback = (result["status"] in ("unsupported", "failed")
+                      and not any(table_ocr.INT_MERGE_REASON in table.get("warnings", ())
+                                  for table in result["tables"])
                       and result.get("reason") not in {
                           "native_text_orientation_unresolved", "native_financial_rows_omitted",
                           "native_financial_coverage_limit",

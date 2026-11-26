@@ -24,6 +24,7 @@ threads; each worker builds its own.
 from __future__ import annotations
 
 import importlib.metadata
+import re
 import threading
 import time
 from pathlib import Path
@@ -49,6 +50,15 @@ MAX_DPI = 216
 MIN_REGION_SHARE = 0.005
 MIN_REGION_POINTS = 36
 MIN_CROSSINGS = 9
+
+# A 1099-INT box label and its printed amount are separate evidence roles.
+# Preserve the original cell for review when RapidTable assigns both to one box.
+_INT_FORM = re.compile(r"\b1099[\s\-‐‑–]*INT\b", re.I)
+_INT_BOX_WITH_AMOUNT = re.compile(
+    r"\b(?:1[.\s]*interest\s+income|2[.\s]*early\s+withdrawal\s+penalty)"
+    r"\s*[:.]?\s*[-(−]?\s*(?:\$\s*[-−]?\s*\d|\d[\d,]*\.\d{2}\b)", re.I,
+)
+INT_MERGE_REASON = "1099_int_label_and_amount_merged"
 
 _local = threading.local()
 
@@ -137,6 +147,7 @@ def read_tables(image_bgr: np.ndarray, page_width: float, page_height: float,
     boxes = np.asarray(read.boxes, dtype=float) if read.boxes is not None else np.zeros((0, 4, 2))
     texts = list(read.txts or [])
     scores = list(read.scores or [])
+    is_interest_form = bool(_INT_FORM.search(" ".join(texts)))
     engine = _get_engine()
     sx, sy = page_width / gray.shape[1], page_height / gray.shape[0]
     tables = TableReadResult()
@@ -212,6 +223,8 @@ def read_tables(image_bgr: np.ndarray, page_width: float, page_height: float,
                         geometry_status="available" if bounds else "unavailable")
         warnings = (["cell_geometry_unavailable"] if any(c["bbox"] is None for c in cells)
                     else [])
+        if is_interest_form and any(_INT_BOX_WITH_AMOUNT.search(c["raw_text"]) for c in cells):
+            warnings.append(INT_MERGE_REASON)
         width = max(len(row) for row in rows)
         rows = [row + [""] * (width - len(row)) for row in rows]
         tables.append({
@@ -285,6 +298,8 @@ def read_page_result(source, index: int, dpi: int, *, prefer_native: bool = Fals
         tables = read_tables(bgr, width, height, index, ocr_engine)
         if getattr(tables, "failed_regions", 0):
             return result("failed", tables, reason="table_region_failed")
+        if any(INT_MERGE_REASON in t.get("warnings", []) for t in tables):
+            return result("unsupported", tables, reason=INT_MERGE_REASON)
         if getattr(tables, "unresolved_regions", 0):
             return result("unsupported", tables, reason="table_region_unresolved")
         return result("complete", tables) if tables else result(

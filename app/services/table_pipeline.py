@@ -54,9 +54,15 @@ def read_page(source, index: int, params: dict) -> dict:
                 elif strategy == "pymupdf" or text_layer_quality(page)["accepted"]:
                     tables = pdf_service._extract_tables_pymupdf(doc, index)
                     if tables or strategy == "pymupdf":
-                        blank = (not page.get_text().strip() and not page.get_images()
+                        page_text = page.get_text()
+                        blank = (not page_text.strip() and not page.get_images()
                                  and not page.get_drawings())
                         missing = coverage_reason(page, tables)
+                        if table_ocr.is_interest_form(page_text):
+                            for table in tables:
+                                if table_ocr.has_merged_interest_amount(table.get("cells", [])):
+                                    table.setdefault("warnings", []).append(table_ocr.INT_MERGE_REASON)
+                                    missing = missing or table_ocr.INT_MERGE_REASON
                         result = {
                             "page_index": index, "tables": tables, "source": "native_pdf",
                             "status": ("unsupported" if missing else "complete" if tables

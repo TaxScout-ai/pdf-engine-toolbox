@@ -178,3 +178,30 @@ def test_visible_sideways_text_on_raster_background_cannot_bypass_abstention(mon
         assert result['status'] == 'unsupported'
         assert result['reason'] == 'native_text_orientation_unresolved'
         fallback.assert_not_called()
+
+
+@pytest.mark.parametrize("strategy", ["auto", "pymupdf"])
+def test_digital_interest_form_retains_combined_amount_for_review(strategy, monkeypatch):
+    import fitz
+    from app.services import pdf_service
+
+    with fitz.open() as doc:
+        page = doc.new_page()
+        page.insert_text((40, 40), "Form 1099-INT Interest Income")
+        raw = doc.tobytes()
+    cell = {"raw_text": "1 Interest income\n$286.46", "bbox": {"x0": 10, "y0": 20, "x1": 40, "y1": 50}}
+    table = {"cells": [cell], "warnings": ["cell_text_geometry_unresolved"]}
+    monkeypatch.setattr(pdf_service, "_extract_tables_pymupdf", lambda *args: [table])
+    monkeypatch.setattr(table_pipeline, "text_layer_quality", lambda page: {"accepted": True})
+    monkeypatch.setattr(table_pipeline, "coverage_reason", lambda page, tables: None)
+    result = table_pipeline.read_page(raw, 0, {"strategy": strategy})
+    assert result["status"] == "unsupported"
+    assert result["reason"] == "1099_int_label_and_amount_merged"
+    assert result["tables"][0]["warnings"] == ["cell_text_geometry_unresolved", result["reason"]]
+    assert result["tables"][0]["cells"] == [cell]
+
+
+@pytest.mark.parametrize("label", ["1-   Interest income", "2 – Early withdrawal penalty"])
+def test_interest_amount_after_dashed_box_label(label):
+    assert table_ocr.has_merged_interest_amount([{"raw_text": label + "\n$17.25"}])
+    assert not table_ocr.has_merged_interest_amount([{"raw_text": label}, {"raw_text": "$17.25"}])

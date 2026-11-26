@@ -39,9 +39,9 @@ from app.services.rapid_ocr_models import MODEL_HASHES, validate_models
 
 log = structlog.get_logger()
 
-PACKAGES = {"rapidocr": "3.9.2", "onnxruntime": "1.30.0"}
+PACKAGES = {"rapidocr": "3.10.0", "onnxruntime": "1.30.0"}
 # Change this when preprocessing, weights, or output semantics change.
-PROFILE = "rapid-3.9.2-ort-1.30.0-v6-small-prepared-word-v6"
+PROFILE = "rapid-3.10.0-ort-1.30.0-v6-small-prepared-word-v6"
 MAX_DPI = 216
 MAX_RENDER_PIXELS = 16_000_000
 

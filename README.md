@@ -98,7 +98,7 @@ RapidOCR is the planned production engine: responses carry
 kept so readers of the old shape keep working, and nothing in the engine
 depends on it.
 
-The pinned runtime is RapidOCR 3.9.2 + ONNX Runtime 1.30.0, CPU only, using
+The pinned runtime is RapidOCR 3.10.0 + ONNX Runtime 1.30.0, CPU only, using
 PP-OCRv6 Small detection/recognition and the mobile v2 line classifier. Public
 weights (31,749,509 bytes total) can be provisioned before startup from these
 versioned upstream locations; the service verifies their SHA-256 before loading:
@@ -407,7 +407,7 @@ remain unchanged.
 ## Primary review OCR and rollback (TAX-6713)
 
 `/text/ocr` now defaults to `OCR_BACKEND=rapid`, using PP-OCRv6 Small with
-RapidOCR 3.9.2 / ONNX Runtime 1.30.0. Keep `WORKERS=1`: one lazily loaded engine,
+RapidOCR 3.10.0 / ONNX Runtime 1.30.0. Keep `WORKERS=1`: one lazily loaded engine,
 serialized inference, and one rendered page at a time. Usable native PDF text
 skips inference. The image includes SHA-256-verified weights in
 `/opt/rapidocr/models`; failed downloads abort the build and missing/mismatched

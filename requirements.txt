@@ -20,7 +20,7 @@ pillow-heif==1.2.1
 # redaction and page orientation use RapidOCR; table structure on page images
 # uses RapidTable. Pinned weights are built into the image and hash-checked
 # (app/services/rapid_ocr_models.py).
-rapidocr==3.9.2
+rapidocr==3.10.0
 rapid-table==3.0.2
 onnxruntime==1.30.0
 # OCR queue encryption at rest (TAX-6876).

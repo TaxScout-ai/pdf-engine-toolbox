@@ -52,15 +52,23 @@ MIN_REGION_POINTS = 36
 MIN_CROSSINGS = 9
 
 # A 1099-INT box label and its printed amount are separate evidence roles.
-# Preserve the original cell for review when RapidTable assigns both to one box.
+# Preserve the original cell for review when a table reader assigns both to one box.
 _INT_FORM = re.compile(r"\b1099[\s\-‐‑–]*INT\b", re.I)
 _INT_BOX_WITH_AMOUNT = re.compile(
-    r"\b(?:1[.\s]*interest\s+income|2[.\s]*early\s+withdrawal\s+penalty)"
+    r"\b(?:1[.\s‐‑–—-]*interest\s+income|2[.\s‐‑–—-]*early\s+withdrawal\s+penalty)"
     r"\s*[:.]?\s*[-(−]?\s*(?:\$\s*[-−]?\s*\d|\d[\d,]*\.\d{2}\b)", re.I,
 )
 INT_MERGE_REASON = "1099_int_label_and_amount_merged"
 
 _local = threading.local()
+
+
+def is_interest_form(text):
+    return bool(_INT_FORM.search(text))
+
+
+def has_merged_interest_amount(cells):
+    return any(_INT_BOX_WITH_AMOUNT.search(cell.get("raw_text") or "") for cell in cells)
 
 
 def _get_engine():
@@ -147,7 +155,7 @@ def read_tables(image_bgr: np.ndarray, page_width: float, page_height: float,
     boxes = np.asarray(read.boxes, dtype=float) if read.boxes is not None else np.zeros((0, 4, 2))
     texts = list(read.txts or [])
     scores = list(read.scores or [])
-    is_interest_form = bool(_INT_FORM.search(" ".join(texts)))
+    interest_form = is_interest_form(" ".join(texts))
     engine = _get_engine()
     sx, sy = page_width / gray.shape[1], page_height / gray.shape[0]
     tables = TableReadResult()
@@ -223,7 +231,7 @@ def read_tables(image_bgr: np.ndarray, page_width: float, page_height: float,
                         geometry_status="available" if bounds else "unavailable")
         warnings = (["cell_geometry_unavailable"] if any(c["bbox"] is None for c in cells)
                     else [])
-        if is_interest_form and any(_INT_BOX_WITH_AMOUNT.search(c["raw_text"]) for c in cells):
+        if interest_form and has_merged_interest_amount(cells):
             warnings.append(INT_MERGE_REASON)
         width = max(len(row) for row in rows)
         rows = [row + [""] * (width - len(row)) for row in rows]

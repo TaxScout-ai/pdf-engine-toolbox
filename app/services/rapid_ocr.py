@@ -119,6 +119,10 @@ def _new_engine():
             "EngineConfig.onnxruntime.use_cuda": False,
         }
     )
+    # Orientation calls the detector and recognizer directly, including on the
+    # first job in a worker. RapidOCR 3.10 creates these sessions lazily.
+    engine._load_det_model()
+    engine._load_rec_model()
     with _engines_lock:
         _engines_created += 1
     log.info("rapidocr_engine_ready", profile=PROFILE, intra_op_threads=threads,

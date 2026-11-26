@@ -45,8 +45,14 @@ RUN apt-get update && \
 
 # Copy requirements first (Docker layer caching)
 COPY requirements.txt .
-RUN pip install --no-cache-dir setuptools && \
-    pip install --no-cache-dir -r requirements.txt
+# The two OpenCV wheels expose the same cv2 module. Keep their files in
+# separate directories and explicitly select the headless build at runtime.
+ENV PYTHONPATH=/opt/opencv-headless
+RUN pip install --no-cache-dir --no-deps --target "$PYTHONPATH" \
+        "$(grep '^opencv-python-headless==' requirements.txt)" && \
+    pip install --no-cache-dir setuptools && \
+    pip install --no-cache-dir -r requirements.txt && pip check && \
+    python -c "import cv2; assert cv2.__file__.startswith('/opt/opencv-headless/')"
 
 # Optional CPU-only image. The regular image does not install Torch or Docling.
 COPY requirements-docling.txt /tmp/requirements-docling.txt

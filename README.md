@@ -71,10 +71,16 @@ because the two archives are approximately 150 MB combined.
 
 ## Development
 
-Install Python 3.12 dependencies from `requirements.txt`, configure the values
-documented in `.env.example`, and run:
+Use a fresh Python 3.12 virtual environment. RapidOCR requires headless OpenCV
+and RapidTable requires the regular distribution. Install them in separate
+directories so pip cannot overwrite their shared `cv2` module. The Docker
+image uses the same arrangement. Configure the values in `.env.example` and run:
 
 ```bash
+export PYTHONPATH="$VIRTUAL_ENV/opencv-headless"
+python -m pip install --no-deps --target "$PYTHONPATH" "$(grep '^opencv-python-headless==' requirements.txt)"
+python -m pip install -r requirements.txt
+python -m pip check
 uvicorn app.main:app --reload
 ```
 

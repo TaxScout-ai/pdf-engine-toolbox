@@ -86,7 +86,7 @@ def read_page(source, index: int, params: dict) -> dict:
     needs_fallback = (result["status"] in ("unsupported", "failed")
                       and result.get("reason") not in {
                           "native_text_orientation_unresolved", "native_financial_rows_omitted",
-                          "native_financial_coverage_limit",
+                          "native_financial_coverage_limit", table_ocr.INT_MERGE_REASON,
                       })
     if strategy == "auto" and needs_fallback and settings.table_fallback == "docling":
         claim = params.get("claim_fallback")

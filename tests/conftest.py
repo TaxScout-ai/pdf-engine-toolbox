@@ -4,6 +4,8 @@ import hashlib
 import hmac
 import secrets
 import time
+import sys
+from types import ModuleType, SimpleNamespace
 
 import fitz  # PyMuPDF
 import pytest
@@ -11,6 +13,14 @@ from fastapi.testclient import TestClient
 
 from app.config import settings
 from app.main import app
+
+
+@pytest.fixture
+def stub_docling_stream(monkeypatch):
+    """Keep adapter tests with a fake converter independent of optional Docling."""
+    module = ModuleType("docling.datamodel.base_models")
+    module.DocumentStream = SimpleNamespace
+    monkeypatch.setitem(sys.modules, module.__name__, module)
 
 
 @pytest.fixture(autouse=True)

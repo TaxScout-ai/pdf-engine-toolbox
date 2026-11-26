@@ -146,7 +146,7 @@ def test_existing_spans_do_not_silently_turn_merged_rows_into_success():
     assert run(table, doc) == ([], 1)
 
 
-def test_adapter_quarantines_unsafe_tables_and_preserves_original_page(monkeypatch):
+def test_adapter_quarantines_unsafe_tables_and_preserves_original_page(monkeypatch, stub_docling_stream):
     from types import SimpleNamespace
     from app.services import table_docling
     doc, table = fixture()

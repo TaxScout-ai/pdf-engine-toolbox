@@ -136,7 +136,7 @@ def test_header_prose_in_transaction_quantity_requires_review():
     assert u==1 and 'native_financial_row_contaminated' in result[0]['warnings']
 
 
-def test_adapter_keeps_recovered_summary_on_its_original_document_page(monkeypatch):
+def test_adapter_keeps_recovered_summary_on_its_original_document_page(monkeypatch, stub_docling_stream):
     from types import SimpleNamespace as NS
     from app.services import table_docling
     one,t=summary_fixture(loss_value='0.00')
